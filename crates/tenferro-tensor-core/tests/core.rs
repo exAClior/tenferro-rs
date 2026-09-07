@@ -1,8 +1,8 @@
 use num_complex::{Complex32, Complex64};
 use tenferro_tensor_core::{
-    col_major_strides, DType, DynRank, ErrorKind, HostTensor, HostTensorView, Rank, ShapeMismatch,
-    SliceSpec, Tensor, TensorLayout, TensorRank, TensorRef, TensorScalar, ValidationError,
-    ValidationKind,
+    col_major_strides, DType, DynRank, ErrorKind, HostTensor, HostTensorView, IntoRankShape, Rank,
+    ShapeMismatch, ShapeVec, SliceSpec, Tensor, TensorLayout, TensorRank, TensorRef, TensorScalar,
+    ValidationError, ValidationKind,
 };
 
 #[test]
@@ -98,6 +98,62 @@ fn static_rank_rejects_wrong_shape_length() {
         ValidationError::RankMismatch {
             expected: 2,
             actual: 3
+        }
+    ));
+}
+
+#[test]
+fn rank_shape_conversion_accepts_static_and_runtime_inputs() {
+    let array = <[usize; 2] as IntoRankShape<Rank<2>>>::into_rank_shape([2, 3]).unwrap();
+    assert_eq!(array, [2, 3]);
+
+    let array_ref: &[usize; 2] = &[4, 5];
+    let array_ref = <&[usize; 2] as IntoRankShape<Rank<2>>>::into_rank_shape(array_ref).unwrap();
+    assert_eq!(array_ref, [4, 5]);
+
+    let vector = <Vec<usize> as IntoRankShape<Rank<2>>>::into_rank_shape(vec![6, 7]).unwrap();
+    assert_eq!(vector, [6, 7]);
+
+    let slice = <&[usize] as IntoRankShape<Rank<2>>>::into_rank_shape(&[8, 9][..]).unwrap();
+    assert_eq!(slice, [8, 9]);
+
+    let shape_vec =
+        <ShapeVec as IntoRankShape<Rank<2>>>::into_rank_shape(ShapeVec::from_vec(vec![10, 11]))
+            .unwrap();
+    assert_eq!(shape_vec, [10, 11]);
+
+    let dynamic = <[usize; 9] as IntoRankShape<DynRank>>::into_rank_shape([0; 9]).unwrap();
+    assert_eq!(dynamic.as_slice(), &[0; 9]);
+}
+
+#[test]
+fn rank_shape_conversion_rejects_wrong_runtime_rank() {
+    let vector = <Vec<usize> as IntoRankShape<Rank<2>>>::into_rank_shape(vec![1]).unwrap_err();
+    assert!(matches!(
+        vector,
+        ValidationError::RankMismatch {
+            expected: 2,
+            actual: 1
+        }
+    ));
+
+    let slice = <&[usize] as IntoRankShape<Rank<2>>>::into_rank_shape(&[1, 2, 3][..]).unwrap_err();
+    assert!(matches!(
+        slice,
+        ValidationError::RankMismatch {
+            expected: 2,
+            actual: 3
+        }
+    ));
+
+    let shape_vec =
+        <ShapeVec as IntoRankShape<Rank<2>>>::into_rank_shape(ShapeVec::from_vec(vec![]))
+            .unwrap_err();
+    assert!(matches!(
+        shape_vec,
+        ValidationError::RankMismatch {
+            expected: 2,
+            actual: 0
         }
     ));
 }

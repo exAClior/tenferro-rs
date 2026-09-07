@@ -5,11 +5,18 @@ use tenferro_ad::{AdContext, EagerRuntime, EagerTensor, Tensor};
 use tenferro_cpu::CpuBackend;
 use tenferro_linalg::{EagerTensorLinalgExt, TracedTensorLinalgExt};
 use tenferro_runtime::{DType, Error, ErrorPhase, TracedTensor, TypedTensor};
+use tenferro_tensor::Error as TensorError;
+
+fn single_thread_backend() -> CpuBackend {
+    let backend = CpuBackend::with_threads(1).unwrap();
+    assert_eq!(backend.num_threads(), 1);
+    backend
+}
 
 fn eager(data: Vec<f64>, shape: Vec<usize>) -> EagerTensor {
     EagerTensor::from_tensor_in(
         Tensor::from_vec_col_major(shape, data).unwrap(),
-        EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap(),
+        EagerRuntime::with_cpu_backend(single_thread_backend()).unwrap(),
     )
     .unwrap()
 }
@@ -17,7 +24,7 @@ fn eager(data: Vec<f64>, shape: Vec<usize>) -> EagerTensor {
 fn eager_complex(data: Vec<Complex64>, shape: Vec<usize>) -> EagerTensor {
     EagerTensor::from_tensor_in(
         Tensor::from_vec_col_major(shape, data).unwrap(),
-        EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap(),
+        EagerRuntime::with_cpu_backend(single_thread_backend()).unwrap(),
     )
     .unwrap()
 }
@@ -195,6 +202,27 @@ fn eager_norm_supports_zero_and_matrix_induced_orders() {
 }
 
 #[test]
+fn eager_spectral_norm_preserves_signed_and_complex_input() {
+    let signed = eager(vec![1.0, 1.0, 1.0, -1.0], vec![2, 2]);
+    let complex = eager_complex(
+        vec![
+            Complex64::new(0.0, 1.0),
+            Complex64::new(0.0, 1.0),
+            Complex64::new(0.0, 1.0),
+            Complex64::new(0.0, -1.0),
+        ],
+        vec![2, 2],
+    );
+
+    for order in [Some(2.0), Some(-2.0)] {
+        let signed_value = f64_values(&signed.norm(order, Some(&[0, 1]), false).unwrap());
+        let complex_value = f64_values(&complex.norm(order, Some(&[0, 1]), false).unwrap());
+        assert!((signed_value[0] - 2.0_f64.sqrt()).abs() < 1.0e-12);
+        assert!((complex_value[0] - 2.0_f64.sqrt()).abs() < 1.0e-12);
+    }
+}
+
+#[test]
 fn eager_composite_records_existing_primitives_for_backward() {
     let ad = AdContext::builder()
         .with_semantic_extension_rules(tenferro_linalg::semantic_ad_rules().unwrap())
@@ -303,6 +331,7 @@ fn traced_lstsq_symbolic_shape_keeps_dtype_and_rank_precedence() {
 fn eager_norm_covers_remaining_orders_permutations_and_errors() {
     let matrix = eager(vec![1.0, 3.0, 2.0, 4.0], vec![2, 2]);
     let tensor = eager(vec![1.0, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 0.0], vec![2, 2, 2]);
+    let empty = eager(vec![], vec![0, 2]);
 
     for order in [Some(2.0), Some(-2.0), Some(0.0), Some(3.0)] {
         matrix.norm(order, Some(&[0, 1]), false).unwrap();
@@ -316,4 +345,19 @@ fn eager_norm_covers_remaining_orders_permutations_and_errors() {
     assert!(tensor.norm(None, Some(&[0, 0]), false).is_err());
     assert!(tensor.norm(None, Some(&[3]), false).is_err());
     assert!(tensor.norm(Some(f64::NAN), None, false).is_err());
+    for error in [
+        empty.norm(None, Some(&[0, 0]), false).unwrap_err(),
+        tensor.norm(None, Some(&[0, 0]), false).unwrap_err(),
+    ] {
+        assert!(matches!(
+            error,
+            Error::TensorRuntime(TensorError::Validation {
+                op: "norm",
+                source: tenferro_tensor::ValidationError::DuplicateAxis {
+                    axis: 0,
+                    role: "dim"
+                }
+            })
+        ));
+    }
 }

@@ -82,13 +82,15 @@ class Finding:
 
 
 def rust_files(root: Path) -> list[Path]:
-    excluded = {".git", ".codegraph", "target"}
-    paths: list[Path] = []
-    for path in root.rglob("*.rs"):
-        if any(part in excluded for part in path.parts):
-            continue
-        paths.append(path)
-    return sorted(paths)
+    # Audit the live root and standalone extension sources, not other revisions.
+    tracked = subprocess.check_output(
+        ["git", "ls-files", "-z", "--", "crates", "ext"], cwd=root
+    ).decode().split("\0")
+    return sorted(
+        root / name for name in tracked
+        if name.endswith(".rs") and (root / name).is_file()
+        and not {".worktrees", "target", ".git"}.intersection(Path(name).parts)
+    )
 
 
 def brace_delta(line: str) -> int:

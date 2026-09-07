@@ -37,7 +37,7 @@ mod rank;
 
 pub use error::{ErrorKind, ShapeMismatch, ValidationError, ValidationKind};
 pub use layout::TensorLayout;
-pub use rank::{DynRank, Rank, TensorRank};
+pub use rank::{DynRank, IntoRankShape, Rank, TensorRank};
 
 /// Small tensor shape vector with inline capacity for common dynamic ranks.
 ///

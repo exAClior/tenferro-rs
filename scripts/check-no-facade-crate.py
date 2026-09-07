@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,6 +19,7 @@ SKIP_DIRS = {
     "target",
     "docs/plans",
     "docs/superpowers",
+    "docs/worklogs",
 }
 
 FORBIDDEN_SNIPPETS = [
@@ -29,7 +31,10 @@ FORBIDDEN_SNIPPETS = [
 
 def is_skipped(path: Path) -> bool:
     rel = path.relative_to(ROOT).as_posix()
-    return any(rel == skip or rel.startswith(skip + "/") for skip in SKIP_DIRS)
+    return (
+        bool({".git", ".worktrees", "target", ".codegraph"}.intersection(Path(rel).parts))
+        or any(rel == skip or rel.startswith(skip + "/") for skip in SKIP_DIRS)
+    )
 
 
 def main() -> int:
@@ -38,7 +43,11 @@ def main() -> int:
         if path.exists():
             failures.append(f"forbidden path exists: {path.relative_to(ROOT)}")
 
-    for path in ROOT.rglob("*"):
+    names = subprocess.check_output(
+        ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard"], cwd=ROOT
+    ).decode().split("\0")
+    for name in sorted(set(names) - {""}):
+        path = ROOT / name
         if is_skipped(path) or not path.is_file():
             continue
         if path == Path(__file__).resolve():

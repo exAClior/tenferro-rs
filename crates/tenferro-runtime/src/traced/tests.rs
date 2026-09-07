@@ -352,7 +352,7 @@ fn broadcast_in_dim_sym_defers_cross_tensor_symbolic_extent_validation() {
 fn reshape_rejects_concrete_element_count_mismatch_at_graph_build() {
     let x = TracedTensor::from_vec_col_major(vec![2, 2], vec![1.0_f64; 4]).unwrap();
 
-    let err = x.reshape(&[3]).unwrap_err();
+    let err = x.reshape([3]).unwrap_err();
 
     assert!(matches!(
         &err,
@@ -373,7 +373,7 @@ fn reshape_rejects_concrete_element_count_mismatch_at_graph_build() {
 fn reshape_allows_symbolic_input_when_element_count_cannot_be_proven() {
     let x = TracedTensor::input_symbolic_shape(DType::F64, 2).unwrap();
 
-    let y = x.reshape(&[3]).unwrap();
+    let y = x.reshape([3]).unwrap();
 
     assert_eq!(y.rank, 1);
     assert_eq!(y.try_concrete_shape(), Some(vec![3]));

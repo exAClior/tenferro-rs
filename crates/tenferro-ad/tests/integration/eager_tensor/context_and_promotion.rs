@@ -314,7 +314,7 @@ fn eager_input<T: TensorScalar>(ctx: &Arc<EagerRuntime>, data: &[T], tracked: bo
         // Keep inactive operands on the active-edge path as lazy constants.
         EagerTensor::from_tensor_in(tensor, Arc::clone(ctx))
             .unwrap()
-            .reshape(&[data.len()])
+            .reshape([data.len()])
             .unwrap()
     }
 }

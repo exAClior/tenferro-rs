@@ -504,6 +504,31 @@ fn traced_linalg_helpers_reject_symbolic_shapes_without_panicking() {
 }
 
 #[test]
+fn traced_norm_rejects_duplicate_axis_before_empty_shortcut() {
+    let nonempty = TracedTensor::from_vec_col_major(vec![2], vec![1.0_f64, 2.0]).unwrap();
+    let empty = TracedTensor::from_tensor_concrete_shape(Tensor::F64(
+        TypedTensor::from_vec_col_major(vec![0, 2], vec![]).unwrap(),
+    ))
+    .unwrap();
+
+    for err in [
+        nonempty.norm(None, Some(&[0, 0]), false).unwrap_err(),
+        empty.norm(None, Some(&[0, 0]), false).unwrap_err(),
+    ] {
+        assert!(matches!(
+            err,
+            Error::TensorRuntime(TensorError::Validation {
+                op: "norm",
+                source: tenferro_tensor::ValidationError::DuplicateAxis {
+                    axis: 0,
+                    role: "dim"
+                }
+            })
+        ));
+    }
+}
+
+#[test]
 fn traced_norm_rejects_out_of_range_axis_without_panicking() {
     let tensor = TracedTensor::from_vec_col_major(vec![3], vec![1.0_f64, 2.0, 3.0]).unwrap();
 

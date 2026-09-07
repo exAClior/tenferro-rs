@@ -174,7 +174,9 @@ abstraction, feature, ownership, or public/private API boundaries.
 ### Test Coverage Target
 
 **90%+ line coverage** per source file. Cover new paths; when modifying a file
-below 90%, add tests.
+below 90%, add tests. The existing numerically verified linalg AD exceptions in
+[AD Rule Coverage](REPOSITORY_RULES.md#ad-rule-coverage) apply: retain their
+per-file thresholds and numerical/oracle checks rather than padding line coverage.
 
 ### Unit Test Organization
 
@@ -293,7 +295,7 @@ Repository scripts require Python 3.11 or newer. Set `$PYTHON` to one executable
 cargo build
 
 # Build a specific crate
-cargo build -p tenferro
+cargo build -p tenferro-tensor
 
 # Run all tests
 cargo test

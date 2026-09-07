@@ -48,8 +48,8 @@ pub mod core {
 }
 
 pub use tenferro_tensor_core::{
-    ErrorKind, IntoShapeVec, ShapeMismatch, ShapeVec, SliceSpec, StrideVec, TensorRef,
-    ValidationError, ValidationKind,
+    ErrorKind, IntoRankShape, IntoShapeVec, ShapeMismatch, ShapeVec, SliceSpec, StrideVec,
+    TensorRef, ValidationError, ValidationKind,
 };
 
 pub mod backend;

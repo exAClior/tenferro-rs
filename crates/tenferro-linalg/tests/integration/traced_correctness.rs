@@ -219,6 +219,42 @@ fn pseudoinverse_and_norm_eval() {
 }
 
 #[test]
+fn traced_spectral_norm_preserves_signed_and_complex_input() {
+    let signed =
+        TracedTensor::from_tensor_concrete_shape(f64_tensor(vec![2, 2], vec![1.0, 1.0, 1.0, -1.0]))
+            .unwrap();
+    let complex = TracedTensor::from_tensor_concrete_shape(Tensor::C64(
+        TypedTensor::from_vec_col_major(
+            vec![2, 2],
+            vec![
+                Complex64::new(0.0, 1.0),
+                Complex64::new(0.0, 1.0),
+                Complex64::new(0.0, 1.0),
+                Complex64::new(0.0, -1.0),
+            ],
+        )
+        .unwrap(),
+    ))
+    .unwrap();
+    let outputs = [
+        signed.norm(Some(2.0), Some(&[0, 1]), false).unwrap(),
+        signed.norm(Some(-2.0), Some(&[0, 1]), false).unwrap(),
+        complex.norm(Some(2.0), Some(&[0, 1]), false).unwrap(),
+        complex.norm(Some(-2.0), Some(&[0, 1]), false).unwrap(),
+    ];
+    let output_refs = outputs.iter().collect::<Vec<_>>();
+    let backend = tenferro_cpu::CpuBackend::with_threads(1).unwrap();
+    assert_eq!(backend.num_threads(), 1);
+    let runtime = support::cpu_runtime_with_linalg(&backend).unwrap();
+    let program = GraphCompiler::new().compile_many(&output_refs).unwrap();
+    let results = runtime.run_compiled(&program, &[]).unwrap();
+
+    for result in results {
+        assert!((get_f64_data(&result)[0] - 2.0_f64.sqrt()).abs() < 1.0e-12);
+    }
+}
+
+#[test]
 fn norm_supports_vector_zero_and_matrix_induced_orders() {
     let vector =
         TracedTensor::from_tensor_concrete_shape(f64_tensor(vec![4], vec![1.0, 0.0, 2.0, -3.0]))

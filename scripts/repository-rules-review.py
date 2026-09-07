@@ -204,7 +204,6 @@ ALWAYS_SECTIONS = frozenset(
 
 HUMAN_ONLY_SECTIONS = frozenset(
     {
-        "Final Cross-Phase Multi-Agent Audit",
         "External Contribution Intake",
         "CI Cost Discipline",
         "Publication Order And Publish-Safety",

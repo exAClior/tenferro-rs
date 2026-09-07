@@ -607,10 +607,11 @@ impl EagerTensor {
     ///     vec![2, 3],
     ///     vec![1.0_f64, 2.0, 3.0, 4.0, 5.0, 6.0],
     /// ).unwrap(), ctx.clone()).unwrap();
-    /// let y = x.reshape(&[6]).unwrap();
-    ///
-    /// assert_eq!(y.shape(), &[6]);
-    /// assert_eq!(y.value().unwrap().as_slice::<f64>().unwrap(), &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    /// // Arrays, vectors, and slices use the same dynamic-shape contract.
+    /// for y in [x.reshape([6])?, x.reshape(vec![6])?, x.reshape(&[6][..])?] {
+    ///     assert_eq!(y.shape(), &[6]);
+    ///     assert_eq!(y.value()?.as_slice::<f64>()?, &[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]);
+    /// }
     /// # Ok::<(), tenferro_ad::Error>(())
     /// ```
     ///
@@ -619,9 +620,10 @@ impl EagerTensor {
     /// Returns [`tenferro_tensor::ValidationError::ShapeMismatch`] when the element count
     /// changes, `InvalidArgument` when the target shape product overflows, or a
     /// typed backend/runtime-state error.
-    pub fn reshape(&self, shape: &[usize]) -> Result<Self> {
+    pub fn reshape(&self, shape: impl tenferro_tensor::IntoShapeVec) -> Result<Self> {
+        let shape = shape.into_shape_vec();
         let op = StdTensorOp::Reshape {
-            to_shape: DimExpr::from_concrete(shape),
+            to_shape: DimExpr::from_concrete(&shape),
         };
         // INVARIANT: a returned eager tensor cannot borrow `self`'s group, so
         // the explicit duplicate precedes metadata-only view construction.

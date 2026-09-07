@@ -197,7 +197,7 @@ fn graph_compiler_keeps_default_bound_scope_as_runtime_guard() {
 fn constraint_scope_survives_unary_and_reshape_and_discharges_concretely() {
     let (lhs, rhs, mut outputs) = symbolic_constrained(1);
     let extension = outputs.remove(0);
-    let output = extension.neg().unwrap().reshape(&[6]).unwrap();
+    let output = extension.neg().unwrap().reshape([6]).unwrap();
 
     assert_eq!(output.constraint_scopes.materialize().len(), 1);
     let program = compile_with_shapes(&output, &lhs, &rhs, 6, 3).unwrap();
@@ -398,7 +398,7 @@ fn graph_scoped_constraint_survives_identity_reshape_elimination() {
     let lhs = TracedTensor::from_vec_col_major(vec![7], vec![1.0_f64; 7]).unwrap();
     let rhs = TracedTensor::from_vec_col_major(vec![3], vec![1.0_f64; 3]).unwrap();
     let base = lhs.add(&rhs.reduce_sum(Some(&[0])).unwrap()).unwrap();
-    let output = base.reshape(&[7]).unwrap();
+    let output = base.reshape([7]).unwrap();
 
     assert_eliminated_layout_keeps_live_constraint(attach_violated_scope_to_layout_output(
         output, &lhs, &rhs,

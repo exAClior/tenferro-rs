@@ -334,16 +334,34 @@ fn typed_solve_surfaces_accept_vector_and_matrix_rhs() {
 #[test]
 fn concrete_norm_distinguishes_empty_axes_and_rejects_invalid_axes() {
     let input = Tensor::from_vec_col_major(vec![2], vec![3.0_f64, 4.0]).unwrap();
-    let mut host = CpuBackend::new();
+    let empty = Tensor::from_vec_col_major([0, 2], Vec::<f64>::new()).unwrap();
+    let mut host = CpuBackend::with_threads(1).unwrap();
+    assert_eq!(host.num_threads(), 1);
 
     host.with_backend_session(|session| {
         let identity = input.norm(Some(2.0), Some(&[]), false, session).unwrap();
         let error = input
             .norm(Some(2.0), Some(&[1]), false, session)
             .unwrap_err();
+        let duplicate_nonempty = input
+            .norm(Some(2.0), Some(&[0, 0]), false, session)
+            .unwrap_err();
+        let duplicate_empty = empty.norm(None, Some(&[0, 0]), false, session).unwrap_err();
 
         assert_eq!(identity.as_slice::<f64>().unwrap(), &[3.0, 4.0]);
         assert!(error.to_string().contains("axis 1"));
+        for error in [duplicate_nonempty, duplicate_empty] {
+            assert!(matches!(
+                error,
+                tenferro_tensor::Error::Validation {
+                    op: "norm",
+                    source: tenferro_tensor::ValidationError::DuplicateAxis {
+                        axis: 0,
+                        role: "dim"
+                    }
+                }
+            ));
+        }
     });
 }
 
@@ -473,6 +491,73 @@ fn typed_surface_covers_all_receiver_adapters() {
             .unwrap();
 
         assert_eq!(norm.as_slice().unwrap(), &[5.0]);
+    });
+}
+
+#[test]
+fn concrete_spectral_norm_preserves_signed_and_complex_input_across_surfaces() {
+    let signed = Tensor::from_vec_col_major([2, 2], vec![1.0_f64, 1.0, 1.0, -1.0]).unwrap();
+    let complex = Tensor::C64(
+        TypedTensor::from_vec_col_major(
+            vec![2, 2],
+            vec![
+                Complex64::new(0.0, 1.0),
+                Complex64::new(0.0, 1.0),
+                Complex64::new(0.0, 1.0),
+                Complex64::new(0.0, -1.0),
+            ],
+        )
+        .unwrap(),
+    );
+    let typed_signed =
+        TypedTensor::<f64>::from_vec_col_major(vec![2, 2], vec![1.0_f64, 1.0, 1.0, -1.0]).unwrap();
+    let typed_complex = TypedTensor::<Complex64>::from_vec_col_major(
+        vec![2, 2],
+        vec![
+            Complex64::new(0.0, 1.0),
+            Complex64::new(0.0, 1.0),
+            Complex64::new(0.0, 1.0),
+            Complex64::new(0.0, -1.0),
+        ],
+    )
+    .unwrap();
+    let mut backend = CpuBackend::with_threads(1).unwrap();
+    assert_eq!(backend.num_threads(), 1);
+
+    backend.with_backend_session(|backend| {
+        for order in [Some(2.0), Some(-2.0)] {
+            for value in [
+                signed.norm(order, Some(&[0, 1]), false, backend).unwrap(),
+                TensorRead::from_tensor(&signed)
+                    .norm_read(order, Some(&[0, 1]), false, backend)
+                    .unwrap(),
+                complex.norm(order, Some(&[0, 1]), false, backend).unwrap(),
+                TensorRead::from_tensor(&complex)
+                    .norm_read(order, Some(&[0, 1]), false, backend)
+                    .unwrap(),
+                TensorRead::from_view(tenferro_tensor::TensorView::F64(
+                    typed_signed.as_view().transpose_view([1, 0]).unwrap(),
+                ))
+                .norm_read(order, Some(&[1, 0]), true, backend)
+                .unwrap(),
+                TensorRead::from_view(tenferro_tensor::TensorView::C64(
+                    typed_complex.as_view().transpose_view([1, 0]).unwrap(),
+                ))
+                .norm_read(order, Some(&[0, 1]), false, backend)
+                .unwrap(),
+            ] {
+                assert!((value.as_slice::<f64>().unwrap()[0] - 2.0_f64.sqrt()).abs() < 1.0e-12);
+            }
+
+            let signed_value = typed_signed
+                .norm(order, Some(&[0, 1]), false, backend)
+                .unwrap();
+            let complex_value = typed_complex
+                .norm(order, Some(&[0, 1]), false, backend)
+                .unwrap();
+            assert!((signed_value.as_slice().unwrap()[0] - 2.0_f64.sqrt()).abs() < 1.0e-12);
+            assert!((complex_value.as_slice().unwrap()[0] - 2.0_f64.sqrt()).abs() < 1.0e-12);
+        }
     });
 }
 

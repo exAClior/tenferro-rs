@@ -1087,7 +1087,7 @@ fn eager_structural_primal_ops_transpose_and_reshape() {
         TOL,
     );
 
-    let reshaped = x.reshape(&[6]).unwrap();
+    let reshaped = x.reshape([6]).unwrap();
     assert_eq!(reshaped.shape(), &[6]);
     assert_close_slice(
         f64_data(&reshaped.to_tensor().unwrap()),
@@ -1113,7 +1113,7 @@ fn eager_untracked_structural_ops_return_lazy_views() {
         other => panic!("expected transpose to remain a lazy f64 view, got {other:?}"),
     }
 
-    let reshaped = x.reshape(&[6]).unwrap();
+    let reshaped = x.reshape([6]).unwrap();
     match reshaped.tensor_read() {
         TensorRead::View(TensorView::F64(view)) => {
             assert_eq!(view.shape(), &[6]);
