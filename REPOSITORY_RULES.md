@@ -55,9 +55,12 @@ diff-scoped review bot must be listed in that script's `ALWAYS_SECTIONS` or
 - Tensor operation names are public vocabulary: unsuffixed names take owned
   compact tensor inputs; `_read` marks APIs that accept borrowed views or
   `TensorRead`-style references.
-- Public shape parameters use `impl Into<R::Shape>` when the rank type owns the
-  representation and `impl IntoShapeVec` at dynamic-rank boundaries, so
-  arrays, vectors, slices, and `ShapeVec` values are accepted consistently.
+- Owned tensor constructors use `impl IntoRankShape<R>` for rank-aware
+  shape input and `impl IntoShapeVec` at dynamic-rank boundaries. Static-rank
+  arrays (including array references) must match the rank at compile time;
+  vectors, slices, and `ShapeVec` are rank-checked at runtime. Dynamic rank
+  accepts arbitrary-length arrays. Explicitly converting an array to a slice
+  selects the runtime contract.
   Axis lists, dimension mappings, and other borrowed collections use
   `impl AsRef<[T]>` unless ownership or iteration semantics require otherwise.
 - Metadata-only layout/view operations use a `_view` suffix
@@ -154,6 +157,10 @@ diff-scoped review bot must be listed in that script's `ALWAYS_SECTIONS` or
 
 ## Invariant Markers
 
+The false-positive marker/test requirements below intentionally retain a
+stricter local contract than the shared rules, to prevent audit bots from
+repeatedly reporting the same intentional invariant.
+
 - Use one canonical marker, `// INVARIANT: <why this is valid, bounded, or
   intentional>`, for non-obvious invariants kept for performance or by design:
   rank-bounded quadratic loops, checked-by-construction arithmetic,
@@ -218,80 +225,6 @@ diff-scoped review bot must be listed in that script's `ALWAYS_SECTIONS` or
 - Before adding an audit or repository rule, inventory nearby rules and merge,
   tighten, or relocate overlapping guidance. Prefer one sharper general rule
   over many narrow bullets.
-
-## Final Cross-Phase Multi-Agent Audit
-
-Human/process protocol. This section is intentionally not routed to the
-diff-scoped review bot.
-
-Repository-scale, multi-phase implementation programs require one final audit
-after every phase and its task-local reviews are complete, but before the
-umbrella issue or implementation branch is declared ready for integration.
-
-- Audit one exact candidate commit. Every report must name that commit, and an
-  auditor must not audit a lane whose implementation or task-local review it
-  performed. The lanes may run in batches when agent concurrency is limited.
-- Assign a distinct independent auditor to each required lane:
-  1. **Specification and architecture:** accepted issues, phase acceptance
-     criteria, eager/graph semantic parity, extension lowering, and migration
-     compatibility.
-  2. **Rust safety and resource lifecycle:** aliasing, unsafe boundaries,
-     lifetimes, permits, locks, buffers, caches, identifiers, and cleanup on
-     success, error, cancellation, and unwind.
-  3. **Performance and parallelism:** current-main baseline, eager fast path,
-     allocations and request/container overhead, nested fan-out, provider
-     worker ownership, thread-count and placement control, and CPU/GPU
-     synchronization.
-  4. **Public API and documentation:** facade boundaries, operation-family
-     traits, typed errors, feature combinations, runnable examples, online
-     parallelism documentation, and source/checker consistency.
-  5. **CPU and NUMA:** managed and external domains, strict versus advisory
-     placement, resource arbitration, faer/BLAS/strided behavior, multiple
-     sockets, re-entry, fairness, and failure recovery.
-  6. **GPU, XLA, and multi-GPU:** context/stream/event ownership,
-     backend-neutral artifacts, compiler and prepared-operation caches, device
-     placement, independent devices, and cross-device failure handling.
-- After all lane reports, a separate integration auditor must check
-  cross-phase invariants, duplicated or contradictory findings, and the
-  closure evidence.
-- Each lane report must record the candidate commit; relevant feature,
-  toolchain, and hardware configuration; inspected files, public contracts,
-  and issue acceptance criteria; fresh commands and complete result
-  classifications; findings classified as `Critical`, `Important`, or
-  `Minor`; and explicit limitations or skipped hardware paths. Performance
-  results must be classified as `PASS`, `FAIL`, or `INCONCLUSIVE`. Do not infer
-  a pass from an implementer's earlier run. Source scanners and mutation tests
-  support, but do not replace, call-path review and runtime tests.
-- Apply the existing [Public Boundary Safety Audits](#public-boundary-safety-audits),
-  [Unsafe Code Boundary](#unsafe-code-boundary),
-  [Performance-Sensitive Safety Contracts](PERFORMANCE_TIPS.md#performance-sensitive-safety-contracts),
-  [Materialization And Copies](PERFORMANCE_TIPS.md#materialization-and-copies),
-  [Performance-Gated Experiment Protocol](PERFORMANCE_TIPS.md#performance-gated-experiment-protocol),
-  [Cache Ownership](PERFORMANCE_TIPS.md#cache-ownership),
-  [CPU Threading Contract](PERFORMANCE_TIPS.md#cpu-threading-contract),
-  [GPU Backend Contract](#gpu-backend-contract),
-  [Documentation Policy](#documentation-policy), and
-  [Work Logs And Design Records](#work-logs-and-design-records) in the relevant
-  lanes instead of restating their detailed checklists here.
-- The final audit passes only when every `Critical` and `Important` finding is
-  fixed and independently re-reviewed; every `Minor` finding is fixed or has a
-  written rationale and accepted tracking issue; every required performance
-  gate is `PASS`; and the integration auditor reports no unresolved
-  cross-phase contradiction. `INCONCLUSIVE` blocks promotion until a valid
-  rerun or explicit accepted scope decision is recorded.
-- Environment-limited CPU, GPU, XLA, or multi-device paths must retain
-  reproducible diagnostics and an identified verification owner. The final
-  worklog must link every lane report, the integration report, the exact
-  candidate commit, and the final verification commands.
-- This gate supplements rather than replaces task-local TDD, specification
-  review, code-quality review, CI, and required performance gates.
-- Auditing is read-only: audit agents must not modify the candidate while
-  reviewing it. A finding fix creates a new exact candidate revision. Before
-  the audit can pass, every lane report must be refreshed to name and validate
-  that final revision: each auditor reviews the intervening diff, every
-  affected lane reruns its relevant evidence, and an unaffected lane may carry
-  earlier runtime evidence forward only with a recorded diff-impact rationale.
-  The separate integration auditor runs last against the same final revision.
 
 ## External Contribution Intake
 

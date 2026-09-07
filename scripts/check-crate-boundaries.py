@@ -4,7 +4,10 @@
 from __future__ import annotations
 
 import pathlib
+import re
 import sys
+
+from boundary_sources import boundary_lines
 
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
@@ -31,13 +34,11 @@ def check_tensor_has_no_gpu_runtime_deps() -> list[str]:
     violations: list[str] = []
     for path in paths:
         for file_path in iter_files(path):
-            text = file_path.read_text(encoding="utf-8")
-            for line_no, line in enumerate(text.splitlines(), start=1):
-                lowered = line.lower()
+            for line_no, line in boundary_lines(file_path):
                 for token in forbidden:
-                    if token in lowered:
+                    if re.search(r"\b" + re.escape(token).replace(r"\-", "[-_]") + r"\b", line):
                         rel = file_path.relative_to(ROOT)
-                        violations.append(f"{rel}:{line_no}: forbidden tensor-core GPU token `{token}`")
+                        violations.append(f"{rel}:{line_no}: forbidden tensor-core GPU dependency/reference `{token}`")
     return violations
 
 
@@ -48,13 +49,12 @@ def check_runtime_has_no_gpu_backend_deps() -> list[str]:
     violations: list[str] = []
     for path in paths:
         for file_path in iter_files(path):
-            text = file_path.read_text(encoding="utf-8")
-            for line_no, line in enumerate(text.splitlines(), start=1):
+            for line_no, line in boundary_lines(file_path):
                 for token in forbidden:
-                    if token in line:
+                    if re.search(r"\b" + re.escape(token) + r"\b", line):
                         rel = file_path.relative_to(ROOT)
                         violations.append(
-                            f"{rel}:{line_no}: forbidden runtime GPU backend token `{token}`"
+                            f"{rel}:{line_no}: forbidden runtime GPU backend dependency/reference `{token}`"
                         )
     return violations
 

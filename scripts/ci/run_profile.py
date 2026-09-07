@@ -108,6 +108,7 @@ PROFILE_COMMANDS: dict[str, tuple[str, ...]] = {
         "python3 scripts/test-storage-ownership-contracts-v2.py",
         _STORAGE_OWNERSHIP_CHECKER,
         "python3 scripts/test-public-boundary-inventory.py",
+        "python3 scripts/test-check-boundary-scope.py",
         "python3 -m unittest discover -s scripts/ci/tests -v",
         "actionlint",
     ),
