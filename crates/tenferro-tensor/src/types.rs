@@ -1134,7 +1134,7 @@ impl<R: TensorRank> OwnedTensorGroup<R> {
         self.group
             .prepare_device_read_for_layout::<T, R>(self.slot, layout)
             .map_err(|error| {
-                crate::Error::runtime_state("TypedTensor::prepare_device_read", error.to_string())
+                crate::Error::runtime_state_source("TypedTensor::prepare_device_read", error)
             })
     }
 
@@ -1145,7 +1145,7 @@ impl<R: TensorRank> OwnedTensorGroup<R> {
         self.group
             .prepare_device_write_for_layout::<T, R>(self.slot, layout)
             .map_err(|error| {
-                crate::Error::runtime_state("TypedTensor::prepare_device_write", error.to_string())
+                crate::Error::runtime_state_source("TypedTensor::prepare_device_write", error)
             })
     }
 
@@ -1763,7 +1763,7 @@ impl<'a, T: 'static, R: TensorRank> TypedTensorView<'a, T, R> {
         if let Some(root) = &self.root {
             return root
                 .prepare_device_read_for_layout(&self.layout)
-                .map_err(|error| crate::Error::runtime_state(op, error.to_string()));
+                .map_err(|error| crate::Error::runtime_state_source(op, error));
         }
         let buffer = self
             .backend_buffer()
@@ -2662,7 +2662,7 @@ impl<'a, T: 'static, R: TensorRank> TypedTensorViewMut<'a, T, R> {
             .as_mut()
             .ok_or_else(|| crate::Error::runtime_state(op, "expected a root-backed tensor view"))?;
         root.prepare_device_write_for_layout(&layout)
-            .map_err(|error| crate::Error::runtime_state(op, error.to_string()))
+            .map_err(|error| crate::Error::runtime_state_source(op, error))
     }
 
     /// Compute the physical element offset for a logical index.
@@ -3982,6 +3982,17 @@ pub enum TensorWrite<'a> {
 /// `TensorValue` is intentionally not cloneable. View transformations consume
 /// the value and move its existing owner; [`TensorValue::duplicate`] is the
 /// explicit boundary for creating another physical allocation.
+///
+/// # Examples
+///
+/// ```
+/// use tenferro_tensor::{Tensor, TensorValue};
+/// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2, 2], vec![1., 2., 3., 4.])?);
+/// let view = value.transpose_view([1, 0])?;
+/// assert_eq!(view.strides(), &[2, 1]);
+/// assert!(view.is_view());
+/// # Ok::<(), tenferro_tensor::Error>(())
+/// ```
 #[derive(Debug)]
 pub struct TensorValue {
     owner: Tensor,
@@ -3989,6 +4000,18 @@ pub struct TensorValue {
 }
 
 /// A consuming view transformation failed while retaining its unchanged owner.
+///
+/// # Examples
+///
+/// ```
+/// use tenferro_tensor::{Tensor, TensorValue};
+/// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2], vec![3., 4.])?);
+/// let failure = value.try_reshape_view([3]).unwrap_err();
+/// let (recovered, cause) = failure.into_parts();
+/// assert_eq!(recovered.into_tensor()?.as_slice::<f64>()?, &[3., 4.]);
+/// assert!(matches!(cause, tenferro_tensor::Error::Validation { .. }));
+/// # Ok::<(), tenferro_tensor::Error>(())
+/// ```
 #[derive(Debug)]
 pub struct TensorValueViewError {
     value: TensorValue,
@@ -3997,6 +4020,17 @@ pub struct TensorValueViewError {
 
 impl TensorValueViewError {
     /// Return the unchanged value and the typed validation/backend error.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([1], vec![7.])?);
+    /// let (value, error) = value.try_reshape_view([2]).unwrap_err().into_parts();
+    /// assert_eq!(value.into_tensor()?.as_slice::<f64>()?, &[7.]);
+    /// assert!(matches!(error, tenferro_tensor::Error::Validation { .. }));
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     pub fn into_parts(self) -> (TensorValue, crate::Error) {
         (self.value, self.source)
     }
@@ -4021,6 +4055,17 @@ impl std::error::Error for TensorValueViewError {
 impl TensorValue {
     /// Explicitly duplicate the physical owner represented by this value.
     ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2], vec![3., 4.])?);
+    /// let copy = value.duplicate()?.into_tensor()?;
+    /// assert_eq!(copy.as_slice::<f64>()?, &[3., 4.]);
+    /// assert_eq!(value.shape(), &[2]);
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
+    ///
     /// # Errors
     ///
     /// Returns [`crate::Error::RuntimeState`] or [`crate::Error::Unsupported`]
@@ -4035,6 +4080,17 @@ impl TensorValue {
         )
     }
 
+    /// Retain a compact tensor as a move-only value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2], vec![3., 4.])?);
+    /// assert!(!value.is_view());
+    /// assert_eq!(value.into_tensor()?.as_slice::<f64>()?, &[3., 4.]);
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     pub fn from_tensor(tensor: Tensor) -> Self {
         let layout = tensor_layout(&tensor);
         Self {
@@ -4048,6 +4104,17 @@ impl TensorValue {
     /// Returns [`ValidationError::InvalidArgument`] or
     /// [`ValidationError::IntegerOverflow`] when the supplied layout is
     /// invalid for the tensor's physical buffer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let tensor = Tensor::from_vec_col_major([2, 2], vec![1., 2., 3., 4.])?;
+    /// let view = TensorValue::from_parts(tensor, vec![2], vec![1], 2)?;
+    /// assert_eq!(view.shape(), &[2]);
+    /// assert_eq!(view.offset(), 2);
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     pub fn from_parts(
         tensor: Tensor,
         shape: Vec<usize>,
@@ -4098,13 +4165,21 @@ impl TensorValue {
         }
     }
 
-    /// Consume an unshared compact value and return its physical owner.
+    /// Consume a value with its owner's original layout and return that owner.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2], vec![3., 4.])?);
+    /// assert_eq!(value.into_tensor()?.as_slice::<f64>()?, &[3., 4.]);
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     ///
     /// # Errors
     ///
-    /// Returns [`crate::Error::Unsupported`] for a metadata-only view or
-    /// [`crate::Error::RuntimeState`] when another value retains the shared
-    /// owner.
+    /// Returns [`crate::Error::Unsupported`] when the value's metadata-only
+    /// view differs from its physical owner's layout.
     pub fn into_tensor(self) -> crate::Result<Tensor> {
         if self.layout != tensor_layout(&self.owner) {
             return Err(crate::Error::unsupported(
@@ -4115,34 +4190,112 @@ impl TensorValue {
         Ok(self.owner)
     }
 
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2, 2], vec![1., 2., 3., 4.])?);
+    /// assert_eq!(value.as_tensor().unwrap().as_slice::<f64>()?, &[1., 2., 3., 4.]);
+    /// assert!(value.transpose_view([1, 0])?.as_tensor().is_none());
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     pub fn as_tensor(&self) -> Option<&Tensor> {
         (self.layout == tensor_layout(&self.owner)).then_some(&self.owner)
     }
 
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2, 2], vec![1., 2., 3., 4.])?);
+    /// assert!(!value.is_view());
+    /// assert!(value.transpose_view([1, 0])?.is_view());
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     pub fn is_view(&self) -> bool {
         self.as_tensor().is_none()
     }
 
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2, 2], vec![1., 2., 3., 4.])?);
+    /// assert_eq!(value.dtype(), tenferro_tensor::DType::F64);
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     pub fn dtype(&self) -> DType {
         self.owner.dtype()
     }
 
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2, 2], vec![1., 2., 3., 4.])?);
+    /// assert_eq!(value.reshape_view([4])?.shape(), &[4]);
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     pub fn shape(&self) -> &[usize] {
         self.layout.shape()
     }
 
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2, 2], vec![1., 2., 3., 4.])?);
+    /// assert_eq!(value.transpose_view([1, 0])?.strides(), &[2, 1]);
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     pub fn strides(&self) -> &[isize] {
         self.layout.strides()
     }
 
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2, 2], vec![1., 2., 3., 4.])?);
+    /// assert_eq!(value.offset(), 0);
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     pub fn offset(&self) -> isize {
         self.layout.offset()
     }
 
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2, 2], vec![1., 2., 3., 4.])?);
+    /// let view = value.tensor_view();
+    /// assert_eq!(view.shape(), &[2, 2]);
+    /// assert_eq!(view.dtype(), tenferro_tensor::DType::F64);
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     pub fn tensor_view(&self) -> TensorView<'_> {
         tensor_view_with_layout(&self.owner, self.layout.clone())
     }
 
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2, 2], vec![1., 2., 3., 4.])?);
+    /// let read = value.tensor_read();
+    /// assert_eq!(read.shape(), &[2, 2]);
+    /// assert_eq!(read.dtype(), tenferro_tensor::DType::F64);
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     pub fn tensor_read(&self) -> TensorRead<'_> {
         self.as_tensor()
             .map(TensorRead::from_tensor)
@@ -4156,6 +4309,17 @@ impl TensorValue {
     /// [`tenferro_tensor_core::ValidationError::AxisOutOfBounds`], or
     /// [`tenferro_tensor_core::ValidationError::DuplicateAxis`] when `axes` is
     /// not a valid permutation of the value rank.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2, 2], vec![1., 2., 3., 4.])?);
+    /// let view = value.transpose_view([1, 0])?;
+    /// assert_eq!(view.strides(), &[2, 1]);
+    /// assert!(view.is_view());
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     pub fn transpose_view(self, axes: impl AsRef<[usize]>) -> crate::Result<Self> {
         let layout = self
             .layout
@@ -4182,6 +4346,17 @@ impl TensorValue {
     /// [`tenferro_tensor_core::ValidationError::ViewOutOfBounds`] when the
     /// reshaped view exceeds the backing buffer.
     #[allow(clippy::result_large_err)]
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2, 2], vec![1., 2., 3., 4.])?);
+    /// let (recovered, error) = value.try_reshape_view([3]).unwrap_err().into_parts();
+    /// assert_eq!(recovered.into_tensor()?.as_slice::<f64>()?, &[1., 2., 3., 4.]);
+    /// assert!(matches!(error, tenferro_tensor::Error::Validation { .. }));
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     pub fn try_reshape_view(
         self,
         shape: impl tenferro_tensor_core::IntoShapeVec,
@@ -4210,6 +4385,17 @@ impl TensorValue {
     /// when element counts differ, or [`tenferro_tensor_core::ValidationError::IntegerOverflow`]
     /// / [`tenferro_tensor_core::ValidationError::ViewOutOfBounds`] for invalid
     /// target-shape arithmetic or bounds.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2, 2], vec![1., 2., 3., 4.])?);
+    /// let view = value.reshape_view([4])?;
+    /// assert_eq!(view.shape(), &[4]);
+    /// assert_eq!(view.strides(), &[1]);
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     pub fn reshape_view(
         self,
         shape: impl tenferro_tensor_core::IntoShapeVec,
@@ -4230,6 +4416,19 @@ impl TensorValue {
     /// for slice arithmetic overflow, or
     /// [`tenferro_tensor_core::ValidationError::ViewOutOfBounds`] when the
     /// result exceeds the backing buffer.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2, 2], vec![1., 2., 3., 4.])?);
+    /// let view = value.slice_view(&tenferro_tensor::SliceConfig {
+    ///    starts: vec![0, 1], limits: vec![2, 2], strides: vec![1, 1],
+    /// })?;
+    /// assert_eq!(view.shape(), &[2, 1]);
+    /// assert_eq!(view.offset(), 2);
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     pub fn slice_view(self, config: &SliceConfig) -> crate::Result<Self> {
         let op = "TensorValue::slice_view";
         if config.starts.len() != self.shape().len()
@@ -4298,6 +4497,17 @@ impl TensorValue {
     /// result exceeds the backing buffer, or
     /// [`tenferro_tensor_core::ValidationError::IntegerOverflow`] for layout
     /// arithmetic overflow.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use tenferro_tensor::{Tensor, TensorValue};
+    /// let value = TensorValue::from_tensor(Tensor::from_vec_col_major([2], vec![3., 4.])?);
+    /// let view = value.broadcast_in_dim_view([2, 3], [0])?;
+    /// assert_eq!(view.shape(), &[2, 3]);
+    /// assert_eq!(view.strides(), &[1, 0]);
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
     pub fn broadcast_in_dim_view(
         self,
         shape: impl tenferro_tensor_core::IntoShapeVec,
@@ -4365,7 +4575,7 @@ fn prepare_backend_access<'a, T: 'static, R: TensorRank>(
     );
     buffer
         .prepare_device_access(request)
-        .map_err(|error| crate::Error::runtime_state(op, error.to_string()))
+        .map_err(|error| crate::Error::runtime_state_source(op, error))
 }
 
 fn cast_view_slice<S: 'static, T: TensorScalar>(source: &[S]) -> crate::Result<&[T]> {
@@ -5743,10 +5953,13 @@ fn try_checked_shape_len(shape: &[usize], data_len: usize, op: &'static str) -> 
 }
 
 fn try_compact_layout<R: TensorRank>(
-    shape: impl Into<R::Shape>,
+    shape: impl tenferro_tensor_core::IntoRankShape<R>,
     op: &'static str,
 ) -> crate::Result<TensorLayout<R>> {
-    TensorLayout::compact(shape.into()).map_err(|err| tensor_layout_error(op, err))
+    let shape = shape
+        .into_rank_shape()
+        .map_err(|err| tensor_layout_error(op, err))?;
+    TensorLayout::compact(shape).map_err(|err| tensor_layout_error(op, err))
 }
 
 fn tensor_layout_error(
@@ -6117,7 +6330,7 @@ pub(crate) fn default_placement() -> Placement {
 }
 
 fn typed_tensor_from_vec_col_major<T: TensorScalar, R: TensorRank>(
-    shape: impl Into<R::Shape>,
+    shape: impl tenferro_tensor_core::IntoRankShape<R>,
     data: Vec<T>,
     op: &'static str,
 ) -> crate::Result<TypedTensor<T, R>> {
@@ -6125,7 +6338,7 @@ fn typed_tensor_from_vec_col_major<T: TensorScalar, R: TensorRank>(
 }
 
 fn try_typed_tensor_from_vec_col_major<T, R: TensorRank>(
-    shape: impl Into<R::Shape>,
+    shape: impl tenferro_tensor_core::IntoRankShape<R>,
     data: Vec<T>,
     op: &'static str,
 ) -> crate::Result<TypedTensor<T, R>>
@@ -6146,13 +6359,13 @@ where
 }
 
 fn typed_tensor_zeros<T: TensorScalar + Zero, R: TensorRank>(
-    shape: impl Into<R::Shape>,
+    shape: impl tenferro_tensor_core::IntoRankShape<R>,
 ) -> crate::Result<TypedTensor<T, R>> {
     try_typed_tensor_zeros(shape)
 }
 
 fn try_typed_tensor_zeros<T: TensorScalar + Clone + Zero, R: TensorRank>(
-    shape: impl Into<R::Shape>,
+    shape: impl tenferro_tensor_core::IntoRankShape<R>,
 ) -> crate::Result<TypedTensor<T, R>> {
     let layout = try_compact_layout(shape, "zeros")?;
     let n = try_shape_product(layout.shape(), "zeros")?;
@@ -6168,13 +6381,13 @@ fn try_typed_tensor_zeros<T: TensorScalar + Clone + Zero, R: TensorRank>(
 }
 
 fn typed_tensor_ones<T: TensorScalar + One + Zero, R: TensorRank>(
-    shape: impl Into<R::Shape>,
+    shape: impl tenferro_tensor_core::IntoRankShape<R>,
 ) -> crate::Result<TypedTensor<T, R>> {
     try_typed_tensor_ones(shape)
 }
 
 fn try_typed_tensor_ones<T: TensorScalar + Clone + One + Zero, R: TensorRank>(
-    shape: impl Into<R::Shape>,
+    shape: impl tenferro_tensor_core::IntoRankShape<R>,
 ) -> crate::Result<TypedTensor<T, R>> {
     let layout = try_compact_layout(shape, "ones")?;
     let n = try_shape_product(layout.shape(), "ones")?;
@@ -6190,7 +6403,7 @@ fn try_typed_tensor_ones<T: TensorScalar + Clone + One + Zero, R: TensorRank>(
 }
 
 fn typed_tensor_from_buffer_col_major<T: TensorScalar + Send + Sync + 'static, R: TensorRank>(
-    shape: impl Into<R::Shape>,
+    shape: impl tenferro_tensor_core::IntoRankShape<R>,
     buffer: StorageBuffer<T>,
     placement: Placement,
 ) -> crate::Result<TypedTensor<T, R>> {
@@ -6199,7 +6412,7 @@ fn typed_tensor_from_buffer_col_major<T: TensorScalar + Send + Sync + 'static, R
 
 #[doc(hidden)]
 fn typed_tensor_from_backend_allocation<T: TensorScalar + Send + Sync + 'static, R: TensorRank>(
-    shape: impl Into<R::Shape>,
+    shape: impl tenferro_tensor_core::IntoRankShape<R>,
     allocation: Box<dyn crate::BackendAllocation>,
     placement: Placement,
 ) -> crate::Result<TypedTensor<T, R>> {
@@ -6232,7 +6445,7 @@ fn try_typed_tensor_from_buffer_col_major<
     T: TensorScalar + Send + Sync + 'static,
     R: TensorRank,
 >(
-    shape: impl Into<R::Shape>,
+    shape: impl tenferro_tensor_core::IntoRankShape<R>,
     buffer: StorageBuffer<T>,
     placement: Placement,
 ) -> crate::Result<TypedTensor<T, R>> {
@@ -6273,7 +6486,9 @@ impl<T: TensorScalar + Zero, R: TensorRank> TypedTensor<T, R> {
     /// Returns [`crate::Error::Validation`] with
     /// [`tenferro_tensor_core::ValidationError::IntegerOverflow`] when shape
     /// product or compact-stride arithmetic overflows.
-    pub fn zeros(shape: impl Into<R::Shape>) -> crate::Result<Self> {
+    /// A vector or slice with a different static rank returns
+    /// [`tenferro_tensor_core::ValidationError::RankMismatch`].
+    pub fn zeros(shape: impl tenferro_tensor_core::IntoRankShape<R>) -> crate::Result<Self> {
         typed_tensor_zeros(shape)
     }
 }
@@ -6294,7 +6509,9 @@ impl<T: TensorScalar + One + Zero, R: TensorRank> TypedTensor<T, R> {
     /// Returns [`crate::Error::Validation`] with
     /// [`tenferro_tensor_core::ValidationError::IntegerOverflow`] when shape
     /// product or compact-stride arithmetic overflows.
-    pub fn ones(shape: impl Into<R::Shape>) -> crate::Result<Self> {
+    /// A vector or slice with a different static rank returns
+    /// [`tenferro_tensor_core::ValidationError::RankMismatch`].
+    pub fn ones(shape: impl tenferro_tensor_core::IntoRankShape<R>) -> crate::Result<Self> {
         typed_tensor_ones(shape)
     }
 }
@@ -6332,7 +6549,7 @@ impl<T, R: TensorRank> TypedTensor<T, R> {
     /// [`tenferro_tensor_core::ValidationError::RankMismatch`] when a supplied
     /// rank-specific shape cannot be represented.
     pub fn from_buffer_col_major(
-        shape: impl Into<R::Shape>,
+        shape: impl tenferro_tensor_core::IntoRankShape<R>,
         buffer: StorageBuffer<T>,
         placement: Placement,
     ) -> crate::Result<Self>
@@ -6345,7 +6562,7 @@ impl<T, R: TensorRank> TypedTensor<T, R> {
     /// Consume a scalar-independent provider root into one compact tensor.
     #[doc(hidden)]
     pub fn from_backend_allocation(
-        shape: impl Into<R::Shape>,
+        shape: impl tenferro_tensor_core::IntoRankShape<R>,
         allocation: Box<dyn crate::BackendAllocation>,
         placement: Placement,
     ) -> crate::Result<Self>
@@ -6551,7 +6768,7 @@ impl<T, R: TensorRank> TypedTensor<T, R> {
     {
         self.group
             .prepare_device_read_for_layout::<T>(&self.layout)
-            .map_err(|error| crate::Error::runtime_state(op, error.to_string()))
+            .map_err(|error| crate::Error::runtime_state_source(op, error))
     }
 
     /// Prepare this backend tensor for one provider-native write binding.
@@ -6566,7 +6783,7 @@ impl<T, R: TensorRank> TypedTensor<T, R> {
         let layout = self.layout.clone();
         self.group
             .prepare_device_write_for_layout::<T>(&layout)
-            .map_err(|error| crate::Error::runtime_state(op, error.to_string()))
+            .map_err(|error| crate::Error::runtime_state_source(op, error))
     }
 
     pub(crate) fn buffer_len(&self) -> usize
@@ -6954,7 +7171,27 @@ impl<T: TensorScalar, R: TensorRank> TypedTensor<T, R> {
     /// the shape product differs from `data.len()`, or
     /// [`tenferro_tensor_core::ValidationError::IntegerOverflow`] when shape
     /// arithmetic overflows.
-    pub fn from_vec_col_major(shape: impl Into<R::Shape>, data: Vec<T>) -> crate::Result<Self> {
+    ///
+    /// Arrays and array references must match a static rank at compile time.
+    /// Vectors and slices instead return `ValidationError::RankMismatch` when
+    /// their length differs from the static rank. Dynamic rank accepts arrays
+    /// of any length.
+    ///
+    /// ```
+    /// use tenferro_tensor::{Rank, TypedTensor};
+    /// let tensor = TypedTensor::<f64, Rank<2>>::from_vec_col_major([1, 2], vec![3., 4.])?;
+    /// assert_eq!(tensor.shape(), &[1, 2]);
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
+    ///
+    /// ```compile_fail
+    /// use tenferro_tensor::{Rank, TypedTensor};
+    /// let _ = TypedTensor::<f64, Rank<2>>::from_vec_col_major([2], vec![3., 4.]);
+    /// ```
+    pub fn from_vec_col_major(
+        shape: impl tenferro_tensor_core::IntoRankShape<R>,
+        data: Vec<T>,
+    ) -> crate::Result<Self> {
         typed_tensor_from_vec_col_major(shape, data, "from_vec_col_major")
     }
 

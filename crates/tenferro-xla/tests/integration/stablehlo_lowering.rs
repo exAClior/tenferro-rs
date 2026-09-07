@@ -97,7 +97,7 @@ fn lowers_structural_ops_and_convert() {
         .unwrap()
         .transpose(&[1, 0])
         .unwrap()
-        .reshape(&[6])
+        .reshape([6])
         .unwrap()
         .convert(DType::F64)
         .unwrap();

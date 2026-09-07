@@ -2099,7 +2099,10 @@ impl TracedTensor {
     /// ```rust
     /// # use tenferro_runtime::TracedTensor;
     /// # let x = TracedTensor::from_vec_col_major(vec![4], vec![1.0_f64; 4]).unwrap();
-    /// let y = x.reshape(&[2, 2])?;
+    /// for y in [x.reshape([2, 2])?, x.reshape(vec![2, 2])?, x.reshape(&[2, 2][..])?] {
+    ///     assert_eq!(y.try_concrete_shape(), Some(vec![2, 2]));
+    /// }
+    /// assert!(x.reshape([3]).is_err());
     /// # Ok::<(), tenferro_runtime::Error>(())
     /// ```
     ///
@@ -2108,11 +2111,12 @@ impl TracedTensor {
     /// Returns [`Error::Validation`] with `ShapeMismatch::ReshapeElementCount`
     /// when a concrete input has a different element count, or
     /// `IntegerOverflow` when the target shape product overflows `usize`.
-    pub fn reshape(&self, shape: &[usize]) -> Result<TracedTensor> {
-        validate_concrete_reshape_shape(self, shape)?;
+    pub fn reshape(&self, shape: impl IntoShapeVec) -> Result<TracedTensor> {
+        let shape = shape.into_shape_vec();
+        validate_concrete_reshape_shape(self, &shape)?;
         apply_unary_with_dtype(
             StdTensorOp::Reshape {
-                to_shape: DimExpr::from_concrete(shape),
+                to_shape: DimExpr::from_concrete(&shape),
             },
             self,
             shape.len(),
