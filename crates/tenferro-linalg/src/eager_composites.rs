@@ -115,10 +115,10 @@ pub(crate) fn norm(
         || (0..a.shape().len()).collect::<Vec<_>>(),
         <[usize]>::to_vec,
     );
+    validate_axes("norm", a.shape().len(), &axes)?;
     if axes.is_empty() {
         return Ok(a.clone());
     }
-    validate_axes("norm", a.shape().len(), &axes)?;
 
     let out = if can_square_without_abs(a.dtype(), axes.len(), ord) {
         frobenius_norm(a, &axes)?
@@ -169,24 +169,8 @@ fn ensure_min_rank(op: &'static str, actual: usize, expected: usize) -> Result<(
 }
 
 fn validate_axes(op: &'static str, rank: usize, axes: &[usize]) -> Result<()> {
-    let mut seen = vec![false; rank];
-    for &axis in axes {
-        if axis >= rank {
-            return Err(Error::TensorRuntime(
-                tenferro_tensor::Error::axis_out_of_bounds(op, axis, rank),
-            ));
-        }
-        if seen[axis] {
-            return Err(Error::invalid_argument(
-                op,
-                ErrorPhase::GraphBuild,
-                "dim",
-                format!("axis {axis} appears more than once"),
-            ));
-        }
-        seen[axis] = true;
-    }
-    Ok(())
+    tenferro_tensor::validate::validate_unique_axes(op, "dim", rank, axes)
+        .map_err(Error::TensorRuntime)
 }
 
 fn ones_like(input: &EagerTensor) -> Result<EagerTensor> {
@@ -279,6 +263,15 @@ fn vector_norm(a: &EagerTensor, axis: usize, ord: Option<f64>) -> Result<EagerTe
 
 fn matrix_norm(a: &EagerTensor, axes: &[usize], ord: Option<f64>) -> Result<EagerTensor> {
     let matrix = move_axes_to_front(a, axes)?;
+    if matches!(ord, Some(2.0) | Some(-2.0)) {
+        let singular_values = svd(&matrix)?.1.abs()?;
+        return if ord == Some(2.0) {
+            singular_values.reduce_max(Some(&[0]))
+        } else {
+            singular_values.reduce_min(Some(&[0]))
+        };
+    }
+
     let abs = matrix.abs()?;
     match ord {
         None => frobenius_norm(&abs, &[0, 1]),
@@ -286,8 +279,6 @@ fn matrix_norm(a: &EagerTensor, axes: &[usize], ord: Option<f64>) -> Result<Eage
         Some(p) if p == f64::NEG_INFINITY => matrix_row_sum_norm(&abs, false),
         Some(1.0) => matrix_col_sum_norm(&abs, true),
         Some(-1.0) => matrix_col_sum_norm(&abs, false),
-        Some(2.0) => svd(&matrix)?.1.abs()?.reduce_max(Some(&[0])),
-        Some(-2.0) => svd(&matrix)?.1.abs()?.reduce_min(Some(&[0])),
         Some(0.0) => count_nonzero(&abs, &[0, 1]),
         Some(p) => p_norm(&abs, &[0, 1], p),
     }

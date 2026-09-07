@@ -2486,19 +2486,17 @@ fn norm_from_read<B: LinalgBackend + ?Sized>(
         || (0..original_shape.len()).collect::<Vec<_>>(),
         <[usize]>::to_vec,
     );
+    validate_axes("norm", original_shape.len(), &axes)?;
     if axes.is_empty() {
         return backend.to_contiguous_read(input);
     }
-    validate_axes("norm", original_shape.len(), &axes)?;
     let reduced = if can_square_without_abs(input.dtype(), axes.len(), ord) {
         frobenius_norm_read(input.clone(), &axes, backend)?
+    } else if axes.len() == 2 {
+        matrix_norm(input, &axes, ord, backend)?
     } else {
         let abs = backend.abs_read(input)?;
-        match axes.len() {
-            1 => norm_over_axes(&abs, &axes, ord, backend)?,
-            2 => matrix_norm(&abs, &axes, ord, backend)?,
-            _ => norm_over_axes(&abs, &axes, ord, backend)?,
-        }
+        norm_over_axes(&abs, &axes, ord, backend)?
     };
     if !keepdim {
         return Ok(reduced);
@@ -2560,17 +2558,7 @@ fn can_square_without_abs(dtype: DType, axes_len: usize, ord: Option<f64>) -> bo
 }
 
 fn validate_axes(op: &'static str, rank: usize, axes: &[usize]) -> tenferro_tensor::Result<()> {
-    let mut seen = vec![false; rank];
-    for &axis in axes {
-        if axis >= rank {
-            return Err(tenferro_tensor::Error::axis_out_of_bounds(op, axis, rank));
-        }
-        if seen[axis] {
-            return Err(tenferro_tensor::Error::duplicate_axis(op, axis, "dim"));
-        }
-        seen[axis] = true;
-    }
-    Ok(())
+    tenferro_tensor::validate::validate_unique_axes(op, "dim", rank, axes)
 }
 
 fn default_pinv_rtol(dtype: DType, shape: &[usize]) -> f64 {
@@ -2831,28 +2819,30 @@ fn norm_over_axes<B: LinalgBackend + ?Sized>(
 }
 
 fn matrix_norm<B: LinalgBackend + ?Sized>(
-    abs: &Tensor,
+    input: TensorRead<'_>,
     axes: &[usize],
     ord: Option<f64>,
     backend: &mut B,
 ) -> tenferro_tensor::Result<Tensor> {
-    let matrix = move_axes_to_front(abs, axes, backend)?;
+    let matrix = move_axes_to_front(input, axes, backend)?;
+    if matches!(ord, Some(2.0) | Some(-2.0)) {
+        let (_, singular_values, _) = three(backend.svd(&matrix)?, "norm")?;
+        return if ord == Some(2.0) {
+            reduce_max(&singular_values, &[0], backend)
+        } else {
+            reduce_min(&singular_values, &[0], backend)
+        };
+    }
+
+    let abs = backend.abs_read(TensorRead::from_tensor(&matrix))?;
     match ord {
-        None => frobenius_norm(&matrix, &[0, 1], backend),
-        Some(p) if p == f64::INFINITY => row_sum_norm(&matrix, true, backend),
-        Some(p) if p == f64::NEG_INFINITY => row_sum_norm(&matrix, false, backend),
-        Some(1.0) => col_sum_norm(&matrix, true, backend),
-        Some(-1.0) => col_sum_norm(&matrix, false, backend),
-        Some(2.0) | Some(-2.0) => {
-            let (_, singular_values, _) = three(backend.svd(&matrix)?, "norm")?;
-            if ord == Some(2.0) {
-                reduce_max(&singular_values, &[0], backend)
-            } else {
-                reduce_min(&singular_values, &[0], backend)
-            }
-        }
-        Some(0.0) => count_nonzero(&matrix, &[0, 1], backend),
-        Some(p) => p_norm(&matrix, &[0, 1], p, backend),
+        None => frobenius_norm(&abs, &[0, 1], backend),
+        Some(p) if p == f64::INFINITY => row_sum_norm(&abs, true, backend),
+        Some(p) if p == f64::NEG_INFINITY => row_sum_norm(&abs, false, backend),
+        Some(1.0) => col_sum_norm(&abs, true, backend),
+        Some(-1.0) => col_sum_norm(&abs, false, backend),
+        Some(0.0) => count_nonzero(&abs, &[0, 1], backend),
+        Some(p) => p_norm(&abs, &[0, 1], p, backend),
     }
 }
 
@@ -2883,12 +2873,12 @@ fn col_sum_norm<B: LinalgBackend + ?Sized>(
 }
 
 fn move_axes_to_front<B: LinalgBackend + ?Sized>(
-    input: &Tensor,
+    input: TensorRead<'_>,
     axes: &[usize],
     backend: &mut B,
 ) -> tenferro_tensor::Result<Tensor> {
     if axes.iter().enumerate().all(|(index, &axis)| index == axis) {
-        return input.duplicate();
+        return backend.to_contiguous_read(input);
     }
     let mut selected = vec![false; input.shape().len()];
     for &axis in axes {
@@ -2901,5 +2891,5 @@ fn move_axes_to_front<B: LinalgBackend + ?Sized>(
             .enumerate()
             .filter_map(|(axis, selected)| (!selected).then_some(axis)),
     );
-    transpose(input, &perm, backend)
+    backend.transpose_read(input, &perm)
 }

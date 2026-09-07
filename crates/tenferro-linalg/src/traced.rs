@@ -387,13 +387,15 @@ pub trait TracedTensorLinalgExt {
     ///
     /// # Errors
     ///
-    /// Returns `Error::Validation` for an invalid norm order or axis and
-    /// `Error::Extension` for unsupported dtype.
+    /// Requires a concrete shape immediately. Returns `Error::Validation` for
+    /// invalid or duplicate axes or an invalid norm order. Symbolic shapes
+    /// produce `Error::TensorRuntime` wrapping `ValidationError::InvalidArgument`
+    /// for `shape` during graph construction; unsupported dtypes produce
+    /// `Error::Extension`.
     ///
     /// # Deferred errors
     ///
-    /// Symbolic axis and shape checks may be reported during compile or
-    /// execution.
+    /// Backend numerical or runtime failures may occur during execution.
     fn norm(&self, ord: Option<f64>, dim: Option<&[usize]>, keepdim: bool) -> Result<TracedTensor>;
 }
 
@@ -1514,8 +1516,11 @@ pub fn pinv_with_rtol(a: &TracedTensor, rtol: f64) -> Result<TracedTensor> {
 ///
 /// # Deferred errors
 ///
-/// Symbolic shapes needed to restore `keepdim` are evaluated later and can
-/// produce `ShapeConstraintEvaluation` or `ShapeExpressionEvaluation`.
+/// Backend numerical and runtime failures can occur during execution.
+/// Symbolic input shapes are not deferred: this helper requires concrete
+/// dimensions and returns `Error::TensorRuntime` wrapping
+/// `ValidationError::InvalidArgument` for `shape` during graph construction,
+/// regardless of `keepdim`.
 pub fn norm(
     a: &TracedTensor,
     ord: Option<f64>,
@@ -1525,10 +1530,10 @@ pub fn norm(
     ensure_float_or_complex("norm", a.dtype)?;
     let shape = require_concrete_shape("norm", a)?;
     let axes = dim.map_or_else(|| (0..a.rank).collect::<Vec<_>>(), |dims| dims.to_vec());
+    validate_axes("norm", a.rank, &axes)?;
     if axes.is_empty() {
         return Ok(a.clone());
     }
-    validate_axes("norm", a.rank, &axes)?;
     if reduced_axes_have_zero_extent(&shape, &axes) {
         if let Some(zero) = zero_norm_for_empty_reduction(a.dtype, &shape, &axes, keepdim, ord)? {
             return Ok(zero);
@@ -1691,14 +1696,8 @@ fn ensure_min_rank(op: &'static str, actual: usize, expected: usize) -> Result<(
 }
 
 fn validate_axes(op: &'static str, rank: usize, axes: &[usize]) -> Result<()> {
-    for &axis in axes {
-        if axis >= rank {
-            return Err(Error::TensorRuntime(
-                tenferro_tensor::Error::axis_out_of_bounds(op, axis, rank),
-            ));
-        }
-    }
-    Ok(())
+    tenferro_tensor::validate::validate_unique_axes(op, "dim", rank, axes)
+        .map_err(Error::TensorRuntime)
 }
 
 fn require_concrete_shape(op: &'static str, input: &TracedTensor) -> Result<Vec<usize>> {
@@ -1906,6 +1905,15 @@ fn vector_norm(a: &TracedTensor, axis: usize, ord: Option<f64>) -> Result<Traced
 
 fn matrix_norm(a: &TracedTensor, axes: &[usize], ord: Option<f64>) -> Result<TracedTensor> {
     let matrix = move_axes_to_front(a, axes)?;
+    if matches!(ord, Some(2.0) | Some(-2.0)) {
+        let singular_values = svd_values(&matrix)?.abs()?;
+        return if ord == Some(2.0) {
+            singular_values.reduce_max(Some(&[0]))
+        } else {
+            singular_values.reduce_min(Some(&[0]))
+        };
+    }
+
     let abs = matrix.abs()?;
     match ord {
         None => frobenius_norm(&abs, &[0, 1]),
@@ -1913,14 +1921,6 @@ fn matrix_norm(a: &TracedTensor, axes: &[usize], ord: Option<f64>) -> Result<Tra
         Some(p) if p == f64::NEG_INFINITY => matrix_row_sum_norm(&abs, false),
         Some(1.0) => matrix_col_sum_norm(&abs, true),
         Some(-1.0) => matrix_col_sum_norm(&abs, false),
-        Some(2.0) => {
-            let singular_values = svd_values(&matrix)?.abs()?;
-            singular_values.reduce_max(Some(&[0]))
-        }
-        Some(-2.0) => {
-            let singular_values = svd_values(&matrix)?.abs()?;
-            singular_values.reduce_min(Some(&[0]))
-        }
         Some(0.0) => count_nonzero(&abs, &[0, 1]),
         Some(p) => p_norm(&abs, &[0, 1], p),
     }
