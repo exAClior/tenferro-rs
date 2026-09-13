@@ -5,6 +5,8 @@ use super::*;
 
 mod external_managed;
 mod output_affinity;
+#[cfg(feature = "cpu-blas")]
+mod provider_session;
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<String>() {
@@ -559,12 +561,20 @@ fn execution_info_exposes_stable_kind_and_placement_contract() {
 
 #[test]
 #[cfg(feature = "cpu-blas")]
-fn blas_provider_session_body_stays_outside_the_rayon_engine() {
-    use tenferro_tensor::BackendSessionHost;
-
+fn single_thread_blas_session_reuses_context_with_sequential_policy() {
     let mut backend = CpuBackend::with_threads_and_kind(1, CpuBackendKind::Blas).unwrap();
-    backend.with_backend_session(|_| {
-        assert!(rayon::current_thread_index().is_none());
+    backend.with_backend_session(|session| {
+        crate::with_cpu_exec_session(session, |cpu| {
+            assert!(cpu.entered.is_some());
+            cpu.with_linalg_pool(|context, _| {
+                // Linux placement may use a pinned worker even at one thread.
+                // The contract is sequential native policy, not caller-thread identity.
+                assert_eq!(context.parallel_mode(), crate::ParallelMode::Sequential);
+                Ok(())
+            })
+            .unwrap();
+        })
+        .unwrap();
     });
 }
 
