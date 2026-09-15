@@ -333,7 +333,7 @@ Legend:
 | `div` | `F32`, `F64`, `I32`, `I64`, `C32`, `C64` | none | same as input | result Native; read FallbackCopy; write Unsupported; strided Unsupported; accumulation Unsupported |
 | `rem` | `F32`, `F64`, `I32`, `I64` | none | same as input | result Native; read FallbackCopy; write Unsupported; strided Unsupported; accumulation Unsupported |
 | `abs` | `F32`, `F64`, `I32`, `I64`, `C32`, `C64` | none | `F32->F32`, `F64->F64`, `I32->I32`, `I64->I64`, `C32->F32`, `C64->F64` | result Native; read FallbackCopy; write Unsupported; strided Unsupported; accumulation Unsupported |
-| `sign` | `F32`, `F64`, `I32`, `I64` | none | same as input | result Native; read FallbackCopy; write Unsupported; strided Unsupported; accumulation Unsupported |
+| `sign` | `F32`, `F64`, `I32`, `I64`, `C32`, `C64` | none | same as input | result Native; read FallbackCopy; write Unsupported; strided Unsupported; accumulation Unsupported |
 | `maximum` | `F32`, `F64`, `I32`, `I64` | none | same as input | result Native; read FallbackCopy; write Unsupported; strided Unsupported; accumulation Unsupported |
 | `minimum` | `F32`, `F64`, `I32`, `I64` | none | same as input | result Native; read FallbackCopy; write Unsupported; strided Unsupported; accumulation Unsupported |
 | `compare` | `F32`, `F64`, `I32`, `I64` | `Bool` | `Bool` | result Native; read FallbackCopy; write Unsupported; strided Unsupported; accumulation Unsupported |

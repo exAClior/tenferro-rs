@@ -1358,63 +1358,6 @@ macro_rules! dispatch_unary_float_complex_int {
     }};
 }
 
-macro_rules! dispatch_unary_float_int {
-    ($backend:expr, $input:expr, $kind:expr, $float_kernel:ident, $int_kernel:ident) => {{
-        let descriptor = $crate::cubecl::op_descriptor::require_gpu_descriptor(
-            $kind,
-            $crate::cubecl::op_descriptor::GpuLaunchKind::UnaryFloatInt,
-        )?;
-        let op = descriptor.name;
-        let input = $input;
-        $crate::cubecl::dispatch::require_owned_capability($backend, $kind, input.dtype())?;
-        match input {
-            Tensor::F32(tensor) => {
-                $crate::cubecl::dispatch::launch_unary_elementwise_kernel!(
-                    $backend,
-                    tensor,
-                    op,
-                    $float_kernel,
-                    f32,
-                    F32
-                )
-            }
-            Tensor::F64(tensor) => {
-                $crate::cubecl::dispatch::launch_unary_elementwise_kernel!(
-                    $backend,
-                    tensor,
-                    op,
-                    $float_kernel,
-                    f64,
-                    F64
-                )
-            }
-            Tensor::I32(tensor) => {
-                $crate::cubecl::dispatch::launch_unary_elementwise_kernel!(
-                    $backend,
-                    tensor,
-                    op,
-                    $int_kernel,
-                    i32,
-                    I32
-                )
-            }
-            Tensor::I64(tensor) => {
-                $crate::cubecl::dispatch::launch_unary_elementwise_kernel!(
-                    $backend,
-                    tensor,
-                    op,
-                    $int_kernel,
-                    i64,
-                    I64
-                )
-            }
-            Tensor::Bool(_) | Tensor::C32(_) | Tensor::C64(_) => {
-                Err($crate::cubecl::unsupported_dtype(op, input.dtype()))
-            }
-        }
-    }};
-}
-
 macro_rules! dispatch_unary_float_only {
     ($backend:expr, $input:expr, $kind:expr, $float_kernel:ident) => {{
         let descriptor = $crate::cubecl::op_descriptor::require_gpu_descriptor(
@@ -1453,7 +1396,6 @@ macro_rules! dispatch_unary_float_only {
 pub(crate) use dispatch_binary_float_complex_int;
 pub(crate) use dispatch_binary_float_int;
 pub(crate) use dispatch_unary_float_complex_int;
-pub(crate) use dispatch_unary_float_int;
 pub(crate) use dispatch_unary_float_only;
 pub(crate) use launch_binary_elementwise_kernel;
 pub(crate) use launch_unary_elementwise_kernel;

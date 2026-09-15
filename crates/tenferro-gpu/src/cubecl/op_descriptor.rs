@@ -36,7 +36,8 @@ pub(crate) fn gpu_descriptor(kind: PrimitiveOpKind) -> Option<GpuOpDescriptor> {
         PrimitiveOpKind::Pow => GpuLaunchKind::BinaryFloatInt,
         PrimitiveOpKind::Neg => GpuLaunchKind::UnaryFloatComplexInt,
         PrimitiveOpKind::Conj => GpuLaunchKind::UnaryFloatComplex,
-        PrimitiveOpKind::Abs | PrimitiveOpKind::Sign => GpuLaunchKind::UnaryFloatInt,
+        PrimitiveOpKind::Abs => GpuLaunchKind::UnaryFloatInt,
+        PrimitiveOpKind::Sign => GpuLaunchKind::UnaryFloatComplexInt,
         PrimitiveOpKind::Exp
         | PrimitiveOpKind::Log
         | PrimitiveOpKind::Sin

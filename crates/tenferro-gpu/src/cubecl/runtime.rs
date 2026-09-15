@@ -486,9 +486,7 @@ impl CudaRuntime {
     /// Used by the raw-session enter protocol so raw library calls observe
     /// previously enqueued CubeCL work.
     pub(crate) fn flush_cubecl(&self, op: &'static str) -> crate::Result<()> {
-        self.client()
-            .flush()
-            .map_err(|err| crate::Error::backend_source(op, err))
+        self.inner.flush_cubecl(op)
     }
 
     /// Return the opaque identity of this exact executable runtime instance.
@@ -650,8 +648,16 @@ impl CudaRuntimeState {
         Ok(*self.raw_streams[slot].get_or_init(|| stream))
     }
 
+    fn flush_cubecl(&self, op: &'static str) -> crate::Result<()> {
+        self.client
+            .flush()
+            .map_err(|err| crate::Error::backend_source(op, err))
+    }
+
     fn synchronize(&self) -> crate::Result<()> {
         const OP: &str = "cubecl_runtime_synchronize";
+        // A cached raw stream does not drain CubeCL's host-side launch queue.
+        self.flush_cubecl(OP)?;
         let stream = self.raw_cuda_stream()?;
         self.synchronize_raw_stream(stream, OP)
     }
@@ -769,6 +775,9 @@ impl CudaRuntimeState {
                 out.len()
             )));
         }
+        // Reused output addresses can already be cached: pointer lookup is not
+        // a queue barrier. Submit pending kernels before the raw D2H copy.
+        self.flush_cubecl(op)?;
         self.set_current_cuda_context(op)?;
         let stream = self.raw_cuda_stream()? as usize as cudaStream_t;
         // ponytail: one shared staging slot serializes concurrent scalar
