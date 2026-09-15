@@ -217,6 +217,22 @@ that real cotangent back into the complex input tangent space by multiplying by
 `Sign` has zero AD for both real and complex inputs. Treat this as the
 operation contract, not as a holomorphic derivative.
 
+## Determinant Numerical Recipe
+
+Both eager and traced `det` use `sign * exp(logabsdet)` from `slogdet`,
+following JAX's `_det` recipe (`jax/_src/numpy/linalg.py`), rather than the
+product of the LU diagonal. This avoids intermediate product overflow on,
+for example, `diag(1e200, 1e200, 1e-200, 1e-200)`, whose determinant is `1`.
+The final exponential can still overflow or underflow; ordinary floating-point
+roundoff and non-finite propagation still apply.
+
+`slogdet` multiplies individual LU pivot signs/phases and permutation parity,
+not the sign of an already overflowed or underflowed determinant. A zero pivot
+has sign zero. Complex CPU `Sign` normalizes each component by the real
+modulus, avoiding the squared-divisor underflow of complex division for tiny
+magnitudes. These primal recipe corrections do not change the established
+JVP/VJP conventions. Existing LU factorization limitations still apply.
+
 ## Boundary And Nondifferentiable Elementwise Rules
 
 When a primitive has a nondifferentiable boundary and JAX has a clear rule,

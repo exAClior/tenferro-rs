@@ -972,6 +972,33 @@ fn tensor_read_elementwise_dispatch_covers_view_and_complex_scalar_branches() {
         c32(0.6, 0.8),
     );
 
+    // A magnitude whose square underflows must still produce a unit phase: the
+    // modulus is computed with `hypot`, not by squaring the components.
+    let tiny_complex =
+        TypedTensor::<Complex<f64>>::from_vec_col_major(vec![1], vec![Complex::new(1.0e-200, 0.0)])
+            .unwrap();
+    let tiny_sign = sign_read_with_pool(
+        &mut buffers,
+        TensorRead::from_view(TensorView::C64(tiny_complex.as_view())),
+    )
+    .unwrap();
+    assert_c64_close(
+        tiny_sign.as_slice::<Complex<f64>>().unwrap()[0],
+        c64(1.0, 0.0),
+    );
+    let zero_complex =
+        TypedTensor::<Complex<f64>>::from_vec_col_major(vec![1], vec![Complex::new(0.0, 0.0)])
+            .unwrap();
+    let zero_sign = sign_read_with_pool(
+        &mut buffers,
+        TensorRead::from_view(TensorView::C64(zero_complex.as_view())),
+    )
+    .unwrap();
+    assert_c64_close(
+        zero_sign.as_slice::<Complex<f64>>().unwrap()[0],
+        c64(0.0, 0.0),
+    );
+
     assert_unsupported_contains(
         maximum_read_with_pool(
             &mut buffers,

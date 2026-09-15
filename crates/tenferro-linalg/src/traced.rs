@@ -1270,6 +1270,11 @@ pub fn slogdet(a: &TracedTensor) -> Result<(TracedTensor, TracedTensor)> {
 
 /// Build a traced determinant op.
 ///
+/// The value contract follows JAX: `det = sign * exp(logabsdet)` from the same
+/// factorization that [`slogdet`] uses. This avoids intermediate product overflow
+/// (for example `diag(1e200,1e200,1e-200,1e-200)` gives `1`), while retaining
+/// ordinary floating-point roundoff and final exponential overflow/underflow.
+///
 /// # Examples
 ///
 /// ```
@@ -1292,13 +1297,12 @@ pub fn slogdet(a: &TracedTensor) -> Result<(TracedTensor, TracedTensor)> {
 /// Symbolic shape checks can later produce `ShapeConstraintViolation`,
 /// `ShapeConstraintEvaluation`, or `ShapeExpressionEvaluation`.
 pub fn det(a: &TracedTensor) -> Result<TracedTensor> {
-    if let Some((det, _logabsdet)) = slogdet_empty_square(a)? {
-        return Ok(det);
-    }
-    let (_p, _l, u, parity) = lu(a)?;
-    let diag_u = u.extract_diag(0, 1)?;
-    let det_u = diag_u.reduce_prod(Some(&[0]))?;
-    &parity * &det_u
+    // JAX's recipe: `sign, logdet = slogdet(a); return sign * exp(logdet)`
+    // (`_det` in `jax/_src/numpy/linalg.py`). Multiplying the LU diagonal
+    // instead overflows before the magnitudes cancel when the determinant
+    // spans an extreme dynamic range, so the two recipes disagree there.
+    let (sign, logabsdet) = slogdet(a)?;
+    &sign * &logabsdet.exp()?
 }
 
 fn slogdet_empty_square(a: &TracedTensor) -> Result<Option<(TracedTensor, TracedTensor)>> {
