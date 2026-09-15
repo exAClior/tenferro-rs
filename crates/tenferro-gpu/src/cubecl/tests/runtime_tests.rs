@@ -226,6 +226,147 @@ gpu_test!(test_trivial_cube_kernel, {
     assert_eq!(result, &expected);
 });
 
+gpu_test!(
+    test_zero_stride_view_materializes_without_cutensor_descriptor,
+    {
+        use tenferro_tensor::{TensorStructural, TensorValue};
+        let mut backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).unwrap();
+        let host = Tensor::from_vec_col_major([2], vec![2.0_f64, 5.0]).unwrap();
+        let input = upload_tensor(backend.runtime(), &host).unwrap();
+        let view = TensorValue::from_tensor(input)
+            .broadcast_in_dim_view([3, 2], [1])
+            .unwrap();
+        let output = backend.to_contiguous_read(view.tensor_read()).unwrap();
+        assert_eq!(
+            backend
+                .cutensor_permutation_plan_cache_stats()
+                .unwrap()
+                .entries,
+            0
+        );
+        let actual = download_tensor(backend.runtime(), &output).unwrap();
+        assert_eq!(actual.shape(), &[3, 2]);
+        assert_eq!(
+            actual.as_slice::<f64>().unwrap(),
+            &[2.0, 2.0, 2.0, 5.0, 5.0, 5.0]
+        );
+    }
+);
+
+gpu_test!(test_cached_scalar_read_observes_queued_writes, {
+    let rt = CudaRuntime::new(CudaDeviceId::from_ordinal(0)).unwrap();
+    let output = upload_tensor(
+        &rt,
+        &Tensor::from_vec_col_major([1], vec![0.0_f64]).unwrap(),
+    )
+    .unwrap();
+    let Tensor::F64(typed) = &output else {
+        unreachable!()
+    };
+    let handle = super::super::dispatch::cubecl_buffer(typed, "test")
+        .unwrap()
+        .handle()
+        .clone();
+    let a = rt.client().create_from_slice(f64::as_bytes(&[1.0]));
+    let b = rt.client().create_from_slice(f64::as_bytes(&[2.0]));
+    // Prime both pointer lookup and the raw stream before issuing more work.
+    assert_eq!(
+        download_tensor(&rt, &output)
+            .unwrap()
+            .as_slice::<f64>()
+            .unwrap(),
+        &[0.0]
+    );
+    for i in 0..32 {
+        let rhs = if i % 2 == 0 { &a } else { &b };
+        // SAFETY: all handles contain one f64; output is fresh and is only read
+        // after the runtime's stream-ordered download completes each iteration.
+        unsafe {
+            kernel_add_f64::launch_unchecked::<CubeclCudaRuntime>(
+                rt.client(),
+                CubeCount::new_single(),
+                CubeDim::new_1d(1),
+                ArrayArg::from_raw_parts(handle.clone(), 1),
+                ArrayArg::from_raw_parts(a.clone(), 1),
+                ArrayArg::from_raw_parts(rhs.clone(), 1),
+            );
+        }
+        let actual = download_tensor(&rt, &output).unwrap();
+        assert_eq!(
+            actual.as_slice::<f64>().unwrap(),
+            &[if i % 2 == 0 { 2.0 } else { 3.0 }]
+        );
+    }
+});
+
+gpu_test!(test_complex_sign_is_scale_safe, {
+    use num_complex::{Complex32, Complex64};
+    let mut backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).unwrap();
+    let host = Tensor::from_vec_col_major(
+        [4],
+        vec![
+            Complex64::new(0.0, 0.0),
+            Complex64::new(3e-200, 4e-200),
+            Complex64::new(3e200, 4e200),
+            Complex64::new(-3.0, 4.0),
+        ],
+    )
+    .unwrap();
+    let input = upload_tensor(backend.runtime(), &host).unwrap();
+    let output = backend.sign(&input).unwrap();
+    let actual = download_tensor(backend.runtime(), &output).unwrap();
+    for (&value, expected) in actual.as_slice::<Complex64>().unwrap().iter().zip([
+        Complex64::new(0.0, 0.0),
+        Complex64::new(0.6, 0.8),
+        Complex64::new(0.6, 0.8),
+        Complex64::new(-0.6, 0.8),
+    ]) {
+        assert!(
+            (value - expected).norm() < 1e-12,
+            "{value:?} != {expected:?}"
+        );
+    }
+    let host = Tensor::from_vec_col_major(
+        [3],
+        vec![
+            Complex32::new(0.0, 0.0),
+            Complex32::new(3e-30, 4e-30),
+            Complex32::new(3e30, 4e30),
+        ],
+    )
+    .unwrap();
+    let input = upload_tensor(backend.runtime(), &host).unwrap();
+    let output = backend.sign(&input).unwrap();
+    let actual = download_tensor(backend.runtime(), &output).unwrap();
+    for (&value, expected) in actual.as_slice::<Complex32>().unwrap().iter().zip([
+        Complex32::new(0.0, 0.0),
+        Complex32::new(0.6, 0.8),
+        Complex32::new(0.6, 0.8),
+    ]) {
+        assert!(
+            (value - expected).norm() < 1e-6,
+            "{value:?} != {expected:?}"
+        );
+    }
+});
+
+#[test]
+fn raw_synchronization_submits_cubecl_work_before_waiting() {
+    // Guard the host-queue/driver boundary even when the queue happens to drain
+    // early enough to hide stale reads in a hardware regression test.
+    let source = include_str!("../runtime.rs");
+    let body = source
+        .split_once("    fn synchronize(&self) -> crate::Result<()> {")
+        .unwrap()
+        .1;
+    let body = body.split_once("\n    }").unwrap().0;
+    let flush = body
+        .find("self.flush_cubecl(OP)?")
+        .expect("must submit the host queue");
+    let stream = body.find("self.raw_cuda_stream()?").unwrap();
+    assert!(flush < stream);
+}
+
 gpu_test!(test_full_round_trip_all_dtypes, {
     use num_complex::{Complex32, Complex64};
 

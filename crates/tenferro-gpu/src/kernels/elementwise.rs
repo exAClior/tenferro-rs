@@ -446,6 +446,19 @@ pub fn sign_float<F: Float>(out: &mut Array<F>, input: &Array<F>) {
 }
 
 #[cube(launch_unchecked)]
+pub fn sign_complex<C: cubecl::frontend::ComplexMath>(out: &mut Array<C>, input: &Array<C>) {
+    if ABSOLUTE_POS < out.len() {
+        let value = input[ABSOLUTE_POS];
+        let zero = C::cast_from(0.0_f32);
+        out[ABSOLUTE_POS] = if value == zero {
+            zero
+        } else {
+            value / C::cast_from(value.abs())
+        };
+    }
+}
+
+#[cube(launch_unchecked)]
 pub fn sign_int<I: Int>(out: &mut Array<I>, input: &Array<I>) {
     if ABSOLUTE_POS < out.len() {
         let value = input[ABSOLUTE_POS];

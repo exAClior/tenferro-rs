@@ -9,6 +9,8 @@ mod backend_errors;
 mod concrete_surface;
 #[path = "integration/cpu_linalg_source_contract.rs"]
 mod cpu_linalg_source_contract;
+#[path = "integration/determinant_extremes.rs"]
+mod determinant_extremes;
 #[path = "integration/eager_surface_parity.rs"]
 mod eager_surface_parity;
 #[path = "integration/eager_tensor.rs"]

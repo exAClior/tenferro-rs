@@ -1204,8 +1204,8 @@ impl CudaBackend {
         T: permutation::CutensorPermutationScalar,
         R: TensorRank,
     {
-        if view.strides().iter().any(|&stride| stride < 0) {
-            // cuTENSOR 2.x rejects negative-stride tensor descriptors. This
+        if view.strides().iter().any(|&stride| stride <= 0) {
+            // cuTENSOR 2.x rejects zero/negative-stride tensor descriptors. This
             // keeps existing CUDA view coverage for a layout the vendor
             // permutation path cannot represent; it is not a missing-library
             // fallback for cuTENSOR-supported descriptors.
@@ -4327,12 +4327,13 @@ impl TensorElementwise for CudaBackend {
     }
 
     fn sign(&mut self, input: &Tensor) -> crate::Result<Tensor> {
-        dispatch::dispatch_unary_float_int!(
+        dispatch::dispatch_unary_float_complex_int!(
             self,
             input,
             PrimitiveOpKind::Sign,
             sign_float,
-            sign_int
+            sign_int,
+            sign_complex
         )
     }
 

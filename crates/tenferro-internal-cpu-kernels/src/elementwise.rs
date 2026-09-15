@@ -188,7 +188,13 @@ macro_rules! impl_tier2_elem_complex {
                 if self.is_zero() {
                     Self::zero()
                 } else {
-                    self / self.abs_elem()
+                    // Divide the components by the real modulus rather than
+                    // using complex division: `Complex::div` squares the
+                    // divisor's components, which underflows for a tiny
+                    // magnitude such as `1e-200` in f64 and produces NaN
+                    // instead of the unit phase.
+                    let modulus = self.norm();
+                    Self::new(self.re / modulus, self.im / modulus)
                 }
             }
         }

@@ -867,12 +867,9 @@ fn execute_linalg<B: LinalgBackend>(
         LinalgOp::Cholesky => Ok(vec![backend.cholesky(inputs[0])?]),
         LinalgOp::Lu => backend.lu(inputs[0]),
         LinalgOp::LuFactor => backend.lu_factor(inputs[0]),
-        LinalgOp::SignDetFromLuFactor => Ok(vec![signdet_from_lu_factor(
-            inputs[0].dtype(),
-            inputs[1],
-            inputs[2],
-            backend,
-        )?]),
+        LinalgOp::SignDetFromLuFactor => {
+            Ok(vec![signdet_from_lu_factor(inputs[1], inputs[2], backend)?])
+        }
         LinalgOp::LogAbsDetFromLuFactor => Ok(vec![logabsdet_from_lu_factor(inputs[1], backend)?]),
         LinalgOp::LuSolvePrepared {
             transpose_a,
@@ -979,25 +976,25 @@ fn execute_linalg<B: LinalgBackend>(
     }
 }
 
+/// Sign (or complex phase) of the determinant from an LU factorization.
+///
+/// The sign is built from the per-pivot signs rather than from the determinant
+/// product, so it is magnitude-independent: a determinant whose product would
+/// underflow or overflow still reports its mathematical sign. `Sign` maps an
+/// exactly zero pivot to zero, so finite singular LU factors report zero sign
+/// for both real and complex inputs, matching the existing eager composite.
 fn signdet_from_lu_factor<B: LinalgBackend + ?Sized>(
-    input_dtype: DType,
     packed_lu: &Tensor,
     parity: &Tensor,
     backend: &mut B,
 ) -> tenferro_tensor::Result<Tensor> {
     let diag = backend.extract_diagonal(packed_lu, 0, 1)?;
-    let det_u = backend.reduce_prod_read(TensorRead::from_tensor(&diag), &[0])?;
-    let det = backend.mul_read(
+    let sign_diag = backend.sign_read(TensorRead::from_tensor(&diag))?;
+    let sign_u = backend.reduce_prod_read(TensorRead::from_tensor(&sign_diag), &[0])?;
+    backend.mul_read(
         TensorRead::from_tensor(parity),
-        TensorRead::from_tensor(&det_u),
-    )?;
-    if matches!(input_dtype, DType::C32 | DType::C64) {
-        let abs = backend.abs_read(TensorRead::from_tensor(&det))?;
-        let abs = backend.convert(&abs, input_dtype)?;
-        backend.div_read(TensorRead::from_tensor(&det), TensorRead::from_tensor(&abs))
-    } else {
-        backend.sign_read(TensorRead::from_tensor(&det))
-    }
+        TensorRead::from_tensor(&sign_u),
+    )
 }
 
 fn logabsdet_from_lu_factor<B: LinalgBackend + ?Sized>(
