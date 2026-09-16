@@ -109,6 +109,13 @@ fn shared_scope_eager_and_prepared_matmul_primal_jvp_vjp() {
                     &eager.vjp(&output, &x, &seed).unwrap().to_tensor().unwrap(),
                     &vjp,
                 );
+                x.clear_grad().unwrap();
+                output.reduce_sum(None).unwrap().backward().unwrap();
+                assert_eq!(
+                    x.grad().unwrap().unwrap().as_slice::<f64>().unwrap(),
+                    vjp.as_slice()
+                );
+                x.clear_grad().unwrap();
                 for (plan, expected) in prepared.iter().zip([&primal, &jvp, &vjp]) {
                     assert!(other_runtime.run_prepared(plan, &[]).is_err());
                     let results = runtime.run_prepared(plan, &[]).unwrap();

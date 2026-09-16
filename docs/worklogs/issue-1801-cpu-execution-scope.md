@@ -25,7 +25,8 @@
   and prepared primal/JVP/VJP twice. Diagnostic edits were removed afterward;
   no public instrumentation API or production logging was added.
 - Independent scalar-loop references verify eager and prepared trace primal,
-  JVP and VJP for 2x2 batch16, 4x4 batch3 and 16x16 batch1 matmul. Elementwise
+  JVP, VJP and stored-gradient backward for 2x2 batch16, 4x4 batch3 and 16x16
+  batch1 matmul. Elementwise
   square/reduction AD covers lengths 3, 64 and 1024. Wrong witness/provider,
   wrong prepared-runtime identity, nested entry, errors, unwinding, child
   workers, provider exclusion and post-scope execution are covered.
