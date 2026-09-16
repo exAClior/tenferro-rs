@@ -19,6 +19,11 @@
   installations instead of 1**. With reuse enabled, repeated native operations,
   cached/uncached sessions, GEMM and linalg-context access install once at
   explicit CPU budgets 1 and 4, for the compiled Faer and BLAS providers.
+- Temporary executor-boundary logging on `a2b4cc34` also observed exactly one
+  entry for each of twelve actual high-level scopes: Faer/MKL, CPU budgets 1/4,
+  and the three matmul shapes below. Each scope repeats eager primal/JVP/VJP
+  and prepared primal/JVP/VJP twice. Diagnostic edits were removed afterward;
+  no public instrumentation API or production logging was added.
 - Independent scalar-loop references verify eager and prepared trace primal,
   JVP and VJP for 2x2 batch16, 4x4 batch3 and 16x16 batch1 matmul. Elementwise
   square/reduction AD covers lengths 3, 64 and 1024. Wrong witness/provider,
