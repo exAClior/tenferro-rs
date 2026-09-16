@@ -21,6 +21,8 @@ mod checkpoint_truncate_integration;
 mod convenience_api;
 #[path = "integration/cpu_backend.rs"]
 mod cpu_backend;
+#[path = "integration/cpu_execution_scope.rs"]
+mod cpu_execution_scope;
 #[path = "integration/dot_general_validation.rs"]
 mod dot_general_validation;
 #[path = "integration/dtype_propagation.rs"]

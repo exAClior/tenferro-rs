@@ -120,6 +120,18 @@ Import recipes:
 If a method is present in the guide but Rust reports E0599, check the owning
 crate's root re-exports and bring its `*Ext` trait into the local module.
 
+## Repeated CPU eager/AD and prepared trace calls
+
+Build the runtimes from clones of one configured `CpuBackend`, then call their
+ordinary eager/AD or `run_prepared` APIs inside `CpuBackend::with_execution_scope`.
+Only Tenferro-managed CPU domains are supported. This retains executor admission,
+not a mutable backend session. Backend re-entry from an active session, nested
+scopes, and other-worker backend re-entry remain invalid. Compile/prepare, enter,
+and warm up outside steady-state timing; allocation-returning calls still allocate
+outputs. Run the tested example
+with `cargo run -p tenferro-ad --example cpu_execution_scope`; see the
+[scope contract](../../../../docs/guides/ordinary-and-prepared-execution.md#cpu-execution-scopes).
+
 ## Borrowing external memory
 
 Wrap an existing column-major buffer (a `faer::Mat`, an ndarray view, or any

@@ -8,10 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::arbiter::{
-    inherited_or_new_execution_owner, with_execution_owner, ResourceArbiter, ResourceOwner,
-    ResourcePermit,
-};
+use crate::arbiter::{with_execution_owner, ResourceArbiter, ResourceOwner, ResourcePermit};
 use crate::buffer_pool::{BufferPool, BufferPoolStats, PoolScalar};
 use crate::dot_runtime::{
     CpuProviderBundle, CpuProviderBundleInstallError, CpuProviderDomainContract,
@@ -2616,9 +2613,9 @@ impl CpuBackend {
     /// with the executor's typed diagnostic when synchronous executor entry
     /// fails because this convenience method cannot return a `Result`.
     pub fn install<R: Send>(&self, op: impl FnOnce() -> R + Send) -> R {
-        let owner = inherited_or_new_execution_owner();
-        let permit = self.acquire_execution_permit(owner);
-        let entry = CpuOperationEntry::new(self.engine.domain(), &permit);
+        let admission = self.infallible_execution_admission();
+        let permit = admission.permit();
+        let entry = CpuOperationEntry::new(self.engine.domain(), permit);
         match entry.enter(ParallelMode::Sequential, |_| op()) {
             Ok(result) => result,
             Err(error) => panic!("CpuBackend::install executor failed: {error}"),
@@ -2629,9 +2626,9 @@ impl CpuBackend {
         &self,
         op: impl FnOnce() -> crate::Result<R> + Send,
     ) -> crate::Result<R> {
-        let owner = inherited_or_new_execution_owner();
-        let permit = self.acquire_execution_permit(owner);
-        let entry = CpuOperationEntry::new(self.engine.domain(), &permit);
+        let admission = self.execution_admission()?;
+        let permit = admission.permit();
+        let entry = CpuOperationEntry::new(self.engine.domain(), permit);
         let mode = entry.preferred_engine_mode();
         entry
             .enter(mode, |context| context.with_native_parallelism(op))
@@ -2642,9 +2639,9 @@ impl CpuBackend {
         &self,
         op: impl FnOnce(&CpuExecutionContext<'_>) -> crate::Result<R> + Send,
     ) -> crate::Result<R> {
-        let owner = inherited_or_new_execution_owner();
-        let permit = self.acquire_execution_permit(owner);
-        let entry = CpuOperationEntry::new(self.engine.domain(), &permit);
+        let admission = self.execution_admission()?;
+        let permit = admission.permit();
+        let entry = CpuOperationEntry::new(self.engine.domain(), permit);
         let mode = entry.preferred_engine_mode();
         entry
             .enter(mode, |context| {
@@ -2677,14 +2674,14 @@ impl CpuBackend {
         &mut self,
         op: impl FnOnce(&mut BufferPool) -> crate::Result<R> + Send,
     ) -> crate::Result<R> {
-        let owner = inherited_or_new_execution_owner();
-        let permit = self.acquire_execution_permit(owner);
-        let entry = CpuOperationEntry::new(self.engine.domain(), &permit);
+        let admission = self.execution_admission()?;
+        let permit = admission.permit();
+        let entry = CpuOperationEntry::new(self.engine.domain(), permit);
         let mode = entry.preferred_engine_mode();
         entry
             .enter(mode, |context| {
                 context.with_native_parallelism(|| {
-                    self.with_execution_resources(&permit, |resources| {
+                    self.with_execution_resources(permit, |resources| {
                         let mut buffers = BufferPoolLoan::new(&mut resources.buffers);
                         op(buffers.get_mut())
                     })
@@ -2697,14 +2694,14 @@ impl CpuBackend {
         &mut self,
         op: impl FnOnce(&CpuExecutionContext<'_>, &mut BufferPool) -> crate::Result<R> + Send,
     ) -> crate::Result<R> {
-        let owner = inherited_or_new_execution_owner();
-        let permit = self.acquire_execution_permit(owner);
-        let entry = CpuOperationEntry::new(self.engine.domain(), &permit);
+        let admission = self.execution_admission()?;
+        let permit = admission.permit();
+        let entry = CpuOperationEntry::new(self.engine.domain(), permit);
         let mode = entry.preferred_engine_mode();
         entry
             .enter(mode, |context| {
                 context.with_native_parallelism(|| {
-                    self.with_execution_resources(&permit, |resources| {
+                    self.with_execution_resources(permit, |resources| {
                         let mut buffers = BufferPoolLoan::new(&mut resources.buffers);
                         op(context, buffers.get_mut())
                     })
@@ -2722,14 +2719,14 @@ impl CpuBackend {
             ) -> crate::Result<R>
             + Send,
     ) -> crate::Result<R> {
-        let owner = inherited_or_new_execution_owner();
-        let permit = self.acquire_execution_permit(owner);
-        let entry = CpuOperationEntry::new(self.engine.domain(), &permit);
+        let admission = self.execution_admission()?;
+        let permit = admission.permit();
+        let entry = CpuOperationEntry::new(self.engine.domain(), permit);
         let mode = entry.preferred_engine_mode();
         entry
             .enter(mode, |context| {
                 context.with_native_parallelism(|| {
-                    self.with_execution_resources(&permit, |resources| {
+                    self.with_execution_resources(permit, |resources| {
                         let EngineResources {
                             buffers,
                             indexed_plan_cache,
@@ -2807,14 +2804,14 @@ impl CpuBackend {
         &mut self,
         op: impl FnOnce(&CpuExecutionContext<'_>, &mut BufferPool) -> crate::Result<R> + Send,
     ) -> crate::Result<R> {
-        let owner = inherited_or_new_execution_owner();
-        let permit = self.acquire_execution_permit(owner);
-        let entry = CpuOperationEntry::new(self.engine.domain(), &permit);
+        let admission = self.execution_admission()?;
+        let permit = admission.permit();
+        let entry = CpuOperationEntry::new(self.engine.domain(), permit);
         let mode = entry.preferred_linalg_mode(self.kind());
         entry
             .enter(mode, |context| {
                 context.with_native_parallelism(|| {
-                    self.with_execution_resources(&permit, |resources| {
+                    self.with_execution_resources(permit, |resources| {
                         let mut buffers = BufferPoolLoan::new(&mut resources.buffers);
                         op(context, buffers.get_mut())
                     })
@@ -3617,14 +3614,15 @@ impl CpuBackend {
         f: impl FnOnce(&mut dyn BackendSession) -> R + Send,
     ) -> R {
         let providers = self.provider_bundle.clone();
-        let owner = inherited_or_new_execution_owner();
-        let permit = self.acquire_execution_permit(owner);
-        let entry = CpuOperationEntry::new(self.engine.domain(), &permit);
+        let admission = self.infallible_execution_admission();
+        let permit = admission.permit();
+        let owner = permit.owner();
+        let entry = CpuOperationEntry::new(self.engine.domain(), permit);
         // Provider-owned BLAS threading does not change session entry: the
         // permit, including provider exclusion, spans this entire callback.
         let enter_managed_session = entry.supports_infallible_session_entry();
         let run = |entered| {
-            self.with_execution_resources(&permit, |resources| {
+            self.with_execution_resources(permit, |resources| {
                 let mut buffers = BufferPoolLoan::new(&mut resources.buffers);
                 let cache = cache.unwrap_or(&mut resources.gemm_analysis_cache);
                 let session_started = Instant::now();
@@ -3688,10 +3686,10 @@ impl BackendSessionHost for CpuBackend {
 
 impl TensorBuffer for CpuBackend {
     fn reclaim_buffer(&mut self, tensor: Tensor) {
-        let owner = inherited_or_new_execution_owner();
-        with_execution_owner(owner, || {
-            let permit = self.acquire_execution_permit(owner);
-            self.with_execution_resources(&permit, |resources| {
+        let admission = self.infallible_execution_admission();
+        let permit = admission.permit();
+        with_execution_owner(permit.owner(), || {
+            self.with_execution_resources(permit, |resources| {
                 let buffers = &mut resources.buffers;
                 match tensor {
                     Tensor::F32(t) => reclaim_typed(buffers, t),
@@ -3823,6 +3821,8 @@ impl Default for CpuBackend {
         Self::new()
     }
 }
+
+pub(crate) mod execution_scope;
 
 #[cfg(test)]
 mod tests;

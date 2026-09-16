@@ -117,6 +117,32 @@ fn controlled_external_capabilities() -> crate::CpuProviderExecutionCapabilities
 }
 
 #[test]
+fn shared_scope_rejects_external_domain_without_executor_admission() {
+    let installs = Arc::new(AtomicUsize::new(0));
+    let backend = external_backend(
+        CpuDomainId::new(7),
+        [external_domain(
+            7,
+            node_placement(0, cpu_set([0, 1])),
+            2,
+            2,
+            CpuPlacementGuarantee::ExactDeclared,
+            Arc::clone(&installs),
+        )],
+        topology([0, 1, 2, 3]),
+    )
+    .unwrap();
+    let error = backend
+        .with_execution_scope(|| panic!("must not run"))
+        .unwrap_err();
+    assert!(matches!(error, crate::Error::Unsupported { .. }));
+    assert!(error.to_string().contains("Tenferro-managed"));
+    assert_eq!(installs.load(Ordering::SeqCst), 0);
+    assert_eq!(backend.install(|| 13), 13);
+    assert_eq!(installs.load(Ordering::SeqCst), 1);
+}
+
+#[test]
 fn bundle_install_rejects_external_workers_for_a_strict_multithread_subdomain() {
     let backend = external_backend(
         CpuDomainId::new(7),
