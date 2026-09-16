@@ -27,16 +27,18 @@ thread_local! {
 pub(crate) const BACKEND_REENTRY_PANIC: &str =
     "CpuBackend cannot be re-entered while another CPU backend execution is active on this thread or managed Rayon scope";
 
+pub(crate) fn has_active_execution() -> bool {
+    EXECUTION_OWNER.with(Cell::get).is_some()
+        || WORKER_EXECUTION_SCOPE.with(|scope| {
+            scope
+                .borrow()
+                .as_ref()
+                .is_some_and(|scope| scope.has_active_owner())
+        })
+}
+
 pub(crate) fn inherited_or_new_execution_owner() -> ResourceOwner {
-    if WORKER_EXECUTION_SCOPE.with(|scope| {
-        scope
-            .borrow()
-            .as_ref()
-            .is_some_and(|scope| scope.has_active_owner())
-    }) {
-        panic!("{BACKEND_REENTRY_PANIC}");
-    }
-    if EXECUTION_OWNER.with(Cell::get).is_some() {
+    if has_active_execution() {
         panic!("{BACKEND_REENTRY_PANIC}");
     }
     ResourceOwner::fresh()

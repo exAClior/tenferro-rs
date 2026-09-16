@@ -103,6 +103,37 @@ supported explicit path/tree controls on the traced route, described in
 [einsum optimization controls](einsum.md#optimization-controls), rather than
 silently discarding it. Parenthesized ellipsis is unsupported.
 
+## CPU execution scopes
+
+`CpuBackend::with_execution_scope` amortizes executor entry across sequential
+ordinary eager operations, eager AD and prepared trace replay. Build their
+runtimes from **clones of the same configured CPU backend**, then enter a scope
+on that backend. The scope retains the executor and provider-exclusion permit;
+each call still uses its own normal exclusive operation/session borrow. It does
+not change tensor ownership, AD semantics, graph/runtime identity checks or cache
+ownership. Returned outputs remain usable after scope exit.
+
+Run the complete primal/JVP/VJP and prepared-replay example:
+`cargo run -p tenferro-ad --example cpu_execution_scope`.
+The [example source](https://github.com/tensor4all/tenferro-rs/blob/main/crates/tenferro-ad/examples/cpu_execution_scope.rs)
+uses one explicit CPU thread. See the
+[scope design and verification contract](../design/cpu-shared-execution-scope.md).
+
+This API supports Tenferro-managed CPU domains, not GPU or external executor
+scopes. Nested scopes return errors. The existing nested backend/session entry
+guards remain: do not call ordinary eager/backend APIs from an active borrowed
+session or another worker thread. A different immutable backend witness cannot borrow
+the scope; infallible session APIs retain their documented panic boundary for
+invalid entry. A returned error or unwinding releases the current operation loan
+and, when the callback exits, the scope permit.
+
+For steady-state measurement, create inputs, compile/prepare graphs, enter the
+scope and warm up **before** starting the clock. Stop the clock before cleanup.
+Allocation-returning operations still allocate outputs; a shared scope is not an
+output-reuse API. Thread count and CPU affinity remain separate settings. A scope
+removes repeated executor admission, not every high-level per-call cost, and is
+not a promise that four threads outperform one.
+
 ## Interpret overhead without inventing a budget
 
 `1 ms = 1000 us = 1,000,000 ns`. Repeated cost is `N × per-call cost`.
