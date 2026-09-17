@@ -481,6 +481,28 @@ impl CudaRuntime {
         Ok(f())
     }
 
+    /// Retire cached-resource use on every initialized stream, then destroy
+    /// under the owning context. Caller holds the resource cache lock across
+    /// this call, preventing new resource enqueues until destruction completes.
+    /// This deliberately avoids CubeCL server locks during retirement.
+    pub(super) fn with_retired_streams<R>(
+        &self,
+        op: &'static str,
+        destroy: impl FnOnce() -> R,
+    ) -> crate::Result<R> {
+        self.with_current_context(op, || {
+            for stream in &self.inner.raw_streams {
+                if let Some(&stream) = stream.get() {
+                    // SAFETY: initialized slots name live CubeCL streams; the
+                    // runtime clone retains their client and primary context.
+                    unsafe { cuda_result::stream::synchronize(stream as usize as cudaStream_t) }
+                        .map_err(|error| crate::Error::backend_source(op, error))?;
+                }
+            }
+            Ok(destroy())
+        })?
+    }
+
     /// Flush pending CubeCL work on the current stream.
     ///
     /// Used by the raw-session enter protocol so raw library calls observe
