@@ -234,6 +234,161 @@ fn cuda_extension_cache_byte_pressure_evicts_largest_entry() {
 }
 
 #[test]
+fn cuda_extension_cache_resources_survive_plan_pressure() {
+    let cache = CudaExtensionCache::with_max_entries(NonZeroUsize::new(2).unwrap());
+    cache
+        .set_max_retained_bytes(NonZeroUsize::new(64).unwrap())
+        .unwrap();
+    let mut loads = 0;
+    for _ in 0..7 {
+        let resource = cache
+            .get_or_try_init_resource::<u64>(|| {
+                loads += 1;
+                Ok(37)
+            })
+            .unwrap();
+        assert_eq!(*resource, 37);
+        assert!(cache.inner.try_lock().is_err());
+        drop(resource);
+        drop(cache.get_or_try_init::<u32>(|| Ok(9)).unwrap());
+        cache.update_retained_bytes::<u32>(65).unwrap();
+        let stats = cache.stats().unwrap();
+        assert_eq!(stats.entries, 1);
+        assert_eq!(stats.retained_bytes, 8);
+    }
+    assert_eq!(loads, 1);
+    assert_eq!(cache.stats().unwrap().evictions, 7);
+}
+
+#[test]
+fn cuda_extension_cache_resource_growth_evicts_plans_not_resources() {
+    let cache = CudaExtensionCache::new();
+    cache
+        .set_max_retained_bytes(NonZeroUsize::new(64).unwrap())
+        .unwrap();
+    drop(cache.get_or_try_init_resource::<u64>(|| Ok(37)).unwrap());
+    drop(cache.get_or_try_init::<u32>(|| Ok(9)).unwrap());
+    cache.update_retained_bytes::<u32>(48).unwrap();
+
+    cache.update_retained_bytes::<u64>(32).unwrap();
+
+    assert_eq!(
+        *cache
+            .get_or_try_init_resource::<u64>(|| panic!("resource was evicted"))
+            .unwrap(),
+        37
+    );
+    let stats = cache.stats().unwrap();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.retained_bytes, 32);
+    assert_eq!(stats.evictions, 1);
+    assert!(cache.get_cloned::<u32>().unwrap().is_none());
+}
+
+#[test]
+fn cuda_extension_cache_resource_rejections_are_atomic() {
+    let cache = CudaExtensionCache::with_max_entries(NonZeroUsize::new(2).unwrap());
+    cache
+        .set_max_retained_bytes(NonZeroUsize::new(16).unwrap())
+        .unwrap();
+    drop(cache.get_or_try_init_resource::<u64>(|| Ok(19)).unwrap());
+    drop(cache.get_or_try_init_resource::<u32>(|| Ok(23)).unwrap());
+    let before = format!("{:?}", cache.stats().unwrap());
+    assert!(cache
+        .get_or_try_init_resource::<u8>(|| panic!("must reject before init"))
+        .is_err());
+    assert!(cache
+        .set_max_entries(NonZeroUsize::new(1).unwrap())
+        .is_err());
+    assert!(cache
+        .set_max_retained_bytes(NonZeroUsize::new(11).unwrap())
+        .is_err());
+    assert!(cache.update_retained_bytes::<u32>(9).is_err());
+    assert_eq!(format!("{:?}", cache.stats().unwrap()), before);
+    assert_eq!(cache.max_entries().unwrap().get(), 2);
+    assert_eq!(cache.max_retained_bytes().unwrap().get(), 16);
+    assert_eq!(
+        *cache.get_or_try_init_resource::<u64>(|| panic!()).unwrap(),
+        19
+    );
+    let bytes = CudaExtensionCache::new();
+    bytes
+        .set_max_retained_bytes(NonZeroUsize::new(7).unwrap())
+        .unwrap();
+    assert!(bytes
+        .get_or_try_init_resource::<u64>(|| panic!("byte admission"))
+        .is_err());
+    assert_eq!(bytes.stats().unwrap().misses, 0);
+}
+
+#[test]
+fn cuda_extension_cache_resource_promotion_preserves_identity_and_bytes() {
+    let cache = CudaExtensionCache::new();
+    drop(cache.get_or_try_init::<u64>(|| Ok(41)).unwrap());
+    cache.update_retained_bytes::<u64>(29).unwrap();
+    assert_eq!(
+        *cache.get_or_try_init_resource::<u64>(|| panic!()).unwrap(),
+        41
+    );
+    drop(cache.get_or_try_init::<u64>(|| panic!()).unwrap());
+    cache
+        .set_max_retained_bytes(NonZeroUsize::new(30).unwrap())
+        .unwrap();
+    assert!(cache.get_or_try_init::<u32>(|| Ok(2)).is_err());
+    assert_eq!(cache.stats().unwrap().retained_bytes, 29);
+    assert_eq!(
+        *cache.get_or_try_init_resource::<u64>(|| panic!()).unwrap(),
+        41
+    );
+}
+
+#[test]
+fn cuda_extension_cache_resource_failure_clear_drop_and_owner_isolation() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    struct Resource(Arc<AtomicUsize>);
+    impl Drop for Resource {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let drops = Arc::new(AtomicUsize::new(0));
+    let cache = CudaExtensionCache::new();
+    assert!(cache
+        .get_or_try_init_resource::<Resource>(|| Err(crate::Error::runtime_state(
+            "test",
+            "failed init"
+        )))
+        .is_err());
+    assert!(cache.is_empty().unwrap());
+    drop(
+        cache
+            .get_or_try_init_resource(|| Ok(Resource(drops.clone())))
+            .unwrap(),
+    );
+    cache.clear().unwrap();
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+    drop(
+        cache
+            .get_or_try_init_resource(|| Ok(Resource(drops.clone())))
+            .unwrap(),
+    );
+    let other = CudaExtensionCache::new();
+    drop(
+        other
+            .get_or_try_init_resource(|| Ok(Resource(drops.clone())))
+            .unwrap(),
+    );
+    drop(cache);
+    assert_eq!(drops.load(Ordering::SeqCst), 2);
+    assert_eq!(other.stats().unwrap().entries, 1);
+    drop(other);
+    assert_eq!(drops.load(Ordering::SeqCst), 3);
+}
+
+#[test]
 fn cuda_backend_exposes_extension_cache_retained_byte_controls() {
     let _getter: fn(&CudaBackend) -> crate::Result<NonZeroUsize> =
         CudaBackend::cuda_extension_cache_max_retained_bytes;
