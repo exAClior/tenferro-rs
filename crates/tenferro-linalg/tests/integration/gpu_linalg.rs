@@ -1529,16 +1529,13 @@ fn test_cubecl_solve_f64_matches_cpu() {
 }
 
 
-/// One two-site DMRG split as used by rydberg-tn `optimize_two_site`:
-/// truncated SVD of the χd × χd complex128 two-site tensor (χ=16, d=2 → 32×32).
-/// The local Krylov/eigh path is CPU `faer` in rydberg-tn; the CUDA vendor
-/// session is the split (`Execution::split` → `svd_read`).
+/// Two-site DMRG split kernel from rydberg-tn `optimize_two_site`:
+/// truncated SVD of a χ=16, d=2 complex128 block (32×32).
+/// Local Krylov/eigh is CPU; CUDA vendor session is this SVD.
 ///
-/// The N=100 sweep is 198 of these splits. This MWE keeps that kernel and
-/// repeats it enough times to count `CudaLinalgHandles` cache misses.
-///
-/// Run with:
-/// `cargo test -p tenferro-linalg --features cuda --test integration gpu_linalg::two_site_dmrg_update_reuses_cuda_linalg_handles -- --ignored --include-ignored --nocapture --exact`
+/// Same kernel as rydberg-tn optimize_two_site SVD split.
+/// On tenferro 42437dd / CUDA 12.1 A800: 8 updates → 1 miss, 7 hits, 0 evictions.
+/// Current main cannot load CudaLinalgHandles on CUDA 12.1 (cusolverDnXlarft_bufferSize).
 #[test]
 #[ignore]
 fn two_site_dmrg_update_reuses_cuda_linalg_handles() {
@@ -1572,13 +1569,17 @@ fn two_site_dmrg_update_reuses_cuda_linalg_handles() {
     }
     let after = gpu.cuda_extension_cache_stats().unwrap();
     let extra_misses = after.misses.saturating_sub(before.misses);
+    let extra_hits = after.hits.saturating_sub(before.hits);
+    let extra_evictions = after.evictions.saturating_sub(before.evictions);
     eprintln!(
-        "two_site_dmrg_split: updates={UPDATES} cache_misses={extra_misses} hits={} evictions={}",
-        after.hits.saturating_sub(before.hits),
-        after.evictions.saturating_sub(before.evictions)
+        "two_site_dmrg_split updates={UPDATES} cache_misses={extra_misses} hits={extra_hits} evictions={extra_evictions} entries={} retained_bytes={}",
+        after.entries,
+        after.retained_bytes
     );
-    assert!(
-        extra_misses >= 1,
-        "two-site SVD never initialized CudaLinalgHandles"
+    assert_eq!(
+        extra_misses, 1,
+        "expected one CudaLinalgHandles init across {UPDATES} identical two-site SVDs; got misses={extra_misses} hits={extra_hits} evictions={extra_evictions}"
     );
+    assert_eq!(extra_hits, (UPDATES - 1) as u64);
+    assert_eq!(extra_evictions, 0);
 }
