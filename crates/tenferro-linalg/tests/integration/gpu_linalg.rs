@@ -10,7 +10,9 @@ use tenferro_gpu::{
 use tenferro_linalg::{
     HouseholderQr, LinalgBackend, QrGauge, QrOptions, RankRevealingQrOptions, TensorLinalgExt,
 };
-use tenferro_tensor::{BackendSessionHost, Error, Tensor, TensorRead, TypedTensor};
+use tenferro_tensor::{
+    BackendSessionHost, DotGeneralConfig, Error, Tensor, TensorDot, TensorRead, TypedTensor,
+};
 
 fn cpu_backend() -> CpuBackend {
     CpuBackend::new()
@@ -1526,4 +1528,99 @@ fn test_cubecl_solve_f64_matches_cpu() {
         with_cuda_linalg_session(&mut gpu, |session| session.solve(&gpu_a, &gpu_b)).unwrap();
     let actual = download(&gpu, &gpu_out);
     assert_tensor_close(&actual, &expected, 1e-9);
+}
+
+
+/// Two-site DMRG split kernel from rydberg-tn `optimize_two_site`:
+/// truncated SVD of a χ=16, d=2 complex128 block (32×32).
+/// Local Krylov/eigh is CPU; CUDA vendor session is this SVD.
+///
+/// On tenferro 42437dd / CUDA 12.1 A800: 8 identical SVDs → 1 miss, 7 hits.
+/// This test then inserts 24 distinct contractions (plan-cache pressure)
+/// and repeats the SVDs. A second handle miss after that fill is the bug.
+#[test]
+#[ignore]
+fn two_site_dmrg_update_reuses_cuda_linalg_handles() {
+    if !gpu_available() {
+        panic!("CUDA device required for this MWE");
+    }
+
+    const CHI: usize = 16;
+    const D: usize = 2;
+    const ROWS: usize = CHI * D;
+    const COLS: usize = CHI * D;
+    const UPDATES: usize = 8;
+    const PLANS: usize = 24;
+
+    let mut theta = vec![Complex64::new(0.0, 0.0); ROWS * COLS];
+    for col in 0..COLS {
+        for row in 0..ROWS {
+            let decay = 1.0 / (1.0 + (row as f64 - col as f64).abs());
+            theta[row + col * ROWS] = Complex64::new(decay, 0.01 * (row as f64 - col as f64));
+        }
+    }
+    let theta_t = tensor_c64(vec![ROWS, COLS], theta);
+    let config = DotGeneralConfig {
+        lhs_contracting_dims: vec![1],
+        rhs_contracting_dims: vec![0],
+        lhs_batch_dims: vec![],
+        rhs_batch_dims: vec![],
+    };
+
+    let mut gpu = gpu_backend();
+    let gpu_theta = upload(&gpu, &theta_t);
+
+    let t0 = gpu.cuda_extension_cache_stats().unwrap();
+    for _ in 0..UPDATES {
+        let svd = with_cuda_linalg_session(&mut gpu, |session| session.svd(&gpu_theta)).unwrap();
+        assert_eq!(svd[0].shape()[0], ROWS);
+        assert_eq!(svd[2].shape()[1], COLS);
+    }
+    let t1 = gpu.cuda_extension_cache_stats().unwrap();
+    let warmup_misses = t1.misses.saturating_sub(t0.misses);
+    let warmup_hits = t1.hits.saturating_sub(t0.hits);
+    eprintln!(
+        "warmup_svd updates={UPDATES} misses={warmup_misses} hits={warmup_hits} evictions={} entries={}",
+        t1.evictions.saturating_sub(t0.evictions),
+        t1.entries
+    );
+
+    for i in 0..PLANS {
+        let k = 2 + i;
+        let lhs = tensor_c64(
+            vec![ROWS, k],
+            vec![Complex64::new(0.01 * i as f64, 0.0); ROWS * k],
+        );
+        let rhs = tensor_c64(
+            vec![k, COLS],
+            vec![Complex64::new(0.02 * i as f64, 0.0); k * COLS],
+        );
+        let gpu_lhs = upload(&gpu, &lhs);
+        let gpu_rhs = upload(&gpu, &rhs);
+        gpu.dot_general(&gpu_lhs, &gpu_rhs, &config).unwrap();
+    }
+    let t2 = gpu.cuda_extension_cache_stats().unwrap();
+    eprintln!(
+        "plan_fill plans={PLANS} misses={} hits={} evictions={} entries={} retained_bytes={}",
+        t2.misses.saturating_sub(t1.misses),
+        t2.hits.saturating_sub(t1.hits),
+        t2.evictions.saturating_sub(t1.evictions),
+        t2.entries,
+        t2.retained_bytes
+    );
+
+    for _ in 0..UPDATES {
+        let svd = with_cuda_linalg_session(&mut gpu, |session| session.svd(&gpu_theta)).unwrap();
+        assert_eq!(svd[0].shape()[0], ROWS);
+    }
+    let t3 = gpu.cuda_extension_cache_stats().unwrap();
+    let post_misses = t3.misses.saturating_sub(t2.misses);
+    let post_hits = t3.hits.saturating_sub(t2.hits);
+    let post_evictions = t3.evictions.saturating_sub(t2.evictions);
+    eprintln!(
+        "post_plan_svd updates={UPDATES} misses={post_misses} hits={post_hits} evictions={post_evictions} entries={}",
+        t3.entries
+    );
+    assert_eq!(warmup_misses, 1, "warmup SVD should init the handle once");
+    assert_eq!(warmup_hits, (UPDATES - 1) as u64);
 }

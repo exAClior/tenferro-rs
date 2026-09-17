@@ -36,5 +36,12 @@
   release builds with CUDA enabled. The growing-resource regression fails
   before the adaptation and passes afterward. Repository local checks and
   CUDA-feature lint checks pass; actual CUDA lifecycle tests compile only here.
+- Workload MWE (`two_site_dmrg_update_reuses_cuda_linalg_handles`): χ=16,
+  d=2, complex128 32×32 SVD, eight updates, then 24 distinct `dot_general`s,
+  then eight more SVDs. On current main, CUDA 12.8, RunPod L4:
+  warmup 1 miss / 7 hits; after plan fill, 0 SVD misses / 8 hits. Identical
+  two-site splits already reuse the handle; this sequence does not recreate
+  it. The change is the lifetime contract (resource entries stay out of the
+  FIFO), not a measured DMRG speedup.
 - No vendor mathematics, numerical precision, solver policy, normal-sweep
   synchronization, profiling instrumentation, or dependency pin is changed.
