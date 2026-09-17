@@ -1348,6 +1348,12 @@ impl CpuLayoutTransformProvider for OptOutProvider {
     }
 }
 
+#[cfg(feature = "provider-inject")]
+#[test]
+fn injected_blas_has_no_uninit_witness() {
+    assert!(BlasGemmProvider.uninit_provider().is_none());
+}
+
 #[test]
 fn uninit_witness_is_exposed_only_by_the_builtin_providers() {
     // SAFETY assertions are structural: only a type that implements the

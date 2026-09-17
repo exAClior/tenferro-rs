@@ -1,5 +1,7 @@
 # Eager read forwarding
 
+2026-09-17; AMD EPYC7713P, explicit 1T provider-matched diagnostics.
+
 The saved provider-matched multiply profile attributes ~5.77M instructions to
 input materialization (~14% of the former eager total, before the strided SIMD
 fix). `exec_standard_op_on_tensor_reads_in_session` unconditionally copies views
@@ -37,12 +39,12 @@ never native-time promotion. Quiet-host native validation remains separate.
 
 Functional verification: the new recording test fails on the baseline (two
 copies, expected zero) and passes after forwarding. 91 unit tests, 354 functional
-integration tests and 174 doctests pass. The UI integration wrapper is not green:
-trybuild initially loses command-line dependency patches; temporary manifest
-patches allow compilation but two snapshots differ only in diagnostic underline
-and remapped source-path formatting. The manifest was restored byte-for-byte;
-no unrelated snapshots were blessed. This remains a final-integration blocker,
-not a numerical failure or a claimed fully passing repository gate.
+integration tests and 174 doctests passed initially. The first UI wrapper run
+failed: trybuild lost command-line dependency patches, and the host compiler
+produced two formatting-only snapshot differences. The later Docker Rust1.98.1
+CPU/AD gate passed all five UI fixtures using temporary manifest patches and a
+test-only OpenBLAS linker; see canonical-copy-dispatch.md. The manifest was
+restored byte-for-byte; no snapshots were changed. This UI blocker is resolved.
 
 ## Collected evidence and next bottleneck
 
@@ -68,7 +70,9 @@ the centralized permutation-copy dispatcher is also serial. Blindly substituting
 either for the current parallel-capable map would change the 4T policy. Kernel
 selection needs bounded-thread validation and quiet-host measurements, rather
 than choosing a cache-sensitive traversal from instruction counts alone. No
-canonical-packing production change has been made yet.
+compact-operand borrowing change was retained. The subsequent shared permutation
+copy change preserves bounded-parallel map dispatch; see canonical-copy-dispatch.md.
 
-Integration/publication and dependency pin changes are explicitly deferred until
-the optimization work is collected, per the user's instruction.
+The maintainer subsequently requested PRs and merging. Strided PR259 is merged,
+and the ordinary git pin now selects that commit. No package publication was
+requested or performed. Native measurements remain inconclusive; 4T is deferred.

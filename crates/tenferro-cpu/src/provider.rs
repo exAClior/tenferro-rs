@@ -1965,12 +1965,6 @@ impl CpuGemmProvider for BlasGemmProvider {
     }
 }
 
-#[cfg(all(test, feature = "provider-inject"))]
-#[test]
-fn injected_blas_has_no_uninit_witness() {
-    assert!(BlasGemmProvider.uninit_provider().is_none());
-}
-
 // SAFETY: the implementation rejects nonzero beta, validates destination byte
 // length/alignment, and uses BLAS's beta=0 full-overwrite contract through raw
 // pointers. Empty contractions explicitly initialize their output to zero.

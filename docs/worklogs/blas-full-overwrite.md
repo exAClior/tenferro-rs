@@ -1,5 +1,7 @@
 # BLAS full-overwrite candidate
 
+2026-09-17; AMD EPYC7713P, explicit 1T provider-matched diagnostics.
+
 The OpenBLAS-matched diagnostics identified redundant allocated-output zeroing,
 including ~4.2M instructions per b32 x 128 batched matrix product. This candidate
 reuses the existing uninitialized GEMM witness and faer validation/dispatch
@@ -54,6 +56,8 @@ Raw profiles, annotations, dispatch traces, test logs and reproduction metadata
 are retained in the sibling benchmark worktree under
 `result/amd-cpu/blas-full-overwrite/` (see its README for final measurements).
 
-This branch still needs the upstream strided revision published and the normal
-git dependency pin updated; local path overrides are required at present.
-Quiet-host native measurements and the broader integration gate remain pending.
+The maintainer subsequently requested integration without claiming a native
+speedup. Strided PR259 merged into the existing integration branch; the normal
+git dependency now pins merged commit `5bc5ab75`, replacing local overrides.
+No crates.io publication is needed or performed. Native timing remains
+inconclusive; final PR gates validate the ordinary git dependency configuration.

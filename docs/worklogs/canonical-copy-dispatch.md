@@ -1,5 +1,7 @@
 # Canonical uninitialized copy dispatch candidate
 
+2026-09-17; AMD EPYC7713P, explicit 1T provider-matched diagnostics.
+
 The earlier compact-operand borrowing candidate was rejected: its 0.020–0.030%
 LM instruction improvement missed the preregistered 1% gate. Its complete patch,
 profiles and rationale remain in benchmark commit `9c4a580`; none of that
@@ -9,8 +11,8 @@ This candidate changes one non-conjugating CPU layout-copy call from generic
 `map_into` to `strided_kernel::copy_into_uninit`. Conjugating copies, provider
 fallback/retry rules, ownership, allocation and error-path reclamation are
 unchanged. The shared implementation is strided revision
-`78d519013e8b44bd80f77eb01d31039f0be9aae6`, selected with local Cargo overrides;
-no published dependency pin is advanced.
+`78d519013e8b44bd80f77eb01d31039f0be9aae6`, initially selected with local Cargo
+overrides. Integration now pins merged strided commit `5bc5ab75` (PR259).
 
 The shared API reuses existing permutation machinery only for sequential,
 non-contiguous f32/f64 copies. It retains map for contiguous, bounded-parallel
@@ -61,10 +63,38 @@ The stdout tail after the client timeout was not captured (CPU collected219
 doctests). Do not misreport the outer command as a synchronous successful run.
 Logs and the final container event are retained with benchmark evidence.
 
-## Remaining acceptance
+## Evidence limits and integration decision
 
-Whole-eager N1/N3 instruction gate: LM reduction >=5%, multiply/GEMM controls
-regression <=1%, three matched pairs, same compiler/provider/threads. This gate
-was declared before measurement in strided's worklog. Native quiet-host timing,
-4T/batch-BLAS combinations, broader AD, formatting/lint and final artifact review
-remain required; this is not a completed optimization goal.
+The preregistered whole-eager N1/N3 gate requested three matched pairs. One
+complete pair measured LM instruction reduction 11.897%, with multiply/GEMM
+controls essentially unchanged; the maintainer cancelled the remaining repeats.
+This is provisional instruction evidence, not a passed three-pair gate.
+
+Two complete native 1T suites were contaminated by foreign runnable jobs;
+the apparent copy effect reversed direction between suites. CPU-domain reservation
+failed with EPERM before measurement; independent verification found all 369 live
+thread affinities unchanged. No native speedup or regression-free timing claim
+is supported. The maintainer stopped timing attempts, deferred 4T combinations,
+and explicitly requested PRs and merging with these limits disclosed.
+
+Benchmark evidence is in tenferro-benchmark commit `b127b11` under
+`result/amd-cpu/{canonical-copy-dispatch,native-1t,small-gemm-gemv}/`.
+The small-GEMM GEMV experiment remains diagnostic-only; no GEMV production change
+is included. Final repository gates and the ordinary merged dependency pin are
+the integration checks; they do not complete the original performance goal.
+
+## Final ordinary-dependency gate
+
+Docker Rust1.98.1 with all six strided crates resolved from GitHub commit
+`5bc5ab75a20277f0c8820cb288b23f6bb6dfbd91`, without path/manifest overrides:
+
+- `scripts/check-pr-fast.sh --base origin/main --coverage-reviewed` with focused
+  `cargo test -j 16 -p tenferro-cpu -p tenferro-ad --no-fail-fast -- --test-threads=1`
+  passed: formatting, documentation snippets, strict workspace/all-target Clippy,
+  Clippy for tropical/sparse/TBLIS extensions, and 1439 Rust tests/doctests.
+- BLAS-only six uninitialized-output tests passed with shared OpenBLAS linkage.
+- The relocated injected-provider opt-out test passed with `cpu-blas,provider-inject`.
+- OpenBLAS/OMP/Rayon and test harness threads were explicitly 1; Cargo jobs 16.
+
+The final preflight corrected one cloned-reference test lint; no lint suppression
+or UI snapshot changes were used. Full hosted CI remains the merge gate.

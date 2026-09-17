@@ -79,7 +79,12 @@ fn eager_read_dispatch_only_materializes_when_the_operation_requires_it() {
     );
 
     // Owned-only operations retain their explicit materialization boundary.
-    let result = execute(&StdTensorOp::Tril { k: 0 }, &[read.clone()], &mut backend).unwrap();
+    let result = execute(
+        &StdTensorOp::Tril { k: 0 },
+        std::slice::from_ref(&read),
+        &mut backend,
+    )
+    .unwrap();
     assert_eq!(data(&result[0]), vec![1., 3., 5., 0., 4., 6.]);
     assert_eq!(copies.swap(0, Ordering::Relaxed), 1);
 
