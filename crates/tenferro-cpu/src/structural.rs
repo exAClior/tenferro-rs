@@ -360,7 +360,7 @@ where
         })
         .map_err(|err| crate::Error::backend_source(op, err))?;
     } else {
-        map_into(&mut dst_view, &src_view, MaybeUninit::new)
+        strided_kernel::copy_into_uninit(&mut dst_view, &src_view)
             .map_err(|err| crate::Error::backend_source(op, err))?;
     }
     Ok(())
