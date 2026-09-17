@@ -98,3 +98,26 @@ Docker Rust1.98.1 with all six strided crates resolved from GitHub commit
 
 The final preflight corrected one cloned-reference test lint; no lint suppression
 or UI snapshot changes were used. Full hosted CI remains the merge gate.
+
+## Consolidated PR CI follow-up
+
+The broader BLAS workspace lane subsequently exposed three existing ellipsis
+broadcast tests returning incorrect values. Reproducing locally and temporarily
+restoring generic map isolated the problem to shared permutation copying, not
+BLAS arithmetic. The HPTT planner selected a zero-stride source inner axis while
+its transpose microkernel assumed +1; tightly sized source storage could also
+be read beyond its extent.
+
+Strided PR260 fixes that shared planner: non-unit selected inner strides use the
+existing general-stride copy loop. Tests cover broadcast, negative and gapped
+source/destination strides, holes, and serial/explicit-two-thread execution;
+focused Memcheck reports zero errors (leak checking disabled). All upstream CI
+passed. The dependency pin now selects its merged commit
+`1be41ce4e656376cb3aa533d97a7711243b1b9ce`.
+
+With that ordinary GitHub pin and no overrides, the complete BLAS workspace
+nextest run passes all 3059 tests locally, including the three previously failing
+tests. Historical instruction measurements above predate this correction and
+were not repeated. PR1804's workflow regression test is consolidated into PR1807;
+PR1797 is already in main. GPU validation is reserved for the consolidated final
+head after CPU gates succeed; PR1800 is intentionally excluded.
