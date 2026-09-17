@@ -44,5 +44,31 @@ and remapped source-path formatting. The manifest was restored byte-for-byte;
 no unrelated snapshots were blessed. This remains a final-integration blocker,
 not a numerical failure or a claimed fully passing repository gate.
 
+## Collected evidence and next bottleneck
+
+The three matched 1T instruction pairs pass the predeclared gates: median paired
+reductions are 52.18% for multiply, 0.28% for GEMM1024, and 1.81% for LM. Vendor
+GEMM self-Ir is unchanged. Benchmark evidence commit `d823ab9` stores the raw
+profiles, protocol, parser, source/binary provenance and failure logs under
+`result/amd-cpu/eager-read-forwarding/`. Docker release library tests also pass
+(91); focused release Memcheck reports zero errors with leak checking disabled.
+These are instruction findings, not native speedup claims.
+
+The candidate LM N3 caller profile records 408 canonical operand materializations
+and 1.429 billion inclusive instructions through `materialize_canonical_operand`
+for the whole invocation (not one contraction). Its uninitialized copy leaf is
+`structural::typed_copy_into_uninit`, which currently uses generic `map_into`.
+Remaining memset cost must not all be attributed to tenferro allocation: the
+largest named caller is OpenBLAS `dgemm_beta_HASWELL`.
+
+Before replacing canonical copies, preserve the custom GEMM provider's supported
+layout/ownership fallback and rhs-error pool reclamation. Existing strided
+`CopyPlan::execute_uninit` is reusable but its fused replay is currently serial;
+the centralized permutation-copy dispatcher is also serial. Blindly substituting
+either for the current parallel-capable map would change the 4T policy. Kernel
+selection needs bounded-thread validation and quiet-host measurements, rather
+than choosing a cache-sensitive traversal from instruction counts alone. No
+canonical-packing production change has been made yet.
+
 Integration/publication and dependency pin changes are explicitly deferred until
 the optimization work is collected, per the user's instruction.
