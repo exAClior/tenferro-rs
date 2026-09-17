@@ -233,6 +233,94 @@ fn cuda_extension_cache_byte_pressure_evicts_largest_entry() {
     assert_eq!(stats.evictions, 1);
 }
 
+// Stand-ins from the resource-retention prototype
+// (exAClior/tenferro-rs@c52595ec metadata tests):
+//   u64 = 37  vendor handle (Session::resource / cuBLAS+cuSOLVER)
+//   u32 = 9   contraction plan (evictable; workspace can grow)
+// Upstream has no get_or_try_init_resource; both kinds share get_or_try_init.
+
+#[test]
+fn cuda_extension_cache_mwe_plan_growth_keeps_older_entry() {
+    let cache = CudaExtensionCache::with_max_entries(NonZeroUsize::new(2).unwrap());
+    cache
+        .set_max_retained_bytes(NonZeroUsize::new(64).unwrap())
+        .unwrap();
+    let mut loads = 0;
+    for _ in 0..7 {
+        let resource = cache
+            .get_or_try_init::<u64>(|| {
+                loads += 1;
+                Ok(37)
+            })
+            .unwrap();
+        assert_eq!(*resource, 37);
+        drop(resource);
+        drop(cache.get_or_try_init::<u32>(|| Ok(9)).unwrap());
+        cache.update_retained_bytes::<u32>(65).unwrap();
+        let stats = cache.stats().unwrap();
+        assert_eq!(stats.entries, 1);
+        assert_eq!(stats.retained_bytes, 8);
+    }
+    assert_eq!(loads, 1);
+    assert_eq!(cache.stats().unwrap().evictions, 7);
+}
+
+#[test]
+fn cuda_extension_cache_mwe_handle_growth_evicts_the_handle() {
+    let cache = CudaExtensionCache::new();
+    cache
+        .set_max_retained_bytes(NonZeroUsize::new(64).unwrap())
+        .unwrap();
+    let mut loads = 0;
+    drop(
+        cache
+            .get_or_try_init::<u64>(|| {
+                loads += 1;
+                Ok(37)
+            })
+            .unwrap(),
+    );
+    drop(cache.get_or_try_init::<u32>(|| Ok(9)).unwrap());
+    cache.update_retained_bytes::<u32>(48).unwrap();
+    cache.update_retained_bytes::<u64>(32).unwrap();
+    drop(
+        cache
+            .get_or_try_init::<u64>(|| {
+                loads += 1;
+                Ok(37)
+            })
+            .unwrap(),
+    );
+    assert_eq!(loads, 2);
+    assert!(cache.get_cloned::<u32>().unwrap().is_some());
+}
+
+#[test]
+fn cuda_extension_cache_mwe_entry_fifo_reinitializes_oldest() {
+    let cache = CudaExtensionCache::with_max_entries(NonZeroUsize::new(2).unwrap());
+    let mut loads = 0;
+    drop(
+        cache
+            .get_or_try_init::<u64>(|| {
+                loads += 1;
+                Ok(37)
+            })
+            .unwrap(),
+    );
+    drop(cache.get_or_try_init::<u32>(|| Ok(9)).unwrap());
+    drop(cache.get_or_try_init::<u8>(|| Ok(1)).unwrap());
+    drop(
+        cache
+            .get_or_try_init::<u64>(|| {
+                loads += 1;
+                Ok(37)
+            })
+            .unwrap(),
+    );
+    assert_eq!(loads, 2);
+    assert_eq!(cache.stats().unwrap().evictions, 2);
+}
+
 #[test]
 fn cuda_backend_exposes_extension_cache_retained_byte_controls() {
     let _getter: fn(&CudaBackend) -> crate::Result<NonZeroUsize> =
