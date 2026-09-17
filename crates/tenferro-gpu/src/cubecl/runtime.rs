@@ -482,8 +482,9 @@ impl CudaRuntime {
     }
 
     /// Retire cached-resource use on every initialized stream, then destroy
-    /// under the owning context. Caller holds the resource cache lock across
-    /// this call, preventing new resource enqueues until destruction completes.
+    /// under the owning context. Caller holds the resource cache lock or has
+    /// exclusive access during cache destruction, preventing new resource
+    /// enqueues until destruction completes.
     /// This deliberately avoids CubeCL server locks during retirement.
     pub(super) fn with_retired_streams<R>(
         &self,

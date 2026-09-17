@@ -276,7 +276,7 @@ unsafe extern "C" fn gated_stream_callback(data: *mut std::ffi::c_void) {
     }
 }
 
-fn check_resource_retirement(explicit_clear: bool) {
+fn check_resource_retirement(explicit_clear: bool, poison: bool) {
     use cudarc::driver::{result as driver, sys};
     use std::sync::{
         atomic::{AtomicBool, Ordering},
@@ -338,6 +338,15 @@ fn check_resource_retirement(explicit_clear: bool) {
         .join()
         .unwrap();
     }
+    if poison {
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = backend.cuda_extension_cache().inner.lock().unwrap();
+            panic!("intentional poison before resource retirement");
+        }));
+        assert!(poisoned.is_err());
+        assert!(backend.cuda_extension_cache().clear().is_err());
+        assert!(result.lock().unwrap().is_empty());
+    }
     let started = Arc::new(AtomicBool::new(false));
     let start_signal = started.clone();
     let retire = std::thread::spawn(move || {
@@ -369,48 +378,17 @@ fn check_resource_retirement(explicit_clear: bool) {
 #[test]
 #[ignore = "requires CUDA: real vendor handle and two worker streams"]
 fn cuda_extension_cache_lifecycle_cross_thread_clear() {
-    check_resource_retirement(true);
+    check_resource_retirement(true, false);
 }
 
 #[test]
 #[ignore = "requires CUDA: real vendor handle and two worker streams"]
 fn cuda_extension_cache_lifecycle_cross_thread_drop() {
-    check_resource_retirement(false);
+    check_resource_retirement(false, false);
 }
 
 #[test]
-#[ignore = "requires CUDA: intentionally leaks poisoned cache and its runtime"]
-fn cuda_extension_cache_lifecycle_failed_clear_and_drop_preserve_resources() {
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering},
-        Arc,
-    };
-    struct Probe(Arc<AtomicUsize>);
-    impl Drop for Probe {
-        fn drop(&mut self) {
-            self.0.fetch_add(1, Ordering::SeqCst);
-        }
-    }
-    assert!(gpu_available(), "requires actual CUDA hardware");
-    let backend = first_cuda_backend().unwrap();
-    let drops = Arc::new(AtomicUsize::new(0));
-    drop(
-        backend
-            .cuda_extension_cache()
-            .get_or_try_init_resource(|| Ok(Probe(drops.clone())))
-            .unwrap(),
-    );
-    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let _guard = backend.cuda_extension_cache().inner.lock().unwrap();
-        panic!("intentional poison before resource retirement");
-    }));
-    assert!(poisoned.is_err());
-    assert!(backend.cuda_extension_cache().clear().is_err());
-    assert_eq!(drops.load(Ordering::SeqCst), 0);
-    drop(backend);
-    assert_eq!(
-        drops.load(Ordering::SeqCst),
-        0,
-        "failed Drop must leak, not destroy"
-    );
+#[ignore = "requires CUDA: real vendor handle and two worker streams"]
+fn cuda_extension_cache_lifecycle_poisoned_drop_retires_resources() {
+    check_resource_retirement(false, true);
 }

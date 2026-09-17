@@ -418,7 +418,7 @@ impl CudaExtensionCacheInner {
         if count >= self.max_entries.get() || bytes > self.max_retained_bytes.get() - used {
             return Err(crate::Error::runtime_state(
                 "cuda_extension_cache",
-                "retained CUDA resources exceed the configured cache budget; clear resources or increase the limit",
+                "CUDA cache entry cannot fit beside retained resources within the configured cache budget; clear resources or increase the limit",
             ));
         }
         Ok(())
@@ -640,8 +640,9 @@ impl CudaExtensionCache {
     /// # Errors
     ///
     /// Propagates the initializer's typed error, returns
-    /// [`crate::Error::RuntimeState`] for a poisoned cache or a missing/wrongly
-    /// typed entry, and preserves backend errors from initialization.
+    /// [`crate::Error::RuntimeState`] for a poisoned cache, insufficient budget
+    /// beside retained resources, or a missing/wrongly typed entry, and preserves
+    /// backend errors from initialization. Budget rejection does not run `init`.
     pub fn get_or_try_init<T>(
         &self,
         init: impl FnOnce() -> crate::Result<T>,
@@ -672,11 +673,12 @@ impl CudaExtensionCache {
     {
         let type_id = TypeId::of::<T>();
         let mut inner = self.lock_inner()?;
-        if resource
-            && !inner
-                .entries
-                .get(&type_id)
-                .is_some_and(|entry| entry.resource)
+        if !inner.entries.contains_key(&type_id)
+            || (resource
+                && !inner
+                    .entries
+                    .get(&type_id)
+                    .is_some_and(|entry| entry.resource))
         {
             let bytes = inner
                 .entries
@@ -787,16 +789,20 @@ impl Default for CudaExtensionCache {
 
 impl Drop for CudaExtensionCache {
     fn drop(&mut self) {
-        if self.owner.is_none() {
+        let Some(owner) = &self.owner else {
             return;
-        }
-        if let Err(error) = self.clear() {
+        };
+        // Exclusive access during Drop needs no lock. Poison means an earlier
+        // CPU panic, not failed GPU retirement; do not reuse cache accounting.
+        let inner = self
+            .inner
+            .get_mut()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Err(error) = owner.with_retired_streams("cuda_extension_cache_drop", || {
+            inner.entries.clear();
+        }) {
             // Drop cannot return a CUDA error. Preserve both inflight resources
             // and their primary context rather than run destructors unsafely.
-            let inner = self
-                .inner
-                .get_mut()
-                .unwrap_or_else(|error| error.into_inner());
             std::mem::forget(std::mem::take(&mut inner.entries));
             std::mem::forget(self.owner.take());
             eprintln!(

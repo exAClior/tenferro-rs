@@ -274,13 +274,17 @@ this bounded, type-indexed cache, but remain resident until explicit clear or
 backend destruction. They do not participate in plan eviction. Admission,
 resource-byte updates, and limit reductions that cannot accommodate retained
 resources fail without evicting entries or changing the limits. Plans continue
-to use the remaining capacity and remain evictable.
+to use the remaining capacity and remain evictable. A new plan that cannot fit
+beside retained resources is rejected before its initializer runs.
 
-The backend-owned cache retains its `CudaRuntime`. Clear and destruction hold
-the resource lock, activate the owning context, and retire every initialized
-raw stream before destroying entries. Explicit clear preserves entries on
-activation or retirement failure. Failed destruction leaks both entries and
-the retained runtime rather than freeing potentially in-flight resources.
+The backend-owned cache retains its `CudaRuntime`. Clear holds the resource
+lock; destruction has exclusive access and recovers the contents even if the
+mutex is poisoned. Neither path reuses poisoned state for normal execution.
+Both activate the owning context and retire every initialized raw stream before
+destroying entries. Explicit clear rejects a poisoned mutex and preserves
+entries on activation or retirement failure. Destruction leaks both entries
+and the retained runtime if activation or retirement fails, rather than freeing
+potentially in-flight resources. Mutex poisoning alone does not require a leak.
 Normal resource lookup and enqueue add no synchronization barrier.
 
 CUDA `dot_general` stores cuTENSOR contraction descriptors, plans, and lazy

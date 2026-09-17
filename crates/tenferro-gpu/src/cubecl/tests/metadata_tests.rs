@@ -322,6 +322,33 @@ fn cuda_extension_cache_resource_rejections_are_atomic() {
 }
 
 #[test]
+fn cuda_extension_cache_plan_admission_reserves_resource_capacity() {
+    // Exercise entry and byte exhaustion independently, then admit at equality.
+    for (entries, bytes) in [(1, 64), (2, 11)] {
+        let cache = CudaExtensionCache::with_max_entries(NonZeroUsize::new(entries).unwrap());
+        cache
+            .set_max_retained_bytes(NonZeroUsize::new(bytes).unwrap())
+            .unwrap();
+        drop(cache.get_or_try_init_resource::<u64>(|| Ok(37)).unwrap());
+        let before = format!("{:?}", cache.stats().unwrap());
+        let error = cache
+            .get_or_try_init::<u32>(|| panic!("must reject before initializing plan"))
+            .expect_err("plan cannot fit beside retained resource");
+        assert!(error.to_string().contains("configured cache budget"));
+        assert_eq!(format!("{:?}", cache.stats().unwrap()), before);
+        cache
+            .set_max_entries(NonZeroUsize::new(2).unwrap())
+            .unwrap();
+        cache
+            .set_max_retained_bytes(NonZeroUsize::new(12).unwrap())
+            .unwrap();
+        assert_eq!(*cache.get_or_try_init::<u32>(|| Ok(19)).unwrap(), 19);
+        assert_eq!(cache.stats().unwrap().retained_bytes, 12);
+        assert_eq!(cache.stats().unwrap().evictions, 0);
+    }
+}
+
+#[test]
 fn cuda_extension_cache_resource_promotion_preserves_identity_and_bytes() {
     let cache = CudaExtensionCache::new();
     drop(cache.get_or_try_init::<u64>(|| Ok(41)).unwrap());
@@ -334,7 +361,9 @@ fn cuda_extension_cache_resource_promotion_preserves_identity_and_bytes() {
     cache
         .set_max_retained_bytes(NonZeroUsize::new(30).unwrap())
         .unwrap();
-    assert!(cache.get_or_try_init::<u32>(|| Ok(2)).is_err());
+    assert!(cache
+        .get_or_try_init::<u32>(|| panic!("must reject before init"))
+        .is_err());
     assert_eq!(cache.stats().unwrap().retained_bytes, 29);
     assert_eq!(
         *cache.get_or_try_init_resource::<u64>(|| panic!()).unwrap(),
