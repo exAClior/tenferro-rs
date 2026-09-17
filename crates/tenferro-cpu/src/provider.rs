@@ -1944,6 +1944,34 @@ impl CpuGemmProvider for BlasGemmProvider {
             ))
         }
     }
+
+    fn uninit_provider(&self) -> Option<&dyn CpuUninitGemmProvider> {
+        Some(self)
+    }
+}
+
+// SAFETY: the implementation rejects nonzero beta, validates destination byte
+// length/alignment, and uses BLAS's beta=0 full-overwrite contract through raw
+// pointers. Empty contractions explicitly initialize their output to zero.
+unsafe impl CpuUninitGemmProvider for BlasGemmProvider {
+    unsafe fn gemm_into_uninit(
+        &self,
+        context: &CpuExecutionContext<'_>,
+        request: CpuGemmUninitRequest<'_, '_>,
+        output_bytes: &mut [MaybeUninit<u8>],
+    ) -> tenferro_tensor::Result<CpuProviderOutcome> {
+        #[cfg(feature = "cpu-blas")]
+        {
+            crate::gemm::execute_blas_gemm_request_into_uninit(context, request, output_bytes)
+        }
+        #[cfg(not(feature = "cpu-blas"))]
+        {
+            let _ = (context, request, output_bytes);
+            Ok(CpuProviderOutcome::Unsupported(
+                CpuProviderUnsupported::RuntimeUnavailable,
+            ))
+        }
+    }
 }
 
 /// Built-in strided layout materialization provider.
