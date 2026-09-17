@@ -340,6 +340,9 @@ impl fmt::Debug for CudaBackend {
 #[doc(hidden)]
 pub struct CudaExtensionCache {
     inner: Mutex<CudaExtensionCacheInner>,
+    // Backend-owned caches retain context authority through resource teardown.
+    // The runtime does not own this cache, so this strong reference cannot cycle.
+    owner: Option<CudaRuntime>,
 }
 
 impl fmt::Debug for CudaExtensionCache {
@@ -357,6 +360,8 @@ const DEFAULT_CUDA_EXTENSION_CACHE_RETAINED_BYTES: usize = 64 * 1024 * 1024;
 struct CudaExtensionCacheEntry {
     value: Box<dyn Any + Send>,
     retained_bytes: usize,
+    // Raw-session resources live until explicit clear or backend destruction.
+    resource: bool,
 }
 
 struct CudaExtensionCacheInner {
@@ -395,16 +400,51 @@ impl CudaExtensionCacheInner {
         }
     }
 
-    fn insert<T: Send + 'static>(&mut self, type_id: TypeId, value: T, retained_bytes: usize) {
+    fn resource_usage(&self) -> (usize, usize) {
+        self.entries
+            .values()
+            .filter(|entry| entry.resource)
+            .fold((0, 0), |(count, bytes), entry| {
+                (count + 1, bytes + entry.retained_bytes)
+            })
+    }
+
+    fn check_resource_admission(&self, type_id: TypeId, bytes: usize) -> crate::Result<()> {
+        let (mut count, mut used) = self.resource_usage();
+        if let Some(entry) = self.entries.get(&type_id).filter(|entry| entry.resource) {
+            count -= 1;
+            used -= entry.retained_bytes;
+        }
+        if count >= self.max_entries.get() || bytes > self.max_retained_bytes.get() - used {
+            return Err(crate::Error::runtime_state(
+                "cuda_extension_cache",
+                "retained CUDA resources exceed the configured cache budget; clear resources or increase the limit",
+            ));
+        }
+        Ok(())
+    }
+
+    fn insert<T: Send + 'static>(
+        &mut self,
+        type_id: TypeId,
+        value: T,
+        retained_bytes: usize,
+        resource: bool,
+    ) {
         self.entries.insert(
             type_id,
             CudaExtensionCacheEntry {
                 value: Box::new(value),
                 retained_bytes,
+                resource,
             },
         );
         self.order.retain(|&existing| existing != type_id);
-        self.order.push_back(type_id);
+        // INVARIANT: admission reserves the resource share of both bounds;
+        // only evictable entries enter FIFO, so pressure cannot destroy handles.
+        if !resource {
+            self.order.push_back(type_id);
+        }
         self.retained_bytes = self
             .entries
             .values()
@@ -465,6 +505,7 @@ impl CudaExtensionCache {
     pub fn with_max_entries(max_entries: NonZeroUsize) -> Self {
         Self {
             inner: Mutex::new(CudaExtensionCacheInner::new(max_entries)),
+            owner: None,
         }
     }
 
@@ -487,22 +528,35 @@ impl CudaExtensionCache {
 
     /// Remove every cached CUDA extension state value.
     ///
-    /// This operation returns a runtime-state error if the cache mutex is
-    /// poisoned.
+    /// Backend-owned caches activate their runtime context and retire every
+    /// initialized stream before destruction, while holding the resource lock.
+    /// Failed activation or retirement leaves the entries and stats unchanged.
     ///
     /// # Errors
     ///
-    /// Returns [`crate::Error::RuntimeState`] if the cache mutex is poisoned.
+    /// Returns [`crate::Error::RuntimeState`] if the cache mutex is poisoned,
+    /// or a backend error if context activation or stream retirement fails.
     pub fn clear(&self) -> crate::Result<()> {
         let mut inner = self.lock_inner()?;
-        inner.entries.clear();
-        inner.order.clear();
-        inner.retained_bytes = 0;
-        let clears = inner.stats.clears.saturating_add(1);
-        inner.stats = CacheStats {
-            clears,
-            ..CacheStats::empty()
+        let clear = || {
+            inner.entries.clear();
+            inner.order.clear();
+            inner.retained_bytes = 0;
+            let clears = inner.stats.clears.saturating_add(1);
+            inner.stats = CacheStats {
+                clears,
+                ..CacheStats::empty()
+            };
         };
+        if let Some(owner) = &self.owner {
+            // Lock order: cache -> direct CUDA synchronization; no CubeCL
+            // server/plan lock. A resource guard covers enqueue, so no new
+            // resource use can race retirement or destruction under this lock.
+            owner.with_retired_streams("cuda_extension_cache_clear", clear)?;
+        } else {
+            let mut clear = clear;
+            clear();
+        }
         Ok(())
     }
 
@@ -531,13 +585,21 @@ impl CudaExtensionCache {
         Ok(self.lock_inner()?.max_retained_bytes)
     }
 
-    /// Replace the entry bound and evict oldest entries if needed.
+    /// Replace the entry bound and evict oldest plan entries if needed.
     /// # Errors
     ///
     /// Returns [`crate::Error::RuntimeState`] if the cache mutex is poisoned
-    /// while changing the bound.
+    /// while changing the bound, or a validation error if the new limit cannot
+    /// hold retained resources. Rejection leaves the cache and limit unchanged.
     pub fn set_max_entries(&self, max_entries: NonZeroUsize) -> crate::Result<()> {
         let mut inner = self.lock_inner()?;
+        if max_entries.get() < inner.resource_usage().0 {
+            return Err(crate::Error::invalid_argument(
+                "cuda_extension_cache",
+                "max_entries",
+                "cannot hold retained resources; clear resources before lowering the limit",
+            ));
+        }
         inner.max_entries = max_entries;
         inner.evict_to_limit();
         Ok(())
@@ -548,9 +610,17 @@ impl CudaExtensionCache {
     /// # Errors
     ///
     /// Returns [`crate::Error::RuntimeState`] if the cache mutex is poisoned
-    /// while changing the bound.
+    /// while changing the bound, or a validation error if the new limit cannot
+    /// hold retained resources. Rejection leaves the cache and limit unchanged.
     pub fn set_max_retained_bytes(&self, max_retained_bytes: NonZeroUsize) -> crate::Result<()> {
         let mut inner = self.lock_inner()?;
+        if max_retained_bytes.get() < inner.resource_usage().1 {
+            return Err(crate::Error::invalid_argument(
+                "cuda_extension_cache",
+                "max_retained_bytes",
+                "cannot hold retained resources; clear resources before lowering the limit",
+            ));
+        }
         inner.max_retained_bytes = max_retained_bytes;
         inner.evict_to_limit();
         Ok(())
@@ -579,13 +649,53 @@ impl CudaExtensionCache {
     where
         T: Send + 'static,
     {
+        self.get_or_try_init_with_lifetime(init, false)
+    }
+
+    pub(crate) fn get_or_try_init_resource<T>(
+        &self,
+        init: impl FnOnce() -> crate::Result<T>,
+    ) -> crate::Result<CudaExtensionCacheGuard<'_, T>>
+    where
+        T: Send + 'static,
+    {
+        self.get_or_try_init_with_lifetime(init, true)
+    }
+
+    fn get_or_try_init_with_lifetime<T>(
+        &self,
+        init: impl FnOnce() -> crate::Result<T>,
+        resource: bool,
+    ) -> crate::Result<CudaExtensionCacheGuard<'_, T>>
+    where
+        T: Send + 'static,
+    {
         let type_id = TypeId::of::<T>();
         let mut inner = self.lock_inner()?;
+        if resource
+            && !inner
+                .entries
+                .get(&type_id)
+                .is_some_and(|entry| entry.resource)
+        {
+            let bytes = inner
+                .entries
+                .get(&type_id)
+                .map_or(std::mem::size_of::<T>(), |entry| entry.retained_bytes);
+            // Reject before invoking a vendor initializer or evicting any plan.
+            inner.check_resource_admission(type_id, bytes)?;
+        }
         if !inner.entries.contains_key(&type_id) {
             inner.stats.misses = inner.stats.misses.saturating_add(1);
-            inner.insert(type_id, init()?, std::mem::size_of::<T>());
+            inner.insert(type_id, init()?, std::mem::size_of::<T>(), resource);
         } else {
             inner.stats.hits = inner.stats.hits.saturating_add(1);
+            if resource {
+                if let Some(entry) = inner.entries.get_mut(&type_id) {
+                    entry.resource = true;
+                }
+                inner.order.retain(|&existing| existing != type_id);
+            }
         }
         let value = inner
             .entries
@@ -638,17 +748,26 @@ impl CudaExtensionCache {
     /// typed entry before the update, the update is treated as a no-op.
     /// # Errors
     ///
-    /// Returns [`crate::Error::RuntimeState`] if the cache mutex is poisoned.
+    /// Returns [`crate::Error::RuntimeState`] if the cache mutex is poisoned or
+    /// a retained resource would exceed the budget. A rejected update is atomic.
     pub(crate) fn update_retained_bytes<T: 'static>(
         &self,
         retained_bytes: usize,
     ) -> crate::Result<()> {
         let type_id = TypeId::of::<T>();
         let mut inner = self.lock_inner()?;
+        if inner
+            .entries
+            .get(&type_id)
+            .is_some_and(|entry| entry.resource)
+        {
+            inner.check_resource_admission(type_id, retained_bytes)?;
+        }
         if let Some(entry) = inner.entries.get_mut(&type_id) {
+            let resource = entry.resource;
             entry.retained_bytes = retained_bytes;
             inner.refresh_retained_bytes();
-            if inner.retained_bytes > inner.max_retained_bytes.get() {
+            if !resource && inner.retained_bytes > inner.max_retained_bytes.get() {
                 inner.entries.remove(&type_id);
                 inner.order.retain(|candidate| *candidate != type_id);
                 inner.stats.evictions = inner.stats.evictions.saturating_add(1);
@@ -663,6 +782,27 @@ impl CudaExtensionCache {
 impl Default for CudaExtensionCache {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl Drop for CudaExtensionCache {
+    fn drop(&mut self) {
+        if self.owner.is_none() {
+            return;
+        }
+        if let Err(error) = self.clear() {
+            // Drop cannot return a CUDA error. Preserve both inflight resources
+            // and their primary context rather than run destructors unsafely.
+            let inner = self
+                .inner
+                .get_mut()
+                .unwrap_or_else(|error| error.into_inner());
+            std::mem::forget(std::mem::take(&mut inner.entries));
+            std::mem::forget(self.owner.take());
+            eprintln!(
+                "tenferro-gpu: leaking CUDA extension resources after failed retirement: {error}"
+            );
+        }
     }
 }
 
@@ -750,11 +890,14 @@ impl CudaBackend {
     /// discovered, or [`CudaDeviceError::Initialization`] when CUDA runtime,
     /// context, or CubeCL client initialization fails.
     pub fn new(device_id: CudaDeviceId) -> Result<Self, CudaDeviceError> {
+        let rt = CudaRuntime::new(device_id)?;
+        let mut extension_cache = CudaExtensionCache::new();
+        extension_cache.owner = Some(rt.clone());
         Ok(Self {
             inner: Arc::new(CudaBackendState {
                 cutensor: OnceLock::new(),
-                extension_cache: CudaExtensionCache::new(),
-                rt: CudaRuntime::new(device_id)?,
+                extension_cache,
+                rt,
             }),
         })
     }
@@ -823,11 +966,13 @@ impl CudaBackend {
     }
 
     /// Clear CUDA extension-owned backend state.
+    /// Activates the owner context and retires all initialized streams before
+    /// resource destruction. Failure preserves cache entries for retry.
     ///
     /// # Errors
     ///
     /// Returns [`crate::Error::RuntimeState`] if the extension cache mutex is
-    /// poisoned.
+    /// poisoned, or a backend error on context activation/stream retirement.
     pub fn clear_cuda_extension_cache(&self) -> crate::Result<()> {
         self.inner.extension_cache.clear()
     }
@@ -867,7 +1012,8 @@ impl CudaBackend {
     /// # Errors
     ///
     /// Returns [`crate::Error::RuntimeState`] if the extension cache mutex is
-    /// poisoned while changing the bound.
+    /// poisoned, or a validation error if the bound cannot hold retained
+    /// resources. Clear resources before lowering the bound below their usage.
     pub fn set_cuda_extension_cache_max_entries(
         &self,
         max_entries: NonZeroUsize,
@@ -880,7 +1026,8 @@ impl CudaBackend {
     /// # Errors
     ///
     /// Returns [`crate::Error::RuntimeState`] if the extension cache mutex is
-    /// poisoned while changing the bound.
+    /// poisoned, or a validation error if the bound cannot hold retained
+    /// resources. Clear resources before lowering the bound below their usage.
     pub fn set_cuda_extension_cache_max_retained_bytes(
         &self,
         max_retained_bytes: NonZeroUsize,

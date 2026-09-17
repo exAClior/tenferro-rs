@@ -230,3 +230,187 @@ fn raw_resource_guard_is_runtime_scoped_and_type_keyed() {
             .unwrap();
     });
 }
+
+// Real CUDA events and a vendor handle, not a mock destructor. Pointer addresses
+// are owned by the cache; access is serialized by its resource guard.
+struct RetirementProbe {
+    handle: usize,
+    context: usize,
+    events: std::sync::Mutex<Vec<usize>>,
+    result: std::sync::Arc<std::sync::Mutex<Vec<(bool, bool, bool)>>>,
+}
+
+impl Drop for RetirementProbe {
+    fn drop(&mut self) {
+        use cudarc::{cublas::result as blas, driver::result as driver};
+        let context_ok =
+            driver::ctx::get_current().unwrap().map(|p| p as usize) == Some(self.context);
+        let events = self.events.get_mut().unwrap();
+        // Check BEFORE vendor destruction: cublasDestroy may itself block,
+        // which must not hide missing explicit multi-stream retirement.
+        let retired = events
+            .iter()
+            .all(|&event| unsafe { driver::event::query(event as _).is_ok() });
+        let destroyed = unsafe { blas::destroy_handle(self.handle as _).is_ok() };
+        for event in events.drain(..) {
+            unsafe { driver::event::destroy(event as _).unwrap() };
+        }
+        self.result
+            .lock()
+            .unwrap()
+            .push((context_ok, retired, destroyed));
+    }
+}
+
+unsafe extern "C" fn gated_stream_callback(data: *mut std::ffi::c_void) {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    // CUDA owns this transferred Arc until the callback returns. No CUDA API
+    // is called from a host callback. Bound the wait even if the test panics.
+    let release = unsafe { Arc::from_raw(data as *const AtomicBool) };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while !release.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}
+
+fn check_resource_retirement(explicit_clear: bool) {
+    use cudarc::driver::{result as driver, sys};
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    };
+    assert!(
+        gpu_available(),
+        "this ignored test requires actual CUDA hardware"
+    );
+    let backend = first_cuda_backend().unwrap();
+    assert!(backend.runtime().stream_slot_count() >= 2);
+    // Keep a runtime clone until the assertion so RuntimeState::Drop cannot
+    // accidentally repair missing cache retirement or context restoration.
+    let runtime = backend.runtime().clone();
+    let result = Arc::new(Mutex::new(Vec::new()));
+    let release = Arc::new(AtomicBool::new(false));
+    for slot in 0..2 {
+        let mut worker = backend.clone();
+        let result = result.clone();
+        let release = release.clone();
+        std::thread::spawn(move || {
+            cubecl::stream_id::StreamId { value: slot }.executes(|| {
+                with_cuda_exec(&mut worker, |session| {
+                    session
+                        .with_raw("test.retained_lifecycle", |raw| {
+                            let resource = raw.resource(|| {
+                                Ok(RetirementProbe {
+                                    handle: cudarc::cublas::result::create_handle().unwrap()
+                                        as usize,
+                                    context: driver::ctx::get_current().unwrap().unwrap() as usize,
+                                    events: Mutex::new(Vec::new()),
+                                    result,
+                                })
+                            })?;
+                            let event =
+                                driver::event::create(sys::CUevent_flags::CU_EVENT_DISABLE_TIMING)
+                                    .unwrap();
+                            let data = Arc::into_raw(release) as *mut std::ffi::c_void;
+                            // SAFETY: raw session owns a live current-context stream;
+                            // callback owns its Arc and event lives in the resource.
+                            unsafe {
+                                let stream = raw.stream().raw_handle() as sys::CUstream;
+                                sys::cuLaunchHostFunc(stream, Some(gated_stream_callback), data)
+                                    .result()
+                                    .unwrap();
+                                driver::event::record(event, stream).unwrap();
+                                assert!(
+                                    driver::event::query(event).is_err(),
+                                    "work must still be pending"
+                                );
+                            }
+                            resource.events.lock().unwrap().push(event as usize);
+                            Ok(())
+                        })
+                        .unwrap();
+                });
+            });
+        })
+        .join()
+        .unwrap();
+    }
+    let started = Arc::new(AtomicBool::new(false));
+    let start_signal = started.clone();
+    let retire = std::thread::spawn(move || {
+        unsafe { driver::ctx::set_current(std::ptr::null_mut()).unwrap() };
+        assert!(driver::ctx::get_current().unwrap().is_none());
+        start_signal.store(true, Ordering::Release);
+        if explicit_clear {
+            // Exercise the exposed cache accessor, not only the backend wrapper.
+            backend.cuda_extension_cache().clear().unwrap();
+            assert!(backend.cuda_extension_cache().is_empty().unwrap());
+        } else {
+            drop(backend);
+        }
+        assert!(
+            driver::ctx::get_current().unwrap().is_none(),
+            "restore caller context"
+        );
+    });
+    while !started.load(Ordering::Acquire) {
+        std::thread::yield_now();
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    release.store(true, Ordering::Release);
+    retire.join().unwrap();
+    assert_eq!(*result.lock().unwrap(), vec![(true, true, true)]);
+    drop(runtime);
+}
+
+#[test]
+#[ignore = "requires CUDA: real vendor handle and two worker streams"]
+fn cuda_extension_cache_lifecycle_cross_thread_clear() {
+    check_resource_retirement(true);
+}
+
+#[test]
+#[ignore = "requires CUDA: real vendor handle and two worker streams"]
+fn cuda_extension_cache_lifecycle_cross_thread_drop() {
+    check_resource_retirement(false);
+}
+
+#[test]
+#[ignore = "requires CUDA: intentionally leaks poisoned cache and its runtime"]
+fn cuda_extension_cache_lifecycle_failed_clear_and_drop_preserve_resources() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    struct Probe(Arc<AtomicUsize>);
+    impl Drop for Probe {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    assert!(gpu_available(), "requires actual CUDA hardware");
+    let backend = first_cuda_backend().unwrap();
+    let drops = Arc::new(AtomicUsize::new(0));
+    drop(
+        backend
+            .cuda_extension_cache()
+            .get_or_try_init_resource(|| Ok(Probe(drops.clone())))
+            .unwrap(),
+    );
+    let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = backend.cuda_extension_cache().inner.lock().unwrap();
+        panic!("intentional poison before resource retirement");
+    }));
+    assert!(poisoned.is_err());
+    assert!(backend.cuda_extension_cache().clear().is_err());
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    drop(backend);
+    assert_eq!(
+        drops.load(Ordering::SeqCst),
+        0,
+        "failed Drop must leak, not destroy"
+    );
+}

@@ -625,11 +625,18 @@ impl<'s> Session<'s> {
     /// [`CudaExtensionCache`](super::CudaExtensionCache). The guard holds the
     /// cache lock and serializes access; cache keys remain per exact runtime
     /// instance (never per-device).
+    /// Resources are retained until explicit cache clear or runtime destruction,
+    /// not evicted by plan-cache pressure. They count against both cache bounds.
+    /// Backend-owned cache clear/destruction retires all initialized streams
+    /// and runs destructors under the owning context. Failed explicit clear
+    /// preserves entries; failed destruction leaks entries and context authority
+    /// rather than free resources that may still be in use by CUDA.
     ///
     /// # Errors
     ///
     /// Returns the initializer's typed error, or
-    /// [`crate::Error::RuntimeState`] when the extension cache is poisoned.
+    /// [`crate::Error::RuntimeState`] when the extension cache is poisoned or
+    /// its configured budget cannot admit the resource (before initialization).
     pub fn resource<T>(
         &self,
         init: impl FnOnce() -> crate::Result<T>,
@@ -637,7 +644,7 @@ impl<'s> Session<'s> {
     where
         T: Send + 'static,
     {
-        let guard = self.cache.get_or_try_init(init)?;
+        let guard = self.cache.get_or_try_init_resource(init)?;
         Ok(CudaResourceGuard { inner: guard })
     }
 }

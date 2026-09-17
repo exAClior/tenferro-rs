@@ -269,6 +269,20 @@ logical retained bytes, and event counters with
 Retained bytes are estimates of cache-owned payloads, not process RSS or
 allocator arena usage.
 
+Raw-session resources obtained through `cuda::raw::Session::resource` share
+this bounded, type-indexed cache, but remain resident until explicit clear or
+backend destruction. They do not participate in plan eviction. Admission,
+resource-byte updates, and limit reductions that cannot accommodate retained
+resources fail without evicting entries or changing the limits. Plans continue
+to use the remaining capacity and remain evictable.
+
+The backend-owned cache retains its `CudaRuntime`. Clear and destruction hold
+the resource lock, activate the owning context, and retire every initialized
+raw stream before destroying entries. Explicit clear preserves entries on
+activation or retirement failure. Failed destruction leaks both entries and
+the retained runtime rather than freeing potentially in-flight resources.
+Normal resource lookup and enqueue add no synchronization barrier.
+
 CUDA `dot_general` stores cuTENSOR contraction descriptors, plans, and lazy
 per-physical-stream device workspaces inside this backend-owned extension
 cache. A workspace is locked through enqueue, and eviction retires its owning
