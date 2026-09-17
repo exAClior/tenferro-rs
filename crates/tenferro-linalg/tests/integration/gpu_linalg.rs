@@ -1527,3 +1527,58 @@ fn test_cubecl_solve_f64_matches_cpu() {
     let actual = download(&gpu, &gpu_out);
     assert_tensor_close(&actual, &expected, 1e-9);
 }
+
+
+/// One two-site DMRG split as used by rydberg-tn `optimize_two_site`:
+/// truncated SVD of the χd × χd complex128 two-site tensor (χ=16, d=2 → 32×32).
+/// The local Krylov/eigh path is CPU `faer` in rydberg-tn; the CUDA vendor
+/// session is the split (`Execution::split` → `svd_read`).
+///
+/// The N=100 sweep is 198 of these splits. This MWE keeps that kernel and
+/// repeats it enough times to count `CudaLinalgHandles` cache misses.
+///
+/// Run with:
+/// `cargo test -p tenferro-linalg --features cuda --test integration gpu_linalg::two_site_dmrg_update_reuses_cuda_linalg_handles -- --ignored --include-ignored --nocapture --exact`
+#[test]
+#[ignore]
+fn two_site_dmrg_update_reuses_cuda_linalg_handles() {
+    if !gpu_available() {
+        panic!("CUDA device required for this MWE");
+    }
+
+    const CHI: usize = 16;
+    const D: usize = 2;
+    const ROWS: usize = CHI * D;
+    const COLS: usize = CHI * D;
+    const UPDATES: usize = 8;
+
+    let mut theta = vec![Complex64::new(0.0, 0.0); ROWS * COLS];
+    for col in 0..COLS {
+        for row in 0..ROWS {
+            let decay = 1.0 / (1.0 + (row as f64 - col as f64).abs());
+            theta[row + col * ROWS] = Complex64::new(decay, 0.01 * (row as f64 - col as f64));
+        }
+    }
+    let theta_t = tensor_c64(vec![ROWS, COLS], theta);
+
+    let mut gpu = gpu_backend();
+    let gpu_theta = upload(&gpu, &theta_t);
+
+    let before = gpu.cuda_extension_cache_stats().unwrap();
+    for _ in 0..UPDATES {
+        let svd = with_cuda_linalg_session(&mut gpu, |session| session.svd(&gpu_theta)).unwrap();
+        assert_eq!(svd[0].shape()[0], ROWS);
+        assert_eq!(svd[2].shape()[1], COLS);
+    }
+    let after = gpu.cuda_extension_cache_stats().unwrap();
+    let extra_misses = after.misses.saturating_sub(before.misses);
+    eprintln!(
+        "two_site_dmrg_split: updates={UPDATES} cache_misses={extra_misses} hits={} evictions={}",
+        after.hits.saturating_sub(before.hits),
+        after.evictions.saturating_sub(before.evictions)
+    );
+    assert!(
+        extra_misses >= 1,
+        "two-site SVD never initialized CudaLinalgHandles"
+    );
+}
