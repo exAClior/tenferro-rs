@@ -2,6 +2,7 @@
 
 // Run with: cargo test --features cuda -- --ignored
 use num_complex::{Complex32, Complex64};
+use std::num::NonZeroUsize;
 use tenferro_cpu::{with_cpu_exec_session, CpuBackend, CpuExecSession};
 use tenferro_gpu::{
     cuda::download_tensor, cuda::gpu_available, cuda::upload_tensor, cuda::with_cuda_exec_session,
@@ -10,7 +11,9 @@ use tenferro_gpu::{
 use tenferro_linalg::{
     HouseholderQr, LinalgBackend, QrGauge, QrOptions, RankRevealingQrOptions, TensorLinalgExt,
 };
-use tenferro_tensor::{BackendSessionHost, Error, Tensor, TensorRead, TypedTensor};
+use tenferro_tensor::{
+    BackendSessionHost, DotGeneralConfig, Error, Tensor, TensorDot, TensorRead, TypedTensor,
+};
 
 fn cpu_backend() -> CpuBackend {
     CpuBackend::new()
@@ -1526,4 +1529,102 @@ fn test_cubecl_solve_f64_matches_cpu() {
         with_cuda_linalg_session(&mut gpu, |session| session.solve(&gpu_a, &gpu_b)).unwrap();
     let actual = download(&gpu, &gpu_out);
     assert_tensor_close(&actual, &expected, 1e-9);
+}
+
+
+/// Two-site DMRG kernel from rydberg-tn `optimize_two_site` on one backend:
+/// truncated SVD of the χd×χd complex128 two-site block, then a unique
+/// environment contraction (the next bond's left-env update). Cache is
+/// capped at 2 entries so the vendor handle and the growing plan set
+/// compete in the same FIFO, as they do under default 16-entry pressure
+/// in a long sweep.
+///
+/// A second `CudaLinalgHandles` miss after later splits is the lifetime bug.
+#[test]
+#[ignore]
+fn two_site_dmrg_update_reuses_cuda_linalg_handles() {
+    if !gpu_available() {
+        panic!("CUDA device required for this MWE");
+    }
+
+    const D: usize = 2;
+    const SITES: usize = 8;
+    const CHI: usize = 16;
+    const DIM: usize = CHI * D;
+
+    let config = DotGeneralConfig {
+        lhs_contracting_dims: vec![1],
+        rhs_contracting_dims: vec![0],
+        lhs_batch_dims: vec![],
+        rhs_batch_dims: vec![],
+    };
+
+    let mut gpu = gpu_backend();
+    // Two top-level types share this FIFO: CudaLinalgHandles (SVD) and
+    // CutensorPlanCacheState (env contraction). Cap 1 forces the contraction
+    // insert to evict the handle, which is the lifetime bug under cache pressure.
+    gpu.set_cuda_extension_cache_max_entries(NonZeroUsize::new(1).unwrap())
+        .unwrap();
+
+    // One two-site tensor per bond, as in a sweep (unique data, same shape).
+    let mut thetas = Vec::new();
+    for site in 0..SITES - 1 {
+        let mut theta = vec![Complex64::new(0.0, 0.0); DIM * DIM];
+        for col in 0..DIM {
+            for row in 0..DIM {
+                let decay = 1.0 / (1.0 + (row as f64 - col as f64).abs() + site as f64);
+                theta[row + col * DIM] =
+                    Complex64::new(decay, 0.01 * (row as f64 - col as f64 + site as f64));
+            }
+        }
+        thetas.push(upload(&gpu, &tensor_c64(vec![DIM, DIM], theta)));
+    }
+
+    let t0 = gpu.cuda_extension_cache_stats().unwrap();
+    let mut split_misses = Vec::new();
+    for (site, theta) in thetas.iter().enumerate() {
+        let before = gpu.cuda_extension_cache_stats().unwrap();
+        let svd = with_cuda_linalg_session(&mut gpu, |session| session.svd(theta)).unwrap();
+        assert_eq!(svd[0].shape()[0], DIM);
+        assert_eq!(svd[2].shape()[1], DIM);
+        // Unique env contraction after the split (different k per bond).
+        let k = 2 + site;
+        let lhs = upload(
+            &gpu,
+            &tensor_c64(
+                vec![DIM, k],
+                vec![Complex64::new(0.01 * site as f64, 0.0); DIM * k],
+            ),
+        );
+        let rhs = upload(
+            &gpu,
+            &tensor_c64(
+                vec![k, DIM],
+                vec![Complex64::new(0.02 * site as f64, 0.0); k * DIM],
+            ),
+        );
+        gpu.dot_general(&lhs, &rhs, &config).unwrap();
+        let after = gpu.cuda_extension_cache_stats().unwrap();
+        split_misses.push(after.misses.saturating_sub(before.misses));
+        eprintln!(
+            "bond={site} dim={DIM} k={k} delta_misses={} delta_hits={} delta_evictions={} entries={}",
+            after.misses.saturating_sub(before.misses),
+            after.hits.saturating_sub(before.hits),
+            after.evictions.saturating_sub(before.evictions),
+            after.entries
+        );
+    }
+    let t1 = gpu.cuda_extension_cache_stats().unwrap();
+    eprintln!(
+        "two_site_sweep sites={SITES} total_misses={} total_hits={} total_evictions={} per_bond_misses={split_misses:?}",
+        t1.misses.saturating_sub(t0.misses),
+        t1.hits.saturating_sub(t0.hits),
+        t1.evictions.saturating_sub(t0.evictions)
+    );
+    // First bond must create the vendor handle. Later bonds recreating it
+    // (extra misses on the SVD path after warmup) is the FIFO lifetime bug.
+    assert!(
+        split_misses.iter().sum::<u64>() >= 1,
+        "sweep never initialized CudaLinalgHandles"
+    );
 }
