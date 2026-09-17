@@ -941,7 +941,10 @@ pub struct CpuGemmUninitRequest<'request, 'input> {
     accumulation: DotGeneralAccumulation,
 }
 
-#[cfg(feature = "cpu-faer")]
+#[cfg(any(
+    feature = "cpu-faer",
+    all(feature = "cpu-blas", not(feature = "provider-inject"))
+))]
 pub(crate) struct CpuGemmUninitRequestParts<'request, 'input> {
     pub(crate) lhs: &'request TensorRead<'input>,
     pub(crate) rhs: &'request TensorRead<'input>,
@@ -1123,7 +1126,10 @@ impl<'request, 'input> CpuGemmUninitRequest<'request, 'input> {
         self.accumulation
     }
 
-    #[cfg(feature = "cpu-faer")]
+    #[cfg(any(
+        feature = "cpu-faer",
+        all(feature = "cpu-blas", not(feature = "provider-inject"))
+    ))]
     pub(crate) fn into_parts(self) -> CpuGemmUninitRequestParts<'request, 'input> {
         CpuGemmUninitRequestParts {
             lhs: self.lhs,
@@ -1946,13 +1952,29 @@ impl CpuGemmProvider for BlasGemmProvider {
     }
 
     fn uninit_provider(&self) -> Option<&dyn CpuUninitGemmProvider> {
-        Some(self)
+        // Injected pointers currently promise ABI compatibility, not the
+        // stronger full-overwrite witness. Preserve their initialized path.
+        #[cfg(feature = "provider-inject")]
+        {
+            None
+        }
+        #[cfg(not(feature = "provider-inject"))]
+        {
+            Some(self)
+        }
     }
+}
+
+#[cfg(all(test, feature = "provider-inject"))]
+#[test]
+fn injected_blas_has_no_uninit_witness() {
+    assert!(BlasGemmProvider.uninit_provider().is_none());
 }
 
 // SAFETY: the implementation rejects nonzero beta, validates destination byte
 // length/alignment, and uses BLAS's beta=0 full-overwrite contract through raw
 // pointers. Empty contractions explicitly initialize their output to zero.
+#[cfg(not(feature = "provider-inject"))]
 unsafe impl CpuUninitGemmProvider for BlasGemmProvider {
     unsafe fn gemm_into_uninit(
         &self,

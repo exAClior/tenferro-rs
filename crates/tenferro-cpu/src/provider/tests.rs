@@ -1355,7 +1355,10 @@ fn uninit_witness_is_exposed_only_by_the_builtin_providers() {
     #[cfg(feature = "cpu-faer")]
     assert!(FaerGemmProvider.uninit_provider().is_some());
     assert!(StridedLayoutTransformProvider.uninit_provider().is_some());
-    assert!(BlasGemmProvider.uninit_provider().is_some());
+    assert_eq!(
+        BlasGemmProvider.uninit_provider().is_some(),
+        !cfg!(feature = "provider-inject")
+    );
     let opt_out_gemm: &dyn CpuGemmProvider = &OptOutProvider;
     assert!(opt_out_gemm.uninit_provider().is_none());
     let opt_out_layout: &dyn CpuLayoutTransformProvider = &OptOutProvider;

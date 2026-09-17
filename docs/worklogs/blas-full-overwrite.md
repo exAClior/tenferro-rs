@@ -30,3 +30,30 @@ Instruction acceptance is not native performance acceptance. Native validation
 requires a quiet host; until then the candidate is not promoted as a measured
 wall-clock optimization. No new threshold or custom small-GEMM kernel is added
 without evidence beyond call counts.
+
+## Implementation and validation
+
+The new witness shares the existing initialized BLAS raw-pointer executor and
+faer's dtype/owned/view dispatcher. It rejects nonzero beta; alpha=0, all four
+floating/complex dtypes, owned/view combinations, transposed operands, multiple
+batches, zero extents, zero contraction, and unsupported layout/conjugation
+are covered. Unsupported requests leave destination storage unchanged.
+
+`provider-inject` deliberately remains on the initialized-output path: its
+registration contract currently guarantees ABI compatibility, not this stronger
+full-overwrite promise. BLAS-only builds are checked separately from combined
+faer/BLAS builds. No injected-provider contract is silently strengthened.
+
+Initial paired instruction results (baseline 03ec980, candidate 133ca79,
+fixed strided 17e05ff, OpenBLAS 0.3.26, CPU16/1T) were 43,897,346.5 versus
+39,694,764 Ir for b32x128 (-9.57%) and 537,556,522 versus 524,966,825.5 Ir for
+mm1024 (-2.34%). GEMM kernel self-instructions were identical across variants.
+These are `(N3-N1)/2` counts, not native timings. Feature-gating corrections
+following this first run do not change the measured combined-feature path.
+Raw profiles, annotations, dispatch traces, test logs and reproduction metadata
+are retained in the sibling benchmark worktree under
+`result/amd-cpu/blas-full-overwrite/` (see its README for final measurements).
+
+This branch still needs the upstream strided revision published and the normal
+git dependency pin updated; local path overrides are required at present.
+Quiet-host native measurements and the broader integration gate remain pending.

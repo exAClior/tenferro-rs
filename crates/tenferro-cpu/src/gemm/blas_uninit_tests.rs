@@ -33,7 +33,7 @@ macro_rules! check_type {
                         .unwrap();
                         let rhs = crate::Tensor::from_vec_col_major(vec![k, n, batches], b.clone())
                             .unwrap();
-                        for mode in 0..4 {
+                        for mode in 0..8 {
                             let l = if mode & 1 == 0 {
                                 TensorRead::from_tensor(&lhs)
                             } else {
@@ -45,6 +45,16 @@ macro_rules! check_type {
                                 TensorRead::from_view(TensorRead::from_tensor(&rhs).tensor_view())
                             };
                             let mut out = vec![MaybeUninit::<$ty>::uninit(); m * n * batches];
+                            // Low bits select owned/view inputs; bit 2 tests
+                            // BLAS's alpha=0 full-overwrite early return.
+                            let alpha: $ty = if mode & 4 == 0 {
+                                num_traits::One::one()
+                            } else {
+                                Zero::zero()
+                            };
+                            let mut accumulation =
+                                DotGeneralAccumulation::overwrite(lhs.dtype()).unwrap();
+                            accumulation.alpha = ContractionScalar::$variant(alpha);
                             let request = CpuGemmUninitRequest::new(
                                 &l,
                                 &r,
@@ -59,7 +69,7 @@ macro_rules! check_type {
                                 },
                                 Layout::new(0, 1, k as isize, (k * n) as isize),
                                 Layout::new(0, 1, m as isize, (m * n) as isize),
-                                DotGeneralAccumulation::overwrite(lhs.dtype()).unwrap(),
+                                accumulation,
                             );
                             // SAFETY: disjoint, aligned, exact-size output; dense
                             // descriptor ranges fit the two input allocations.
@@ -86,7 +96,12 @@ macro_rules! check_type {
                                         let actual = unsafe {
                                             out[batch * m * n + row + col * m].assume_init()
                                         };
-                                        assert!((actual - expected).norm_value() < 1e-4);
+                                        assert!(
+                                            (num_complex::ComplexFloat::abs(
+                                                actual - alpha * expected
+                                            ) as f64)
+                                                < 1e-4
+                                        );
                                     }
                                 }
                             }
@@ -97,29 +112,6 @@ macro_rules! check_type {
         }
     };
 }
-trait NormValue {
-    fn norm_value(self) -> f64;
-}
-impl NormValue for f32 {
-    fn norm_value(self) -> f64 {
-        self.abs() as f64
-    }
-}
-impl NormValue for f64 {
-    fn norm_value(self) -> f64 {
-        self.abs()
-    }
-}
-impl NormValue for num_complex::Complex32 {
-    fn norm_value(self) -> f64 {
-        self.norm() as f64
-    }
-}
-impl NormValue for num_complex::Complex64 {
-    fn norm_value(self) -> f64 {
-        self.norm()
-    }
-}
 check_type!(blas_uninit_f32, f32, F32, |i| i as f32 / 8.0 - 0.5);
 check_type!(blas_uninit_f64, f64, F64, |i| i as f64 / 8.0 - 0.5);
 check_type!(blas_uninit_c32, num_complex::Complex32, C32, |i| {
@@ -128,6 +120,55 @@ check_type!(blas_uninit_c32, num_complex::Complex32, C32, |i| {
 check_type!(blas_uninit_c64, num_complex::Complex64, C64, |i| {
     num_complex::Complex64::new(i as f64 / 8.0 - 0.5, 0.25)
 });
+
+#[test]
+fn blas_uninit_unsupported_layout_leaves_storage_untouched() {
+    let fixture = execution_context_fixture(1);
+    fixture.with_context(ParallelMode::Sequential, |ctx| {
+        let lhs = crate::Tensor::from_vec_col_major(vec![2, 2], vec![1.0f64; 4]).unwrap();
+        let read = TensorRead::from_tensor(&lhs);
+        for (conj, layout, reason) in [
+            (
+                false,
+                Layout::new(0, 2, 1, 4),
+                CpuProviderUnsupported::Layout(CpuOperand::Output),
+            ),
+            (
+                true,
+                Layout::new(0, 1, 2, 4),
+                CpuProviderUnsupported::Conjugation,
+            ),
+        ] {
+            let mut accumulation = DotGeneralAccumulation::overwrite(lhs.dtype()).unwrap();
+            accumulation.lhs_conj = conj;
+            let request = CpuGemmUninitRequest::new(
+                &read,
+                &read,
+                2,
+                2,
+                2,
+                1,
+                Layout::new(0, 1, 2, 4),
+                Layout::new(0, 1, 2, 4),
+                layout,
+                accumulation,
+            );
+            let mut storage = [42.0f64; 4];
+            // SAFETY: an aligned, exclusive byte view of this initialized array.
+            let bytes = unsafe {
+                std::slice::from_raw_parts_mut(
+                    storage.as_mut_ptr().cast::<MaybeUninit<u8>>(),
+                    size_of::<[f64; 4]>(),
+                )
+            };
+            assert_eq!(
+                execute_blas_gemm_request_into_uninit(ctx, request, bytes).unwrap(),
+                CpuProviderOutcome::Unsupported(reason)
+            );
+            assert_eq!(storage, [42.0; 4]);
+        }
+    });
+}
 
 #[test]
 fn blas_uninit_rejects_accumulation_and_invalid_storage() {

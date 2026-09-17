@@ -5,6 +5,10 @@ use num_traits::Zero;
 use smallvec::{Array, SmallVec};
 use std::fmt;
 use std::mem::size_of;
+#[cfg(any(
+    feature = "cpu-faer",
+    all(feature = "cpu-blas", not(feature = "provider-inject"))
+))]
 use std::mem::{align_of, MaybeUninit};
 use std::sync::{Arc, Weak};
 
@@ -1631,6 +1635,10 @@ impl ProviderGemmDescriptor {
         }
     }
 
+    #[cfg(any(
+        feature = "cpu-faer",
+        all(feature = "cpu-blas", not(feature = "provider-inject"))
+    ))]
     fn from_uninit_parts(parts: &crate::provider::CpuGemmUninitRequestParts<'_, '_>) -> Self {
         Self {
             rows: parts.rows,
@@ -1899,6 +1907,10 @@ pub(crate) fn execute_faer_gemm_request(
 /// Validate that `output_bytes` is exactly the byte representation of
 /// `element_count` `T`-sized elements, aligned for `T`, and return the
 /// destination pointer.
+#[cfg(any(
+    feature = "cpu-faer",
+    all(feature = "cpu-blas", not(feature = "provider-inject"))
+))]
 fn checked_uninit_output_ptr<T>(
     output_bytes: &mut [MaybeUninit<u8>],
     element_count: usize,
@@ -1937,6 +1949,10 @@ fn checked_uninit_output_ptr<T>(
 /// Write zero into every destination element for an empty-contraction GEMM
 /// (beta == 0 semantics overwrite without reading). Zero-element destinations
 /// (rows, columns, or batch count zero) write nothing and are satisfied.
+#[cfg(any(
+    feature = "cpu-faer",
+    all(feature = "cpu-blas", not(feature = "provider-inject"))
+))]
 fn write_empty_contract_zeros_into_uninit<T>(
     output_data: *mut T,
     descriptor: &ProviderGemmDescriptor,
@@ -2022,6 +2038,10 @@ where
 }
 
 // Share dtype/owned/view dispatch without creating initialized output references.
+#[cfg(any(
+    feature = "cpu-faer",
+    all(feature = "cpu-blas", not(feature = "provider-inject"))
+))]
 macro_rules! define_uninit_gemm_dispatch {
     ($name:ident, $execute:ident) => {
         pub(crate) fn $name(
@@ -2117,7 +2137,7 @@ define_uninit_gemm_dispatch!(
     execute_faer_gemm_request_into_uninit,
     execute_faer_request_typed_into_uninit
 );
-#[cfg(feature = "cpu-blas")]
+#[cfg(all(feature = "cpu-blas", not(feature = "provider-inject")))]
 define_uninit_gemm_dispatch!(
     execute_blas_gemm_request_into_uninit,
     execute_blas_request_typed_into_uninit
@@ -2185,7 +2205,7 @@ where
     execute_blas_request_typed_with_output(descriptor, lhs, rhs, output_data, alpha, beta)
 }
 
-#[cfg(feature = "cpu-blas")]
+#[cfg(all(feature = "cpu-blas", not(feature = "provider-inject")))]
 fn execute_blas_request_typed_into_uninit<L, R, T>(
     _context: &CpuExecutionContext<'_>,
     descriptor: ProviderGemmDescriptor,
