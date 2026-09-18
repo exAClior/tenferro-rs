@@ -606,8 +606,8 @@ fn test_workspace_retirement_defers_eviction_barrier_f64() {
     gpu.set_cutensor_plan_cache_max_entries(NonZeroUsize::new(1).unwrap())
         .unwrap();
 
-    let mut expected = None;
-    for (rows, k, cols) in [(8_usize, 8_usize, 8_usize), (16, 16, 16)] {
+    let mut results = Vec::new();
+    for (rows, k, cols) in [(64_usize, 64_usize, 64_usize), (65, 64, 65)] {
         let lhs = tensor_f64(vec![rows, k], flat_f64(rows * k, 0.5));
         let rhs = tensor_f64(vec![k, cols], flat_f64(k * cols, -0.25));
         let lhs_gpu = upload(&gpu, &lhs);
@@ -615,13 +615,12 @@ fn test_workspace_retirement_defers_eviction_barrier_f64() {
         let actual = gpu
             .dot_general(&lhs_gpu, &rhs_gpu, &matmul_config())
             .unwrap();
-        let actual = download(&gpu, &actual);
         let reference = cpu.dot_general(&lhs, &rhs, &matmul_config()).unwrap();
-        assert_tensor_close(&actual, &reference, 1e-10);
-        expected = Some(reference);
+        results.push((actual, reference));
     }
-    assert!(expected.is_some());
 
+    // Downloading a large tensor synchronizes the runtime and drains deferred
+    // retirements, so verify the queue before reading the results back.
     let stats = gpu.cutensor_workspace_retirement_stats().unwrap();
     assert!(
         stats.deferred >= 1,
@@ -643,4 +642,9 @@ fn test_workspace_retirement_defers_eviction_barrier_f64() {
         stats.released >= 1,
         "retirements should be released: {stats:?}"
     );
+
+    for (actual, reference) in results {
+        let actual = download(&gpu, &actual);
+        assert_tensor_close(&actual, &reference, 1e-10);
+    }
 }
