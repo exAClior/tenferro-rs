@@ -6,7 +6,7 @@
 //! use tenferro_tensor::validate::validate_nonsingular_u;
 //! use tenferro_tensor::{Tensor, TypedTensor};
 //!
-//! let t = Tensor::F64(TypedTensor::from_vec_col_major(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]).unwrap());
+//! let t = Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]).unwrap());
 //! assert!(validate_nonsingular_u(&t).is_ok());
 //! ```
 
@@ -53,21 +53,11 @@ pub enum DiagonalError {
 /// assert_eq!(promote_dtype(DType::I32, DType::F32), DType::F64);
 /// ```
 pub fn promote_dtype(lhs: DType, rhs: DType) -> DType {
-    use DType::*;
-    match (lhs, rhs) {
-        (Bool, Bool) => Bool,
-        (Bool, other) | (other, Bool) => other,
-        (I32, I32) => I32,
-        (I32, I64) | (I64, I32) | (I64, I64) => I64,
-        (I32 | I64, F32 | F64) | (F32 | F64, I32 | I64) => F64,
-        (I32 | I64, C32 | C64) | (C32 | C64, I32 | I64) => C64,
-        (F32, F32) => F32,
-        (F32, F64) | (F64, F32) | (F64, F64) => F64,
-        (F32, C32) | (C32, F32) | (C32, C32) => C32,
-        (F32, C64) | (C64, F32) => C64,
-        (F64, C32 | C64) | (C32 | C64, F64) => C64,
-        (C32, C64) | (C64, C32) | (C64, C64) => C64,
-    }
+    // The lattice belongs to the scalar set that declares the members, and is
+    // derived from each member's declared kind, rank, and width. A set that
+    // declares a different set of scalars promotes within that set instead of
+    // using this one.
+    <tenferro_tensor_core::DefaultScalars as tenferro_tensor_core::ScalarSet>::promote(lhs, rhs)
 }
 
 /// Return whether public `convert` may change `from` into `to`.
@@ -416,7 +406,7 @@ pub fn check_singular_diagonal<T: DiagSingularity + TensorScalar + std::fmt::Deb
 /// use tenferro_tensor::validate::validate_nonsingular_u;
 /// use tenferro_tensor::{Tensor, TypedTensor};
 ///
-/// let t = Tensor::F64(TypedTensor::from_vec_col_major(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]).unwrap());
+/// let t = Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(vec![2, 2], vec![1.0, 0.0, 0.0, 1.0]).unwrap());
 /// assert!(validate_nonsingular_u(&t).is_ok());
 /// ```
 /// # Errors
@@ -425,18 +415,41 @@ pub fn check_singular_diagonal<T: DiagSingularity + TensorScalar + std::fmt::Deb
 /// axis, dtype, or argument source when validation fails. Singular or
 /// non-finite diagonal checks return [`crate::Error::BackendFailure`].
 pub fn validate_nonsingular_u(u: &Tensor) -> Result<()> {
-    match u {
-        Tensor::F64(t) => check_singular_diagonal(t),
-        Tensor::F32(t) => check_singular_diagonal(t),
-        Tensor::C64(t) => check_singular_diagonal(t),
-        Tensor::C32(t) => check_singular_diagonal(t),
-        Tensor::I32(_) | Tensor::I64(_) | Tensor::Bool(_) => Err(Error::extension(
-            "solve",
-            "tensor-validation",
-            ErrorKind::Unsupported,
-            DiagonalError::UnsupportedDType { dtype: u.dtype() },
-        )),
+    match u.dtype() {
+        DType::F64 => check_singular_diagonal(
+            u.as_typed::<f64>()
+                .ok_or_else(|| unsupported_diagonal_dtype(u))?,
+        ),
+        DType::F32 => check_singular_diagonal(
+            u.as_typed::<f32>()
+                .ok_or_else(|| unsupported_diagonal_dtype(u))?,
+        ),
+        DType::C64 => check_singular_diagonal(
+            u.as_typed::<Complex64>()
+                .ok_or_else(|| unsupported_diagonal_dtype(u))?,
+        ),
+        DType::C32 => check_singular_diagonal(
+            u.as_typed::<Complex32>()
+                .ok_or_else(|| unsupported_diagonal_dtype(u))?,
+        ),
+        DType::I32 | DType::I64 | DType::Bool | DType::External(_) => {
+            Err(unsupported_diagonal_dtype(u))
+        }
     }
+}
+
+/// The refusal this module produces for a dtype it cannot validate a diagonal in.
+///
+/// Returning it from an accessor is the same refusal the wildcard arm produced; a
+/// caller reaches that accessor from a match on `u.dtype()`, so it is unreachable in
+/// practice rather than a caller mistake.
+fn unsupported_diagonal_dtype(u: &Tensor) -> Error {
+    Error::extension(
+        "solve",
+        "tensor-validation",
+        ErrorKind::Unsupported,
+        DiagonalError::UnsupportedDType { dtype: u.dtype() },
+    )
 }
 
 #[cfg(test)]

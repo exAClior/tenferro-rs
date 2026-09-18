@@ -10,7 +10,7 @@ use tenferro_gpu::{
 use tenferro_linalg::{
     HouseholderQr, LinalgBackend, QrGauge, QrOptions, RankRevealingQrOptions, TensorLinalgExt,
 };
-use tenferro_tensor::{BackendSessionHost, Error, Tensor, TensorRead, TypedTensor};
+use tenferro_tensor::{BackendSessionHost, DType, Error, Tensor, TensorRead, TypedTensor};
 
 fn cpu_backend() -> CpuBackend {
     CpuBackend::new()
@@ -53,25 +53,30 @@ fn download(backend: &CudaBackend, tensor: &Tensor) -> Tensor {
 }
 
 fn tensor_f32(shape: Vec<usize>, data: Vec<f32>) -> Tensor {
-    Tensor::F32(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<f32>(TypedTensor::from_vec_col_major(shape, data).unwrap())
 }
 
 fn tensor_f64(shape: Vec<usize>, data: Vec<f64>) -> Tensor {
-    Tensor::F64(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(shape, data).unwrap())
 }
 
 fn tensor_c32(shape: Vec<usize>, data: Vec<Complex32>) -> Tensor {
-    Tensor::C32(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<tenferro_tensor::Complex32>(
+        TypedTensor::from_vec_col_major(shape, data).unwrap(),
+    )
 }
 
 fn tensor_c64(shape: Vec<usize>, data: Vec<Complex64>) -> Tensor {
-    Tensor::C64(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<tenferro_tensor::Complex64>(
+        TypedTensor::from_vec_col_major(shape, data).unwrap(),
+    )
 }
 
 fn assert_tensor_close(actual: &Tensor, expected: &Tensor, tol: f64) {
     assert_eq!(actual.shape(), expected.shape());
-    match (actual, expected) {
-        (Tensor::F32(_), Tensor::F32(_)) => {
+    assert_eq!(actual.dtype(), expected.dtype(), "dtypes must match");
+    match actual.dtype() {
+        DType::F32 => {
             let actual = actual.as_slice::<f32>().unwrap();
             let expected = expected.as_slice::<f32>().unwrap();
             for (lhs, rhs) in actual.iter().zip(expected.iter()) {
@@ -82,7 +87,7 @@ fn assert_tensor_close(actual: &Tensor, expected: &Tensor, tol: f64) {
                 );
             }
         }
-        (Tensor::F64(_), Tensor::F64(_)) => {
+        DType::F64 => {
             let actual = actual.as_slice::<f64>().unwrap();
             let expected = expected.as_slice::<f64>().unwrap();
             for (lhs, rhs) in actual.iter().zip(expected.iter()) {
@@ -93,7 +98,7 @@ fn assert_tensor_close(actual: &Tensor, expected: &Tensor, tol: f64) {
                 );
             }
         }
-        (Tensor::C32(_), Tensor::C32(_)) => {
+        DType::C32 => {
             let actual = actual.as_slice::<Complex32>().unwrap();
             let expected = expected.as_slice::<Complex32>().unwrap();
             for (lhs, rhs) in actual.iter().zip(expected.iter()) {
@@ -105,7 +110,7 @@ fn assert_tensor_close(actual: &Tensor, expected: &Tensor, tol: f64) {
                 );
             }
         }
-        (Tensor::C64(_), Tensor::C64(_)) => {
+        DType::C64 => {
             let actual = actual.as_slice::<Complex64>().unwrap();
             let expected = expected.as_slice::<Complex64>().unwrap();
             for (lhs, rhs) in actual.iter().zip(expected.iter()) {

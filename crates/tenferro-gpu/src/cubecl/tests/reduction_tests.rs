@@ -54,7 +54,7 @@ fn test_cubecl_full_axis_reductions_preserve_scalar_shape_and_values() {
             assert_tensor_close(&actual, &expected, 1e-5);
         }
 
-        if !matches!(input, crate::Tensor::C32(_) | crate::Tensor::C64(_)) {
+        if !matches!(input.dtype(), crate::DType::C32 | crate::DType::C64) {
             for (expected, gpu_out) in [
                 (
                     cpu.reduce_min(input, &[0, 1]).unwrap(),
@@ -151,7 +151,7 @@ fn test_cubecl_sum_squares_does_not_contract_multiply_and_add() {
         .reduce_sum_squares_read(TensorRead::from_tensor(&gpu_input), &[0])
         .unwrap();
     let actual = download(&gpu, &gpu_output);
-    let crate::Tensor::F32(actual) = actual else {
+    let Some(actual) = actual.as_typed::<f32>() else {
         panic!("sum-of-squares output must remain f32");
     };
     let actual = actual.as_slice().unwrap()[0];
@@ -169,22 +169,28 @@ fn test_cubecl_float_max_min_reductions_propagate_nan_for_unit_and_plane() {
     }
 
     fn assert_all_nan(tensor: &crate::Tensor) {
-        match tensor {
-            crate::Tensor::F32(tensor) => {
+        match tensor.dtype() {
+            crate::DType::F32 => {
+                let tensor = tensor
+                    .as_typed::<f32>()
+                    .expect("the dtype guard selects this arm");
                 assert!(tensor
                     .as_slice()
                     .unwrap()
                     .iter()
                     .all(|value| value.is_nan()));
             }
-            crate::Tensor::F64(tensor) => {
+            crate::DType::F64 => {
+                let tensor = tensor
+                    .as_typed::<f64>()
+                    .expect("the dtype guard selects this arm");
                 assert!(tensor
                     .as_slice()
                     .unwrap()
                     .iter()
                     .all(|value| value.is_nan()));
             }
-            other => panic!("expected float reduction output, got {:?}", other.dtype()),
+            other => panic!("expected float reduction output, got {:?}", other),
         }
     }
 

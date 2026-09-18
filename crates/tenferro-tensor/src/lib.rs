@@ -31,7 +31,7 @@
 //! ```rust
 //! use tenferro_tensor::{Tensor, TypedTensor};
 //!
-//! let a = Tensor::F64(TypedTensor::from_vec_col_major(vec![2], vec![1.0, 2.0]).unwrap());
+//! let a = Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(vec![2], vec![1.0, 2.0]).unwrap());
 //! assert_eq!(a.shape(), &[2]);
 //! ```
 
@@ -46,6 +46,31 @@ pub mod core {
         TensorRank, TensorRef, TensorScalar, TensorView, ValidationError, ValidationKind,
     };
 }
+
+// Re-exported so the exported dispatch macros can name them with `$crate` paths.
+pub use num_complex::Complex;
+
+/// The 32-bit complex scalar the exported dispatch macros name.
+///
+/// # Examples
+///
+/// ```
+/// use tenferro_tensor::Complex32;
+///
+/// assert_eq!(Complex32::new(1.0, 2.0).im, 2.0);
+/// ```
+pub type Complex32 = Complex<f32>;
+
+/// The 64-bit complex scalar the exported dispatch macros name.
+///
+/// # Examples
+///
+/// ```
+/// use tenferro_tensor::Complex64;
+///
+/// assert_eq!(Complex64::new(1.0, 2.0).re, 1.0);
+/// ```
+pub type Complex64 = Complex<f64>;
 
 pub use tenferro_tensor_core::{
     ErrorKind, IntoRankShape, IntoShapeVec, ShapeMismatch, ShapeVec, SliceSpec, StrideVec,
@@ -97,18 +122,6 @@ pub use storage::{
     RootResourceId, SpanValidationError,
 };
 pub use storage::{AllocationGroup, DescriptorSlot, GroupError};
-
-pub(crate) fn core_dtype(dtype: DType) -> tenferro_tensor_core::DType {
-    match dtype {
-        DType::F32 => tenferro_tensor_core::DType::F32,
-        DType::F64 => tenferro_tensor_core::DType::F64,
-        DType::I32 => tenferro_tensor_core::DType::I32,
-        DType::I64 => tenferro_tensor_core::DType::I64,
-        DType::Bool => tenferro_tensor_core::DType::Bool,
-        DType::C32 => tenferro_tensor_core::DType::C32,
-        DType::C64 => tenferro_tensor_core::DType::C64,
-    }
-}
 
 #[cfg(test)]
 pub(crate) mod tests;

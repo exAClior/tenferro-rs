@@ -41,6 +41,8 @@ struct InputDescriptor {
     shape: Vec<usize>,
     extent_identity: InputExtentIdentity,
     default_tensor: Option<Arc<RetainedValue>>,
+    /// Canonical identity declared for an externally defined scalar input.
+    scalar_identity: Option<&'static str>,
 }
 
 #[derive(Clone, Copy)]
@@ -325,6 +327,9 @@ impl GraphCompiler {
                         shape: (*shape).to_vec(),
                         extent_identity: InputExtentIdentity::Concrete,
                         default_tensor: None,
+                        // A caller-supplied binding declares its own identity through
+                        // the traced value's metadata instead.
+                        scalar_identity: None,
                     },
                 )
                 .is_some()
@@ -936,12 +941,12 @@ fn compile_materialized_semantic_program(
             )));
         };
         let semantic_shape = descriptor.semantic_shape(input_idx);
-        let value = builder
-            .input(ProgramInputSpec::new(
-                descriptor.dtype,
-                semantic_shape.clone(),
-            ))
-            .map_err(semantic_build_error)?;
+        let spec = match descriptor.scalar_identity {
+            Some(identity) => ProgramInputSpec::new(descriptor.dtype, semantic_shape.clone())
+                .with_scalar_identity(identity),
+            None => ProgramInputSpec::new(descriptor.dtype, semantic_shape.clone()),
+        };
+        let value = builder.input(spec).map_err(semantic_build_error)?;
         if let Some(tensor) = &descriptor.default_tensor {
             builder
                 .bind_input_retained(value, Arc::clone(tensor))
@@ -1420,6 +1425,11 @@ fn descriptor_for_input(
             shape: tensor.shape().to_vec(),
             extent_identity: default_input_extent_identity(key, tensor)?,
             default_tensor: Some(tensor.clone()),
+            // A bound tensor carries no canonical name itself, so the declared
+            // identity comes from the traced value's registered metadata.
+            scalar_identity: registered_meta(&ValueKey::Input(key.clone()))
+                .ok()
+                .and_then(|metadata| metadata.scalar_identity()),
         });
     }
     if let Some(spec) = binding_specs.get(key) {
@@ -1445,6 +1455,7 @@ fn descriptor_for_unbound_input(key: &TensorInputKey) -> Result<InputDescriptor>
             shape,
             extent_identity: InputExtentIdentity::Concrete,
             default_tensor: None,
+            scalar_identity: metadata.scalar_identity(),
         });
     }
     Ok(InputDescriptor {
@@ -1452,6 +1463,7 @@ fn descriptor_for_unbound_input(key: &TensorInputKey) -> Result<InputDescriptor>
         shape: vec![0; metadata.rank()],
         extent_identity: InputExtentIdentity::Symbolic,
         default_tensor: None,
+        scalar_identity: metadata.scalar_identity(),
     })
 }
 
@@ -1570,6 +1582,9 @@ fn default_tensors_equivalent(lhs: &Arc<RetainedValue>, rhs: &Arc<RetainedValue>
         DType::Bool => default_slices_equivalent::<bool>(lhs, rhs),
         DType::C32 => default_slices_equivalent::<Complex32>(lhs, rhs),
         DType::C64 => default_slices_equivalent::<Complex64>(lhs, rhs),
+        // An externally defined payload is opaque here, so two distinct values of
+        // that kind are reported as not equivalent rather than compared by bytes.
+        DType::External(_) => false,
     }
 }
 
@@ -1692,7 +1707,7 @@ mod tests {
             }),
             cpu_affinity: None,
         };
-        let lhs = Arc::new(RetainedValue::from_tensor(Tensor::F64(
+        let lhs = Arc::new(RetainedValue::from_tensor(Tensor::from_typed::<f64>(
             TypedTensor::from_buffer_col_major(
                 vec![2],
                 StorageBuffer::Backend(Box::new(BackendStorageHandle::<f64>::new_with_len(1, 2))),
@@ -1700,7 +1715,7 @@ mod tests {
             )
             .unwrap(),
         )));
-        let rhs = Arc::new(RetainedValue::from_tensor(Tensor::F64(
+        let rhs = Arc::new(RetainedValue::from_tensor(Tensor::from_typed::<f64>(
             TypedTensor::from_buffer_col_major(
                 vec![2],
                 StorageBuffer::Backend(Box::new(BackendStorageHandle::<f64>::new_with_len(2, 2))),

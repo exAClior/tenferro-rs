@@ -19,17 +19,60 @@ use tenferro_cpu_basic::{
     reject_complex_ordered_dtypes, reject_complex_unsupported_compare_dtypes,
 };
 
+/// The typed operands behind a same-dtype triple, or this module's refusal for one.
+/// The Rust scalar type behind a preset variant name a macro received.
+macro_rules! preset_scalar {
+    (F32) => {
+        f32
+    };
+    (F64) => {
+        f64
+    };
+    (I32) => {
+        i32
+    };
+    (I64) => {
+        i64
+    };
+    (Bool) => {
+        bool
+    };
+    (C32) => {
+        num_complex::Complex32
+    };
+    (C64) => {
+        num_complex::Complex64
+    };
+}
 macro_rules! dispatch_ternary_result_with_pool {
-    ($op:literal, $a:expr, $b:expr, $c:expr, |$x:ident, $y:ident, $z:ident| $body:expr) => {
-        match ($a, $b, $c) {
-            (Tensor::F32($x), Tensor::F32($y), Tensor::F32($z)) => Ok(Tensor::F32($body?)),
-            (Tensor::F64($x), Tensor::F64($y), Tensor::F64($z)) => Ok(Tensor::F64($body?)),
+    ($op:literal, $a:expr, $b:expr, $c:expr, |$x:ident, $y:ident, $z:ident| $body:expr) => {{
+        match $a.dtype() {
+            DType::F32 => {
+                let ($x, $y, $z) = ternary_operands::<f32>($op, $a, $b, $c)?;
+                Ok(Tensor::from_typed::<f32>($body?))
+            }
+            DType::F64 => {
+                let ($x, $y, $z) = ternary_operands::<f64>($op, $a, $b, $c)?;
+                Ok(Tensor::from_typed::<f64>($body?))
+            }
             _ => Err(ternary_dtype_error(
                 $op,
                 [$a.dtype(), $b.dtype(), $c.dtype()],
             )),
         }
-    };
+    }};
+}
+fn ternary_operands<'a, T: TensorScalar>(
+    op: &'static str,
+    a: &'a Tensor,
+    b: &'a Tensor,
+    c: &'a Tensor,
+) -> crate::Result<(&'a TypedTensor<T>, &'a TypedTensor<T>, &'a TypedTensor<T>)> {
+    let mismatch = || ternary_dtype_error(op, [a.dtype(), b.dtype(), c.dtype()]);
+    let a_t = a.as_typed::<T>().ok_or_else(mismatch)?;
+    let b_t = b.as_typed::<T>().ok_or_else(mismatch)?;
+    let c_t = c.as_typed::<T>().ok_or_else(mismatch)?;
+    Ok((a_t, b_t, c_t))
 }
 
 fn ternary_dtype_error(op: &'static str, dtypes: [DType; 3]) -> crate::Error {
@@ -74,6 +117,24 @@ fn unary_dtype_error(
             remedy.unwrap_or("")
         ),
     )
+}
+
+/// The typed operand behind `operand`, or the refusal this table's wildcard arm
+/// produces for the pair.
+///
+/// `lhs` and `rhs` are the pair being dispatched on, in that order, so the refusal
+/// reads the same way whichever operand could not be typed. Callers reach this from
+/// a match on the pair's dtypes, so `None` means the table and the runtime dtype
+/// disagree rather than a caller mistake.
+fn pair_operand<'a, T: TensorScalar>(
+    op: &'static str,
+    lhs: &Tensor,
+    rhs: &Tensor,
+    operand: &'a Tensor,
+) -> crate::Result<&'a TypedTensor<T>> {
+    operand
+        .as_typed::<T>()
+        .ok_or_else(|| dtype_pair_error(op, lhs.dtype(), rhs.dtype()))
 }
 
 fn tensor_pair_error(op: &'static str, lhs: &Tensor, rhs: &Tensor) -> crate::Error {
@@ -370,41 +431,245 @@ pub fn add(lhs: &Tensor, rhs: &Tensor) -> crate::Result<Tensor> {
     with_test_pool(|buffers| add_with_pool(buffers, lhs, rhs))
 }
 
+/// Dispatch a same-dtype binary pair to one typed kernel.
+///
+/// The arm is selected by the pair's dtypes, which `Tensor` derives from the same payload the
+/// extraction reads, so `pair_operand` cannot fail inside it. Binding each fallible step to its
+/// own `let` keeps every `?` on a line whose call executed, and keeping the body in one macro
+/// means the per-preset binary tables share one covered definition instead of one closing
+/// `)?))` line per arm.
+macro_rules! same_dtype_binary {
+    ($buffers:expr, $lhs:expr, $rhs:expr, $scalar:ty, $kernel:ident, $op:expr) => {{
+        let a = pair_operand::<$scalar>($op, $lhs, $rhs, $lhs)?;
+        let b = pair_operand::<$scalar>($op, $lhs, $rhs, $rhs)?;
+        let out = $kernel($buffers, a, b)?;
+        Ok(Tensor::from_typed::<$scalar>(out))
+    }};
+}
+
 #[doc(hidden)]
 pub fn add_with_pool(
     buffers: &mut BufferPool,
     lhs: &Tensor,
     rhs: &Tensor,
 ) -> crate::Result<Tensor> {
-    match (lhs, rhs) {
-        (Tensor::F32(a), Tensor::F32(b)) => Ok(Tensor::F32(typed_add_with_pool(buffers, a, b)?)),
-        (Tensor::F64(a), Tensor::F64(b)) => Ok(Tensor::F64(typed_add_with_pool(buffers, a, b)?)),
-        (Tensor::I32(a), Tensor::I32(b)) => {
-            Ok(Tensor::I32(typed_wrapping_add_with_pool(buffers, a, b)?))
+    match (lhs.dtype(), rhs.dtype()) {
+        (DType::F32, DType::F32) => {
+            same_dtype_binary!(buffers, lhs, rhs, f32, typed_add_with_pool, "add")
         }
-        (Tensor::I64(a), Tensor::I64(b)) => {
-            Ok(Tensor::I64(typed_wrapping_add_with_pool(buffers, a, b)?))
+        (DType::F64, DType::F64) => {
+            same_dtype_binary!(buffers, lhs, rhs, f64, typed_add_with_pool, "add")
         }
-        (Tensor::C32(a), Tensor::C32(b)) => Ok(Tensor::C32(typed_add_with_pool(buffers, a, b)?)),
-        (Tensor::C64(a), Tensor::C64(b)) => Ok(Tensor::C64(typed_add_with_pool(buffers, a, b)?)),
-        (Tensor::F32(a), Tensor::C32(b)) if a.shape().is_empty() => {
-            let scalar = complex_scalar_tensor(typed_host_data("add", a)?[0])?;
-            Ok(Tensor::C32(typed_add_with_pool(buffers, &scalar, b)?))
+        (DType::I32, DType::I32) => {
+            same_dtype_binary!(buffers, lhs, rhs, i32, typed_wrapping_add_with_pool, "add")
         }
-        (Tensor::C32(a), Tensor::F32(b)) if b.shape().is_empty() => {
-            let scalar = complex_scalar_tensor(typed_host_data("add", b)?[0])?;
-            Ok(Tensor::C32(typed_add_with_pool(buffers, a, &scalar)?))
+        (DType::I64, DType::I64) => {
+            same_dtype_binary!(buffers, lhs, rhs, i64, typed_wrapping_add_with_pool, "add")
         }
-        (Tensor::F64(a), Tensor::C64(b)) if a.shape().is_empty() => {
-            let scalar = complex_scalar_tensor(typed_host_data("add", a)?[0])?;
-            Ok(Tensor::C64(typed_add_with_pool(buffers, &scalar, b)?))
+        (DType::C32, DType::C32) => {
+            same_dtype_binary!(buffers, lhs, rhs, Complex<f32>, typed_add_with_pool, "add")
         }
-        (Tensor::C64(a), Tensor::F64(b)) if b.shape().is_empty() => {
-            let scalar = complex_scalar_tensor(typed_host_data("add", b)?[0])?;
-            Ok(Tensor::C64(typed_add_with_pool(buffers, a, &scalar)?))
+        (DType::C64, DType::C64) => {
+            same_dtype_binary!(buffers, lhs, rhs, Complex<f64>, typed_add_with_pool, "add")
+        }
+        (DType::F32, DType::C32)
+            if pair_operand::<f32>("add", lhs, rhs, lhs)?
+                .shape()
+                .is_empty() =>
+        {
+            let value = typed_host_data("add", pair_operand::<f32>("add", lhs, rhs, lhs)?)?[0];
+            let scalar = complex_scalar_tensor(value)?;
+            let other = pair_operand::<Complex<f32>>("add", lhs, rhs, rhs)?;
+            let out = typed_add_with_pool(buffers, &scalar, other)?;
+            Ok(Tensor::from_typed::<Complex<f32>>(out))
+        }
+        (DType::C32, DType::F32)
+            if pair_operand::<f32>("add", lhs, rhs, rhs)?
+                .shape()
+                .is_empty() =>
+        {
+            let value = typed_host_data("add", pair_operand::<f32>("add", lhs, rhs, rhs)?)?[0];
+            let scalar = complex_scalar_tensor(value)?;
+            let first = pair_operand::<Complex<f32>>("add", lhs, rhs, lhs)?;
+            let out = typed_add_with_pool(buffers, first, &scalar)?;
+            Ok(Tensor::from_typed::<Complex<f32>>(out))
+        }
+        (DType::F64, DType::C64)
+            if pair_operand::<f64>("add", lhs, rhs, lhs)?
+                .shape()
+                .is_empty() =>
+        {
+            let value = typed_host_data("add", pair_operand::<f64>("add", lhs, rhs, lhs)?)?[0];
+            let scalar = complex_scalar_tensor(value)?;
+            let other = pair_operand::<Complex<f64>>("add", lhs, rhs, rhs)?;
+            let out = typed_add_with_pool(buffers, &scalar, other)?;
+            Ok(Tensor::from_typed::<Complex<f64>>(out))
+        }
+        (DType::C64, DType::F64)
+            if pair_operand::<f64>("add", lhs, rhs, rhs)?
+                .shape()
+                .is_empty() =>
+        {
+            let value = typed_host_data("add", pair_operand::<f64>("add", lhs, rhs, rhs)?)?[0];
+            let scalar = complex_scalar_tensor(value)?;
+            let first = pair_operand::<Complex<f64>>("add", lhs, rhs, lhs)?;
+            let out = typed_add_with_pool(buffers, first, &scalar)?;
+            Ok(Tensor::from_typed::<Complex<f64>>(out))
         }
         _ => Err(tensor_pair_error("add", lhs, rhs)),
     }
+}
+
+/// Dispatch a same-variant read pair to that variant's typed kernel.
+///
+/// Every erased elementwise operation reaches the same typed kernels through
+/// these declarations, so an operation adds no matching code of its own.
+macro_rules! dispatch_read_same_variant {
+    ($buffers:expr, $lhs:expr, $rhs:expr, $variant:ident, $func:ident) => {
+        match (&$lhs, &$rhs) {
+            (TensorRead::Tensor(a), TensorRead::View(TensorView::$variant(b)))
+                if a.dtype()
+                    == <preset_scalar!($variant) as tenferro_tensor::TensorScalar>::dtype() =>
+            {
+                let a = a
+                    .as_typed::<preset_scalar!($variant)>()
+                    .expect("the dtype guard selects this arm");
+                let a = a.as_view();
+                return Ok(Tensor::from_typed::<preset_scalar!($variant)>($func(
+                    $buffers, &a, b,
+                )?));
+            }
+            (TensorRead::View(TensorView::$variant(a)), TensorRead::Tensor(b))
+                if b.dtype()
+                    == <preset_scalar!($variant) as tenferro_tensor::TensorScalar>::dtype() =>
+            {
+                let b = b
+                    .as_typed::<preset_scalar!($variant)>()
+                    .expect("the dtype guard selects this arm");
+                let b = b.as_view();
+                return Ok(Tensor::from_typed::<preset_scalar!($variant)>($func(
+                    $buffers, a, &b,
+                )?));
+            }
+            (
+                TensorRead::View(TensorView::$variant(a)),
+                TensorRead::View(TensorView::$variant(b)),
+            ) => {
+                return Ok(Tensor::from_typed::<preset_scalar!($variant)>($func(
+                    $buffers, a, b,
+                )?));
+            }
+            _ => {}
+        }
+    };
+}
+
+/// The single list of preset variants an erased elementwise operation reaches.
+///
+/// An operation supplies only the kernel that implements it for a float-like
+/// variant and for an integer variant; the variant list itself exists once here,
+/// so adding a preset scalar is a single edit rather than one edit per
+/// operation.
+macro_rules! dispatch_read_presets {
+    ($buffers:expr, $lhs:expr, $rhs:expr, $float:ident, $integer:ident) => {
+        dispatch_read_real_complex_scalar!($buffers, $lhs, $rhs, F32, C32, $float);
+        dispatch_read_real_complex_scalar!($buffers, $lhs, $rhs, F64, C64, $float);
+
+        dispatch_read_same_variant!($buffers, $lhs, $rhs, F32, $float);
+        dispatch_read_same_variant!($buffers, $lhs, $rhs, F64, $float);
+        dispatch_read_same_variant!($buffers, $lhs, $rhs, I32, $integer);
+        dispatch_read_same_variant!($buffers, $lhs, $rhs, I64, $integer);
+        dispatch_read_same_variant!($buffers, $lhs, $rhs, C32, $float);
+        dispatch_read_same_variant!($buffers, $lhs, $rhs, C64, $float);
+    };
+}
+
+macro_rules! dispatch_read_real_complex_scalar {
+    ($buffers:expr, $lhs:expr, $rhs:expr, $real_variant:ident, $complex_variant:ident, $func:ident) => {
+        match (&$lhs, &$rhs) {
+            (TensorRead::Tensor(real), TensorRead::View(TensorView::$complex_variant(complex)))
+                if real.dtype()
+                    == <preset_scalar!($real_variant) as tenferro_tensor::TensorScalar>::dtype(
+                    )
+                    && real.shape().is_empty() =>
+            {
+                let real = real
+                    .as_typed::<preset_scalar!($real_variant)>()
+                    .expect("the dtype guard selects this arm");
+                let scalar = complex_scalar_tensor_from_tensor(real)?;
+                let scalar = scalar.as_view();
+                return Ok(Tensor::from_typed::<preset_scalar!($complex_variant)>(
+                    $func($buffers, &scalar, complex)?,
+                ));
+            }
+            (TensorRead::View(TensorView::$real_variant(real)), TensorRead::Tensor(complex))
+                if complex.dtype()
+                    == <preset_scalar!($complex_variant) as tenferro_tensor::TensorScalar>::dtype()
+                    && real.shape().is_empty() =>
+            {
+                let complex = complex
+                    .as_typed::<preset_scalar!($complex_variant)>()
+                    .expect("the dtype guard selects this arm");
+                let scalar = complex_scalar_tensor_from_view(real)?;
+                let scalar = scalar.as_view();
+                let complex = complex.as_view();
+                return Ok(Tensor::from_typed::<preset_scalar!($complex_variant)>(
+                    $func($buffers, &scalar, &complex)?,
+                ));
+            }
+            (
+                TensorRead::View(TensorView::$real_variant(real)),
+                TensorRead::View(TensorView::$complex_variant(complex)),
+            ) if real.shape().is_empty() => {
+                let scalar = complex_scalar_tensor_from_view(real)?;
+                let scalar = scalar.as_view();
+                return Ok(Tensor::from_typed::<preset_scalar!($complex_variant)>(
+                    $func($buffers, &scalar, complex)?,
+                ));
+            }
+            (TensorRead::Tensor(complex), TensorRead::View(TensorView::$real_variant(real)))
+                if complex.dtype()
+                    == <preset_scalar!($complex_variant) as tenferro_tensor::TensorScalar>::dtype()
+                    && real.shape().is_empty() =>
+            {
+                let complex = complex
+                    .as_typed::<preset_scalar!($complex_variant)>()
+                    .expect("the dtype guard selects this arm");
+                let complex = complex.as_view();
+                let scalar = complex_scalar_tensor_from_view(real)?;
+                let scalar = scalar.as_view();
+                return Ok(Tensor::from_typed::<preset_scalar!($complex_variant)>(
+                    $func($buffers, &complex, &scalar)?,
+                ));
+            }
+            (TensorRead::View(TensorView::$complex_variant(complex)), TensorRead::Tensor(real))
+                if real.dtype()
+                    == <preset_scalar!($real_variant) as tenferro_tensor::TensorScalar>::dtype(
+                    )
+                    && real.shape().is_empty() =>
+            {
+                let real = real
+                    .as_typed::<preset_scalar!($real_variant)>()
+                    .expect("the dtype guard selects this arm");
+                let scalar = complex_scalar_tensor_from_tensor(real)?;
+                let scalar = scalar.as_view();
+                return Ok(Tensor::from_typed::<preset_scalar!($complex_variant)>(
+                    $func($buffers, complex, &scalar)?,
+                ));
+            }
+            (
+                TensorRead::View(TensorView::$complex_variant(complex)),
+                TensorRead::View(TensorView::$real_variant(real)),
+            ) if real.shape().is_empty() => {
+                let scalar = complex_scalar_tensor_from_view(real)?;
+                let scalar = scalar.as_view();
+                return Ok(Tensor::from_typed::<preset_scalar!($complex_variant)>(
+                    $func($buffers, complex, &scalar)?,
+                ));
+            }
+            _ => {}
+        }
+    };
 }
 
 #[doc(hidden)]
@@ -417,113 +682,13 @@ pub fn add_read_with_pool(
         return add_with_pool(buffers, lhs, rhs);
     }
 
-    macro_rules! dispatch {
-        ($variant:ident, $func:ident) => {
-            match (&lhs, &rhs) {
-                (
-                    TensorRead::Tensor(Tensor::$variant(a)),
-                    TensorRead::View(TensorView::$variant(b)),
-                ) => {
-                    let a = a.as_view();
-                    return Ok(Tensor::$variant($func(buffers, &a, b)?));
-                }
-                (
-                    TensorRead::View(TensorView::$variant(a)),
-                    TensorRead::Tensor(Tensor::$variant(b)),
-                ) => {
-                    let b = b.as_view();
-                    return Ok(Tensor::$variant($func(buffers, a, &b)?));
-                }
-                (
-                    TensorRead::View(TensorView::$variant(a)),
-                    TensorRead::View(TensorView::$variant(b)),
-                ) => {
-                    return Ok(Tensor::$variant($func(buffers, a, b)?));
-                }
-                _ => {}
-            }
-        };
-    }
-
-    macro_rules! dispatch_real_complex_scalar {
-        ($real_variant:ident, $complex_variant:ident) => {
-            match (&lhs, &rhs) {
-                (
-                    TensorRead::Tensor(Tensor::$real_variant(real)),
-                    TensorRead::View(TensorView::$complex_variant(complex)),
-                ) if real.shape().is_empty() => {
-                    let scalar = complex_scalar_tensor_from_tensor(real)?;
-                    let scalar = scalar.as_view();
-                    return Ok(Tensor::$complex_variant(typed_add_view_with_pool(
-                        buffers, &scalar, complex,
-                    )?));
-                }
-                (
-                    TensorRead::View(TensorView::$real_variant(real)),
-                    TensorRead::Tensor(Tensor::$complex_variant(complex)),
-                ) if real.shape().is_empty() => {
-                    let scalar = complex_scalar_tensor_from_view(real)?;
-                    let scalar = scalar.as_view();
-                    let complex = complex.as_view();
-                    return Ok(Tensor::$complex_variant(typed_add_view_with_pool(
-                        buffers, &scalar, &complex,
-                    )?));
-                }
-                (
-                    TensorRead::View(TensorView::$real_variant(real)),
-                    TensorRead::View(TensorView::$complex_variant(complex)),
-                ) if real.shape().is_empty() => {
-                    let scalar = complex_scalar_tensor_from_view(real)?;
-                    let scalar = scalar.as_view();
-                    return Ok(Tensor::$complex_variant(typed_add_view_with_pool(
-                        buffers, &scalar, complex,
-                    )?));
-                }
-                (
-                    TensorRead::Tensor(Tensor::$complex_variant(complex)),
-                    TensorRead::View(TensorView::$real_variant(real)),
-                ) if real.shape().is_empty() => {
-                    let complex = complex.as_view();
-                    let scalar = complex_scalar_tensor_from_view(real)?;
-                    let scalar = scalar.as_view();
-                    return Ok(Tensor::$complex_variant(typed_add_view_with_pool(
-                        buffers, &complex, &scalar,
-                    )?));
-                }
-                (
-                    TensorRead::View(TensorView::$complex_variant(complex)),
-                    TensorRead::Tensor(Tensor::$real_variant(real)),
-                ) if real.shape().is_empty() => {
-                    let scalar = complex_scalar_tensor_from_tensor(real)?;
-                    let scalar = scalar.as_view();
-                    return Ok(Tensor::$complex_variant(typed_add_view_with_pool(
-                        buffers, complex, &scalar,
-                    )?));
-                }
-                (
-                    TensorRead::View(TensorView::$complex_variant(complex)),
-                    TensorRead::View(TensorView::$real_variant(real)),
-                ) if real.shape().is_empty() => {
-                    let scalar = complex_scalar_tensor_from_view(real)?;
-                    let scalar = scalar.as_view();
-                    return Ok(Tensor::$complex_variant(typed_add_view_with_pool(
-                        buffers, complex, &scalar,
-                    )?));
-                }
-                _ => {}
-            }
-        };
-    }
-
-    dispatch_real_complex_scalar!(F32, C32);
-    dispatch_real_complex_scalar!(F64, C64);
-
-    dispatch!(F32, typed_add_view_with_pool);
-    dispatch!(F64, typed_add_view_with_pool);
-    dispatch!(I32, typed_wrapping_add_view_with_pool);
-    dispatch!(I64, typed_wrapping_add_view_with_pool);
-    dispatch!(C32, typed_add_view_with_pool);
-    dispatch!(C64, typed_add_view_with_pool);
+    dispatch_read_presets!(
+        buffers,
+        lhs,
+        rhs,
+        typed_add_view_with_pool,
+        typed_wrapping_add_view_with_pool
+    );
 
     Err(read_pair_error("add", lhs, rhs))
 }
@@ -554,32 +719,68 @@ pub fn sub_with_pool(
     lhs: &Tensor,
     rhs: &Tensor,
 ) -> crate::Result<Tensor> {
-    match (lhs, rhs) {
-        (Tensor::F32(a), Tensor::F32(b)) => Ok(Tensor::F32(typed_sub_with_pool(buffers, a, b)?)),
-        (Tensor::F64(a), Tensor::F64(b)) => Ok(Tensor::F64(typed_sub_with_pool(buffers, a, b)?)),
-        (Tensor::I32(a), Tensor::I32(b)) => {
-            Ok(Tensor::I32(typed_wrapping_sub_with_pool(buffers, a, b)?))
+    match (lhs.dtype(), rhs.dtype()) {
+        (DType::F32, DType::F32) => {
+            same_dtype_binary!(buffers, lhs, rhs, f32, typed_sub_with_pool, "sub")
         }
-        (Tensor::I64(a), Tensor::I64(b)) => {
-            Ok(Tensor::I64(typed_wrapping_sub_with_pool(buffers, a, b)?))
+        (DType::F64, DType::F64) => {
+            same_dtype_binary!(buffers, lhs, rhs, f64, typed_sub_with_pool, "sub")
         }
-        (Tensor::C32(a), Tensor::C32(b)) => Ok(Tensor::C32(typed_sub_with_pool(buffers, a, b)?)),
-        (Tensor::C64(a), Tensor::C64(b)) => Ok(Tensor::C64(typed_sub_with_pool(buffers, a, b)?)),
-        (Tensor::F32(a), Tensor::C32(b)) if a.shape().is_empty() => {
-            let scalar = complex_scalar_tensor(typed_host_data("sub", a)?[0])?;
-            Ok(Tensor::C32(typed_sub_with_pool(buffers, &scalar, b)?))
+        (DType::I32, DType::I32) => {
+            same_dtype_binary!(buffers, lhs, rhs, i32, typed_wrapping_sub_with_pool, "sub")
         }
-        (Tensor::C32(a), Tensor::F32(b)) if b.shape().is_empty() => {
-            let scalar = complex_scalar_tensor(typed_host_data("sub", b)?[0])?;
-            Ok(Tensor::C32(typed_sub_with_pool(buffers, a, &scalar)?))
+        (DType::I64, DType::I64) => {
+            same_dtype_binary!(buffers, lhs, rhs, i64, typed_wrapping_sub_with_pool, "sub")
         }
-        (Tensor::F64(a), Tensor::C64(b)) if a.shape().is_empty() => {
-            let scalar = complex_scalar_tensor(typed_host_data("sub", a)?[0])?;
-            Ok(Tensor::C64(typed_sub_with_pool(buffers, &scalar, b)?))
+        (DType::C32, DType::C32) => {
+            same_dtype_binary!(buffers, lhs, rhs, Complex<f32>, typed_sub_with_pool, "sub")
         }
-        (Tensor::C64(a), Tensor::F64(b)) if b.shape().is_empty() => {
-            let scalar = complex_scalar_tensor(typed_host_data("sub", b)?[0])?;
-            Ok(Tensor::C64(typed_sub_with_pool(buffers, a, &scalar)?))
+        (DType::C64, DType::C64) => {
+            same_dtype_binary!(buffers, lhs, rhs, Complex<f64>, typed_sub_with_pool, "sub")
+        }
+        (DType::F32, DType::C32)
+            if pair_operand::<f32>("sub", lhs, rhs, lhs)?
+                .shape()
+                .is_empty() =>
+        {
+            let value = typed_host_data("sub", pair_operand::<f32>("sub", lhs, rhs, lhs)?)?[0];
+            let scalar = complex_scalar_tensor(value)?;
+            let other = pair_operand::<Complex<f32>>("sub", lhs, rhs, rhs)?;
+            let out = typed_sub_with_pool(buffers, &scalar, other)?;
+            Ok(Tensor::from_typed::<Complex<f32>>(out))
+        }
+        (DType::C32, DType::F32)
+            if pair_operand::<f32>("sub", lhs, rhs, rhs)?
+                .shape()
+                .is_empty() =>
+        {
+            let value = typed_host_data("sub", pair_operand::<f32>("sub", lhs, rhs, rhs)?)?[0];
+            let scalar = complex_scalar_tensor(value)?;
+            let first = pair_operand::<Complex<f32>>("sub", lhs, rhs, lhs)?;
+            let out = typed_sub_with_pool(buffers, first, &scalar)?;
+            Ok(Tensor::from_typed::<Complex<f32>>(out))
+        }
+        (DType::F64, DType::C64)
+            if pair_operand::<f64>("sub", lhs, rhs, lhs)?
+                .shape()
+                .is_empty() =>
+        {
+            let value = typed_host_data("sub", pair_operand::<f64>("sub", lhs, rhs, lhs)?)?[0];
+            let scalar = complex_scalar_tensor(value)?;
+            let other = pair_operand::<Complex<f64>>("sub", lhs, rhs, rhs)?;
+            let out = typed_sub_with_pool(buffers, &scalar, other)?;
+            Ok(Tensor::from_typed::<Complex<f64>>(out))
+        }
+        (DType::C64, DType::F64)
+            if pair_operand::<f64>("sub", lhs, rhs, rhs)?
+                .shape()
+                .is_empty() =>
+        {
+            let value = typed_host_data("sub", pair_operand::<f64>("sub", lhs, rhs, rhs)?)?[0];
+            let scalar = complex_scalar_tensor(value)?;
+            let first = pair_operand::<Complex<f64>>("sub", lhs, rhs, lhs)?;
+            let out = typed_sub_with_pool(buffers, first, &scalar)?;
+            Ok(Tensor::from_typed::<Complex<f64>>(out))
         }
         _ => Err(tensor_pair_error("sub", lhs, rhs)),
     }
@@ -595,113 +796,13 @@ pub fn sub_read_with_pool(
         return sub_with_pool(buffers, lhs, rhs);
     }
 
-    macro_rules! dispatch {
-        ($variant:ident, $func:ident) => {
-            match (&lhs, &rhs) {
-                (
-                    TensorRead::Tensor(Tensor::$variant(a)),
-                    TensorRead::View(TensorView::$variant(b)),
-                ) => {
-                    let a = a.as_view();
-                    return Ok(Tensor::$variant($func(buffers, &a, b)?));
-                }
-                (
-                    TensorRead::View(TensorView::$variant(a)),
-                    TensorRead::Tensor(Tensor::$variant(b)),
-                ) => {
-                    let b = b.as_view();
-                    return Ok(Tensor::$variant($func(buffers, a, &b)?));
-                }
-                (
-                    TensorRead::View(TensorView::$variant(a)),
-                    TensorRead::View(TensorView::$variant(b)),
-                ) => {
-                    return Ok(Tensor::$variant($func(buffers, a, b)?));
-                }
-                _ => {}
-            }
-        };
-    }
-
-    macro_rules! dispatch_real_complex_scalar {
-        ($real_variant:ident, $complex_variant:ident) => {
-            match (&lhs, &rhs) {
-                (
-                    TensorRead::Tensor(Tensor::$real_variant(real)),
-                    TensorRead::View(TensorView::$complex_variant(complex)),
-                ) if real.shape().is_empty() => {
-                    let scalar = complex_scalar_tensor_from_tensor(real)?;
-                    let scalar = scalar.as_view();
-                    return Ok(Tensor::$complex_variant(typed_sub_view_with_pool(
-                        buffers, &scalar, complex,
-                    )?));
-                }
-                (
-                    TensorRead::View(TensorView::$real_variant(real)),
-                    TensorRead::Tensor(Tensor::$complex_variant(complex)),
-                ) if real.shape().is_empty() => {
-                    let scalar = complex_scalar_tensor_from_view(real)?;
-                    let scalar = scalar.as_view();
-                    let complex = complex.as_view();
-                    return Ok(Tensor::$complex_variant(typed_sub_view_with_pool(
-                        buffers, &scalar, &complex,
-                    )?));
-                }
-                (
-                    TensorRead::View(TensorView::$real_variant(real)),
-                    TensorRead::View(TensorView::$complex_variant(complex)),
-                ) if real.shape().is_empty() => {
-                    let scalar = complex_scalar_tensor_from_view(real)?;
-                    let scalar = scalar.as_view();
-                    return Ok(Tensor::$complex_variant(typed_sub_view_with_pool(
-                        buffers, &scalar, complex,
-                    )?));
-                }
-                (
-                    TensorRead::Tensor(Tensor::$complex_variant(complex)),
-                    TensorRead::View(TensorView::$real_variant(real)),
-                ) if real.shape().is_empty() => {
-                    let complex = complex.as_view();
-                    let scalar = complex_scalar_tensor_from_view(real)?;
-                    let scalar = scalar.as_view();
-                    return Ok(Tensor::$complex_variant(typed_sub_view_with_pool(
-                        buffers, &complex, &scalar,
-                    )?));
-                }
-                (
-                    TensorRead::View(TensorView::$complex_variant(complex)),
-                    TensorRead::Tensor(Tensor::$real_variant(real)),
-                ) if real.shape().is_empty() => {
-                    let scalar = complex_scalar_tensor_from_tensor(real)?;
-                    let scalar = scalar.as_view();
-                    return Ok(Tensor::$complex_variant(typed_sub_view_with_pool(
-                        buffers, complex, &scalar,
-                    )?));
-                }
-                (
-                    TensorRead::View(TensorView::$complex_variant(complex)),
-                    TensorRead::View(TensorView::$real_variant(real)),
-                ) if real.shape().is_empty() => {
-                    let scalar = complex_scalar_tensor_from_view(real)?;
-                    let scalar = scalar.as_view();
-                    return Ok(Tensor::$complex_variant(typed_sub_view_with_pool(
-                        buffers, complex, &scalar,
-                    )?));
-                }
-                _ => {}
-            }
-        };
-    }
-
-    dispatch_real_complex_scalar!(F32, C32);
-    dispatch_real_complex_scalar!(F64, C64);
-
-    dispatch!(F32, typed_sub_view_with_pool);
-    dispatch!(F64, typed_sub_view_with_pool);
-    dispatch!(I32, typed_wrapping_sub_view_with_pool);
-    dispatch!(I64, typed_wrapping_sub_view_with_pool);
-    dispatch!(C32, typed_sub_view_with_pool);
-    dispatch!(C64, typed_sub_view_with_pool);
+    dispatch_read_presets!(
+        buffers,
+        lhs,
+        rhs,
+        typed_sub_view_with_pool,
+        typed_wrapping_sub_view_with_pool
+    );
 
     Err(read_pair_error("sub", lhs, rhs))
 }
@@ -746,32 +847,68 @@ pub fn mul_with_pool(
     lhs: &Tensor,
     rhs: &Tensor,
 ) -> crate::Result<Tensor> {
-    match (lhs, rhs) {
-        (Tensor::F32(a), Tensor::F32(b)) => Ok(Tensor::F32(typed_mul_with_pool(buffers, a, b)?)),
-        (Tensor::F64(a), Tensor::F64(b)) => Ok(Tensor::F64(typed_mul_with_pool(buffers, a, b)?)),
-        (Tensor::I32(a), Tensor::I32(b)) => {
-            Ok(Tensor::I32(typed_wrapping_mul_with_pool(buffers, a, b)?))
+    match (lhs.dtype(), rhs.dtype()) {
+        (DType::F32, DType::F32) => {
+            same_dtype_binary!(buffers, lhs, rhs, f32, typed_mul_with_pool, "mul")
         }
-        (Tensor::I64(a), Tensor::I64(b)) => {
-            Ok(Tensor::I64(typed_wrapping_mul_with_pool(buffers, a, b)?))
+        (DType::F64, DType::F64) => {
+            same_dtype_binary!(buffers, lhs, rhs, f64, typed_mul_with_pool, "mul")
         }
-        (Tensor::C32(a), Tensor::C32(b)) => Ok(Tensor::C32(typed_mul_with_pool(buffers, a, b)?)),
-        (Tensor::C64(a), Tensor::C64(b)) => Ok(Tensor::C64(typed_mul_with_pool(buffers, a, b)?)),
-        (Tensor::F32(a), Tensor::C32(b)) if a.shape().is_empty() => {
-            let scalar = complex_scalar_tensor(typed_host_data("mul", a)?[0])?;
-            Ok(Tensor::C32(typed_mul_with_pool(buffers, &scalar, b)?))
+        (DType::I32, DType::I32) => {
+            same_dtype_binary!(buffers, lhs, rhs, i32, typed_wrapping_mul_with_pool, "mul")
         }
-        (Tensor::C32(a), Tensor::F32(b)) if b.shape().is_empty() => {
-            let scalar = complex_scalar_tensor(typed_host_data("mul", b)?[0])?;
-            Ok(Tensor::C32(typed_mul_with_pool(buffers, a, &scalar)?))
+        (DType::I64, DType::I64) => {
+            same_dtype_binary!(buffers, lhs, rhs, i64, typed_wrapping_mul_with_pool, "mul")
         }
-        (Tensor::F64(a), Tensor::C64(b)) if a.shape().is_empty() => {
-            let scalar = complex_scalar_tensor(typed_host_data("mul", a)?[0])?;
-            Ok(Tensor::C64(typed_mul_with_pool(buffers, &scalar, b)?))
+        (DType::C32, DType::C32) => {
+            same_dtype_binary!(buffers, lhs, rhs, Complex<f32>, typed_mul_with_pool, "mul")
         }
-        (Tensor::C64(a), Tensor::F64(b)) if b.shape().is_empty() => {
-            let scalar = complex_scalar_tensor(typed_host_data("mul", b)?[0])?;
-            Ok(Tensor::C64(typed_mul_with_pool(buffers, a, &scalar)?))
+        (DType::C64, DType::C64) => {
+            same_dtype_binary!(buffers, lhs, rhs, Complex<f64>, typed_mul_with_pool, "mul")
+        }
+        (DType::F32, DType::C32)
+            if pair_operand::<f32>("mul", lhs, rhs, lhs)?
+                .shape()
+                .is_empty() =>
+        {
+            let value = typed_host_data("mul", pair_operand::<f32>("mul", lhs, rhs, lhs)?)?[0];
+            let scalar = complex_scalar_tensor(value)?;
+            let other = pair_operand::<Complex<f32>>("mul", lhs, rhs, rhs)?;
+            let out = typed_mul_with_pool(buffers, &scalar, other)?;
+            Ok(Tensor::from_typed::<Complex<f32>>(out))
+        }
+        (DType::C32, DType::F32)
+            if pair_operand::<f32>("mul", lhs, rhs, rhs)?
+                .shape()
+                .is_empty() =>
+        {
+            let value = typed_host_data("mul", pair_operand::<f32>("mul", lhs, rhs, rhs)?)?[0];
+            let scalar = complex_scalar_tensor(value)?;
+            let first = pair_operand::<Complex<f32>>("mul", lhs, rhs, lhs)?;
+            let out = typed_mul_with_pool(buffers, first, &scalar)?;
+            Ok(Tensor::from_typed::<Complex<f32>>(out))
+        }
+        (DType::F64, DType::C64)
+            if pair_operand::<f64>("mul", lhs, rhs, lhs)?
+                .shape()
+                .is_empty() =>
+        {
+            let value = typed_host_data("mul", pair_operand::<f64>("mul", lhs, rhs, lhs)?)?[0];
+            let scalar = complex_scalar_tensor(value)?;
+            let other = pair_operand::<Complex<f64>>("mul", lhs, rhs, rhs)?;
+            let out = typed_mul_with_pool(buffers, &scalar, other)?;
+            Ok(Tensor::from_typed::<Complex<f64>>(out))
+        }
+        (DType::C64, DType::F64)
+            if pair_operand::<f64>("mul", lhs, rhs, rhs)?
+                .shape()
+                .is_empty() =>
+        {
+            let value = typed_host_data("mul", pair_operand::<f64>("mul", lhs, rhs, rhs)?)?[0];
+            let scalar = complex_scalar_tensor(value)?;
+            let first = pair_operand::<Complex<f64>>("mul", lhs, rhs, lhs)?;
+            let out = typed_mul_with_pool(buffers, first, &scalar)?;
+            Ok(Tensor::from_typed::<Complex<f64>>(out))
         }
         _ => Err(tensor_pair_error("mul", lhs, rhs)),
     }
@@ -787,113 +924,13 @@ pub fn mul_read_with_pool(
         return mul_with_pool(buffers, lhs, rhs);
     }
 
-    macro_rules! dispatch {
-        ($variant:ident, $func:ident) => {
-            match (&lhs, &rhs) {
-                (
-                    TensorRead::Tensor(Tensor::$variant(a)),
-                    TensorRead::View(TensorView::$variant(b)),
-                ) => {
-                    let a = a.as_view();
-                    return Ok(Tensor::$variant($func(buffers, &a, b)?));
-                }
-                (
-                    TensorRead::View(TensorView::$variant(a)),
-                    TensorRead::Tensor(Tensor::$variant(b)),
-                ) => {
-                    let b = b.as_view();
-                    return Ok(Tensor::$variant($func(buffers, a, &b)?));
-                }
-                (
-                    TensorRead::View(TensorView::$variant(a)),
-                    TensorRead::View(TensorView::$variant(b)),
-                ) => {
-                    return Ok(Tensor::$variant($func(buffers, a, b)?));
-                }
-                _ => {}
-            }
-        };
-    }
-
-    macro_rules! dispatch_real_complex_scalar {
-        ($real_variant:ident, $complex_variant:ident) => {
-            match (&lhs, &rhs) {
-                (
-                    TensorRead::Tensor(Tensor::$real_variant(real)),
-                    TensorRead::View(TensorView::$complex_variant(complex)),
-                ) if real.shape().is_empty() => {
-                    let scalar = complex_scalar_tensor_from_tensor(real)?;
-                    let scalar = scalar.as_view();
-                    return Ok(Tensor::$complex_variant(typed_mul_view_with_pool(
-                        buffers, &scalar, complex,
-                    )?));
-                }
-                (
-                    TensorRead::View(TensorView::$real_variant(real)),
-                    TensorRead::Tensor(Tensor::$complex_variant(complex)),
-                ) if real.shape().is_empty() => {
-                    let scalar = complex_scalar_tensor_from_view(real)?;
-                    let scalar = scalar.as_view();
-                    let complex = complex.as_view();
-                    return Ok(Tensor::$complex_variant(typed_mul_view_with_pool(
-                        buffers, &scalar, &complex,
-                    )?));
-                }
-                (
-                    TensorRead::View(TensorView::$real_variant(real)),
-                    TensorRead::View(TensorView::$complex_variant(complex)),
-                ) if real.shape().is_empty() => {
-                    let scalar = complex_scalar_tensor_from_view(real)?;
-                    let scalar = scalar.as_view();
-                    return Ok(Tensor::$complex_variant(typed_mul_view_with_pool(
-                        buffers, &scalar, complex,
-                    )?));
-                }
-                (
-                    TensorRead::Tensor(Tensor::$complex_variant(complex)),
-                    TensorRead::View(TensorView::$real_variant(real)),
-                ) if real.shape().is_empty() => {
-                    let complex = complex.as_view();
-                    let scalar = complex_scalar_tensor_from_view(real)?;
-                    let scalar = scalar.as_view();
-                    return Ok(Tensor::$complex_variant(typed_mul_view_with_pool(
-                        buffers, &complex, &scalar,
-                    )?));
-                }
-                (
-                    TensorRead::View(TensorView::$complex_variant(complex)),
-                    TensorRead::Tensor(Tensor::$real_variant(real)),
-                ) if real.shape().is_empty() => {
-                    let scalar = complex_scalar_tensor_from_tensor(real)?;
-                    let scalar = scalar.as_view();
-                    return Ok(Tensor::$complex_variant(typed_mul_view_with_pool(
-                        buffers, complex, &scalar,
-                    )?));
-                }
-                (
-                    TensorRead::View(TensorView::$complex_variant(complex)),
-                    TensorRead::View(TensorView::$real_variant(real)),
-                ) if real.shape().is_empty() => {
-                    let scalar = complex_scalar_tensor_from_view(real)?;
-                    let scalar = scalar.as_view();
-                    return Ok(Tensor::$complex_variant(typed_mul_view_with_pool(
-                        buffers, complex, &scalar,
-                    )?));
-                }
-                _ => {}
-            }
-        };
-    }
-
-    dispatch_real_complex_scalar!(F32, C32);
-    dispatch_real_complex_scalar!(F64, C64);
-
-    dispatch!(F32, typed_mul_view_with_pool);
-    dispatch!(F64, typed_mul_view_with_pool);
-    dispatch!(I32, typed_wrapping_mul_view_with_pool);
-    dispatch!(I64, typed_wrapping_mul_view_with_pool);
-    dispatch!(C32, typed_mul_view_with_pool);
-    dispatch!(C64, typed_mul_view_with_pool);
+    dispatch_read_presets!(
+        buffers,
+        lhs,
+        rhs,
+        typed_mul_view_with_pool,
+        typed_wrapping_mul_view_with_pool
+    );
 
     binary_read_with_pool("mul", buffers, lhs, rhs, mul_with_pool)
 }
@@ -908,22 +945,53 @@ enum CpuReadView<'a> {
     C64(TypedTensorView<'a, Complex<f64>>),
 }
 
-fn read_as_cpu_view(input: TensorRead<'_>) -> CpuReadView<'_> {
+/// The typed tensor behind `input`, or this module's refusal when the dtype is a caller-owned payload.
+///
+/// The read view has no externally defined variant, so a payload the caller owns is reported instead of
+/// being unwrapped.
+fn read_typed<'a, T: tenferro_tensor::TensorScalar>(
+    input: &'a Tensor,
+) -> crate::Result<TypedTensorView<'a, T>> {
+    let dtype = input.dtype();
+    input
+        .as_typed::<T>()
+        .map(|tensor| tensor.as_view())
+        .ok_or_else(|| {
+            crate::Error::unsupported_dtype(
+                "read_as_cpu_view",
+                dtype,
+                "the CPU read view covers the preset scalars",
+            )
+        })
+}
+
+fn read_as_cpu_view(input: TensorRead<'_>) -> crate::Result<CpuReadView<'_>> {
     match input {
-        TensorRead::Tensor(Tensor::F32(tensor)) => CpuReadView::F32(tensor.as_view()),
-        TensorRead::Tensor(Tensor::F64(tensor)) => CpuReadView::F64(tensor.as_view()),
-        TensorRead::Tensor(Tensor::I32(tensor)) => CpuReadView::I32(tensor.as_view()),
-        TensorRead::Tensor(Tensor::I64(tensor)) => CpuReadView::I64(tensor.as_view()),
-        TensorRead::Tensor(Tensor::Bool(tensor)) => CpuReadView::Bool(tensor.as_view()),
-        TensorRead::Tensor(Tensor::C32(tensor)) => CpuReadView::C32(tensor.as_view()),
-        TensorRead::Tensor(Tensor::C64(tensor)) => CpuReadView::C64(tensor.as_view()),
-        TensorRead::View(TensorView::F32(view)) => CpuReadView::F32(view),
-        TensorRead::View(TensorView::F64(view)) => CpuReadView::F64(view),
-        TensorRead::View(TensorView::I32(view)) => CpuReadView::I32(view),
-        TensorRead::View(TensorView::I64(view)) => CpuReadView::I64(view),
-        TensorRead::View(TensorView::Bool(view)) => CpuReadView::Bool(view),
-        TensorRead::View(TensorView::C32(view)) => CpuReadView::C32(view),
-        TensorRead::View(TensorView::C64(view)) => CpuReadView::C64(view),
+        TensorRead::Tensor(tensor) => match tensor.dtype() {
+            DType::F32 => Ok(CpuReadView::F32(read_typed::<f32>(tensor)?)),
+            DType::F64 => Ok(CpuReadView::F64(read_typed::<f64>(tensor)?)),
+            DType::I32 => Ok(CpuReadView::I32(read_typed::<i32>(tensor)?)),
+            DType::I64 => Ok(CpuReadView::I64(read_typed::<i64>(tensor)?)),
+            DType::Bool => Ok(CpuReadView::Bool(read_typed::<bool>(tensor)?)),
+            DType::C32 => Ok(CpuReadView::C32(read_typed::<tenferro_tensor::Complex32>(
+                tensor,
+            )?)),
+            DType::C64 => Ok(CpuReadView::C64(read_typed::<tenferro_tensor::Complex64>(
+                tensor,
+            )?)),
+            DType::External(..) => Err(crate::Error::unsupported_dtype(
+                "read_as_cpu_view",
+                tensor.dtype(),
+                "the CPU read view covers the preset scalars",
+            )),
+        },
+        TensorRead::View(TensorView::F32(view)) => Ok(CpuReadView::F32(view)),
+        TensorRead::View(TensorView::F64(view)) => Ok(CpuReadView::F64(view)),
+        TensorRead::View(TensorView::I32(view)) => Ok(CpuReadView::I32(view)),
+        TensorRead::View(TensorView::I64(view)) => Ok(CpuReadView::I64(view)),
+        TensorRead::View(TensorView::Bool(view)) => Ok(CpuReadView::Bool(view)),
+        TensorRead::View(TensorView::C32(view)) => Ok(CpuReadView::C32(view)),
+        TensorRead::View(TensorView::C64(view)) => Ok(CpuReadView::C64(view)),
     }
 }
 
@@ -962,7 +1030,7 @@ fn replay_clamp<T: OrderedElem + PoolScalar>(
     .map_err(|err| crate::Error::backend_source("clamp", err))
 }
 
-fn replay_binary<T: Copy + Send + Sync, O: Copy + PoolScalar>(
+fn replay_binary<T: Copy + Send + Sync, O: Copy + Send + Sync>(
     op: &'static str,
     out: &mut strided_kernel::StridedViewMut<'_, MaybeUninit<O>>,
     lhs: &StridedView<'_, T>,
@@ -973,7 +1041,7 @@ fn replay_binary<T: Copy + Send + Sync, O: Copy + PoolScalar>(
         .map_err(|err| crate::Error::backend_source(op, err))
 }
 
-fn replay_scalar_left<T: Copy + PoolScalar>(
+fn replay_scalar_left<T: Copy + Send + Sync>(
     op: &'static str,
     out: &mut strided_kernel::StridedViewMut<'_, MaybeUninit<T>>,
     input: &StridedView<'_, T>,
@@ -984,7 +1052,7 @@ fn replay_scalar_left<T: Copy + PoolScalar>(
         .map_err(|err| crate::Error::backend_source(op, err))
 }
 
-fn replay_scalar_right<T: Copy + PoolScalar>(
+fn replay_scalar_right<T: Copy + Send + Sync>(
     op: &'static str,
     out: &mut strided_kernel::StridedViewMut<'_, MaybeUninit<T>>,
     input: &StridedView<'_, T>,
@@ -1848,19 +1916,21 @@ pub fn broadcast_multiply_read_with_pool(
     rhs_shape: &[usize],
     rhs_dims: &[usize],
 ) -> crate::Result<Option<Tensor>> {
-    let lhs = read_as_cpu_view(lhs);
-    let rhs = read_as_cpu_view(rhs);
+    let lhs = read_as_cpu_view(lhs)?;
+    let rhs = read_as_cpu_view(rhs)?;
 
     macro_rules! dispatch {
         ($variant:ident, $lhs:expr, $rhs:expr, $mul:expr) => {{
             if let Some(out) = try_outer_product_with_pool(
                 buffers, &$lhs, lhs_shape, lhs_dims, &$rhs, rhs_shape, rhs_dims,
             )? {
-                return Ok(Some(Tensor::$variant(out)));
+                return Ok(Some(Tensor::from_typed::<preset_scalar!($variant)>(out)));
             }
-            Ok(Some(Tensor::$variant(typed_broadcast_mul_view_with_pool(
-                buffers, &$lhs, lhs_shape, lhs_dims, &$rhs, rhs_shape, rhs_dims, $mul,
-            )?)))
+            Ok(Some(Tensor::from_typed::<preset_scalar!($variant)>(
+                typed_broadcast_mul_view_with_pool(
+                    buffers, &$lhs, lhs_shape, lhs_dims, &$rhs, rhs_shape, rhs_dims, $mul,
+                )?,
+            )))
         }};
     }
 
@@ -1914,15 +1984,15 @@ pub fn broadcast_multiply_value_with_pool_and_tag(
     rhs_dims: &[usize],
     mut tag_output: impl FnMut(&mut Tensor),
 ) -> crate::Result<Option<TensorValue>> {
-    let lhs_view = read_as_cpu_view(lhs.clone());
-    let rhs_view = read_as_cpu_view(rhs.clone());
+    let lhs_view = read_as_cpu_view(lhs.clone())?;
+    let rhs_view = read_as_cpu_view(rhs.clone())?;
 
     macro_rules! dispatch_lazy {
         ($variant:ident, $lhs:expr, $rhs:expr) => {{
             if let Some(out) = try_lazy_outer_product_with_pool(
                 buffers, &$lhs, lhs_shape, lhs_dims, &$rhs, rhs_shape, rhs_dims,
             )? {
-                let mut base = Tensor::$variant(out.base);
+                let mut base = Tensor::from_typed::<preset_scalar!($variant)>(out.base);
                 tag_output(&mut base);
                 return Ok(Some(lazy_outer_product_value(
                     base,
@@ -1990,32 +2060,68 @@ pub fn div_with_pool(
     lhs: &Tensor,
     rhs: &Tensor,
 ) -> crate::Result<Tensor> {
-    match (lhs, rhs) {
-        (Tensor::F32(a), Tensor::F32(b)) => Ok(Tensor::F32(typed_div_with_pool(buffers, a, b)?)),
-        (Tensor::F64(a), Tensor::F64(b)) => Ok(Tensor::F64(typed_div_with_pool(buffers, a, b)?)),
-        (Tensor::I32(a), Tensor::I32(b)) => {
-            Ok(Tensor::I32(typed_integer_div_with_pool(buffers, a, b)?))
+    match (lhs.dtype(), rhs.dtype()) {
+        (DType::F32, DType::F32) => {
+            same_dtype_binary!(buffers, lhs, rhs, f32, typed_div_with_pool, "div")
         }
-        (Tensor::I64(a), Tensor::I64(b)) => {
-            Ok(Tensor::I64(typed_integer_div_with_pool(buffers, a, b)?))
+        (DType::F64, DType::F64) => {
+            same_dtype_binary!(buffers, lhs, rhs, f64, typed_div_with_pool, "div")
         }
-        (Tensor::C32(a), Tensor::C32(b)) => Ok(Tensor::C32(typed_div_with_pool(buffers, a, b)?)),
-        (Tensor::C64(a), Tensor::C64(b)) => Ok(Tensor::C64(typed_div_with_pool(buffers, a, b)?)),
-        (Tensor::F32(a), Tensor::C32(b)) if a.shape().is_empty() => {
-            let scalar = complex_scalar_tensor(typed_host_data("div", a)?[0])?;
-            Ok(Tensor::C32(typed_div_with_pool(buffers, &scalar, b)?))
+        (DType::I32, DType::I32) => {
+            same_dtype_binary!(buffers, lhs, rhs, i32, typed_integer_div_with_pool, "div")
         }
-        (Tensor::C32(a), Tensor::F32(b)) if b.shape().is_empty() => {
-            let scalar = complex_scalar_tensor(typed_host_data("div", b)?[0])?;
-            Ok(Tensor::C32(typed_div_with_pool(buffers, a, &scalar)?))
+        (DType::I64, DType::I64) => {
+            same_dtype_binary!(buffers, lhs, rhs, i64, typed_integer_div_with_pool, "div")
         }
-        (Tensor::F64(a), Tensor::C64(b)) if a.shape().is_empty() => {
-            let scalar = complex_scalar_tensor(typed_host_data("div", a)?[0])?;
-            Ok(Tensor::C64(typed_div_with_pool(buffers, &scalar, b)?))
+        (DType::C32, DType::C32) => {
+            same_dtype_binary!(buffers, lhs, rhs, Complex<f32>, typed_div_with_pool, "div")
         }
-        (Tensor::C64(a), Tensor::F64(b)) if b.shape().is_empty() => {
-            let scalar = complex_scalar_tensor(typed_host_data("div", b)?[0])?;
-            Ok(Tensor::C64(typed_div_with_pool(buffers, a, &scalar)?))
+        (DType::C64, DType::C64) => {
+            same_dtype_binary!(buffers, lhs, rhs, Complex<f64>, typed_div_with_pool, "div")
+        }
+        (DType::F32, DType::C32)
+            if pair_operand::<f32>("div", lhs, rhs, lhs)?
+                .shape()
+                .is_empty() =>
+        {
+            let value = typed_host_data("div", pair_operand::<f32>("div", lhs, rhs, lhs)?)?[0];
+            let scalar = complex_scalar_tensor(value)?;
+            let other = pair_operand::<Complex<f32>>("div", lhs, rhs, rhs)?;
+            let out = typed_div_with_pool(buffers, &scalar, other)?;
+            Ok(Tensor::from_typed::<Complex<f32>>(out))
+        }
+        (DType::C32, DType::F32)
+            if pair_operand::<f32>("div", lhs, rhs, rhs)?
+                .shape()
+                .is_empty() =>
+        {
+            let value = typed_host_data("div", pair_operand::<f32>("div", lhs, rhs, rhs)?)?[0];
+            let scalar = complex_scalar_tensor(value)?;
+            let first = pair_operand::<Complex<f32>>("div", lhs, rhs, lhs)?;
+            let out = typed_div_with_pool(buffers, first, &scalar)?;
+            Ok(Tensor::from_typed::<Complex<f32>>(out))
+        }
+        (DType::F64, DType::C64)
+            if pair_operand::<f64>("div", lhs, rhs, lhs)?
+                .shape()
+                .is_empty() =>
+        {
+            let value = typed_host_data("div", pair_operand::<f64>("div", lhs, rhs, lhs)?)?[0];
+            let scalar = complex_scalar_tensor(value)?;
+            let other = pair_operand::<Complex<f64>>("div", lhs, rhs, rhs)?;
+            let out = typed_div_with_pool(buffers, &scalar, other)?;
+            Ok(Tensor::from_typed::<Complex<f64>>(out))
+        }
+        (DType::C64, DType::F64)
+            if pair_operand::<f64>("div", lhs, rhs, rhs)?
+                .shape()
+                .is_empty() =>
+        {
+            let value = typed_host_data("div", pair_operand::<f64>("div", lhs, rhs, rhs)?)?[0];
+            let scalar = complex_scalar_tensor(value)?;
+            let first = pair_operand::<Complex<f64>>("div", lhs, rhs, lhs)?;
+            let out = typed_div_with_pool(buffers, first, &scalar)?;
+            Ok(Tensor::from_typed::<Complex<f64>>(out))
         }
         _ => Err(crate::Error::dtype_mismatch(
             "div",
@@ -2033,84 +2139,52 @@ pub fn div_read_with_pool(
 ) -> crate::Result<Tensor> {
     let lhs_dtype = lhs.dtype();
     let rhs_dtype = rhs.dtype();
-    match (read_as_cpu_view(lhs), read_as_cpu_view(rhs)) {
-        (CpuReadView::F32(a), CpuReadView::F32(b)) => Ok(Tensor::F32(typed_binary_view_with_pool(
-            "div",
-            buffers,
-            &a,
-            &b,
-            Div::div,
-        )?)),
-        (CpuReadView::F64(a), CpuReadView::F64(b)) => Ok(Tensor::F64(typed_binary_view_with_pool(
-            "div",
-            buffers,
-            &a,
-            &b,
-            Div::div,
-        )?)),
-        (CpuReadView::I32(a), CpuReadView::I32(b)) => Ok(Tensor::I32(
+    match (read_as_cpu_view(lhs)?, read_as_cpu_view(rhs)?) {
+        (CpuReadView::F32(a), CpuReadView::F32(b)) => Ok(Tensor::from_typed::<f32>(
+            typed_binary_view_with_pool("div", buffers, &a, &b, Div::div)?,
+        )),
+        (CpuReadView::F64(a), CpuReadView::F64(b)) => Ok(Tensor::from_typed::<f64>(
+            typed_binary_view_with_pool("div", buffers, &a, &b, Div::div)?,
+        )),
+        (CpuReadView::I32(a), CpuReadView::I32(b)) => Ok(Tensor::from_typed::<i32>(
             typed_integer_div_view_with_pool(buffers, &a, &b)?,
         )),
-        (CpuReadView::I64(a), CpuReadView::I64(b)) => Ok(Tensor::I64(
+        (CpuReadView::I64(a), CpuReadView::I64(b)) => Ok(Tensor::from_typed::<i64>(
             typed_integer_div_view_with_pool(buffers, &a, &b)?,
         )),
-        (CpuReadView::C32(a), CpuReadView::C32(b)) => Ok(Tensor::C32(typed_binary_view_with_pool(
-            "div",
-            buffers,
-            &a,
-            &b,
-            Div::div,
-        )?)),
-        (CpuReadView::C64(a), CpuReadView::C64(b)) => Ok(Tensor::C64(typed_binary_view_with_pool(
-            "div",
-            buffers,
-            &a,
-            &b,
-            Div::div,
-        )?)),
+        (CpuReadView::C32(a), CpuReadView::C32(b)) => Ok(Tensor::from_typed::<Complex<f32>>(
+            typed_binary_view_with_pool("div", buffers, &a, &b, Div::div)?,
+        )),
+        (CpuReadView::C64(a), CpuReadView::C64(b)) => Ok(Tensor::from_typed::<Complex<f64>>(
+            typed_binary_view_with_pool("div", buffers, &a, &b, Div::div)?,
+        )),
         (CpuReadView::F32(real), CpuReadView::C32(complex)) if real.shape().is_empty() => {
             let scalar = complex_scalar_tensor_from_view(&real)?;
             let scalar = scalar.as_view();
-            Ok(Tensor::C32(typed_binary_view_with_pool(
-                "div",
-                buffers,
-                &scalar,
-                &complex,
-                Div::div,
-            )?))
+            Ok(Tensor::from_typed::<Complex<f32>>(
+                typed_binary_view_with_pool("div", buffers, &scalar, &complex, Div::div)?,
+            ))
         }
         (CpuReadView::C32(complex), CpuReadView::F32(real)) if real.shape().is_empty() => {
             let scalar = complex_scalar_tensor_from_view(&real)?;
             let scalar = scalar.as_view();
-            Ok(Tensor::C32(typed_binary_view_with_pool(
-                "div",
-                buffers,
-                &complex,
-                &scalar,
-                Div::div,
-            )?))
+            Ok(Tensor::from_typed::<Complex<f32>>(
+                typed_binary_view_with_pool("div", buffers, &complex, &scalar, Div::div)?,
+            ))
         }
         (CpuReadView::F64(real), CpuReadView::C64(complex)) if real.shape().is_empty() => {
             let scalar = complex_scalar_tensor_from_view(&real)?;
             let scalar = scalar.as_view();
-            Ok(Tensor::C64(typed_binary_view_with_pool(
-                "div",
-                buffers,
-                &scalar,
-                &complex,
-                Div::div,
-            )?))
+            Ok(Tensor::from_typed::<Complex<f64>>(
+                typed_binary_view_with_pool("div", buffers, &scalar, &complex, Div::div)?,
+            ))
         }
         (CpuReadView::C64(complex), CpuReadView::F64(real)) if real.shape().is_empty() => {
             let scalar = complex_scalar_tensor_from_view(&real)?;
             let scalar = scalar.as_view();
-            Ok(Tensor::C64(typed_binary_view_with_pool(
-                "div",
-                buffers,
-                &complex,
-                &scalar,
-                Div::div,
-            )?))
+            Ok(Tensor::from_typed::<Complex<f64>>(
+                typed_binary_view_with_pool("div", buffers, &complex, &scalar, Div::div)?,
+            ))
         }
         _ => Err(crate::Error::dtype_mismatch("div", lhs_dtype, rhs_dtype)),
     }
@@ -2145,14 +2219,18 @@ pub fn rem_with_pool(
     lhs: &Tensor,
     rhs: &Tensor,
 ) -> crate::Result<Tensor> {
-    match (lhs, rhs) {
-        (Tensor::F32(a), Tensor::F32(b)) => Ok(Tensor::F32(typed_rem_with_pool(buffers, a, b)?)),
-        (Tensor::F64(a), Tensor::F64(b)) => Ok(Tensor::F64(typed_rem_with_pool(buffers, a, b)?)),
-        (Tensor::I32(a), Tensor::I32(b)) => {
-            Ok(Tensor::I32(typed_integer_rem_with_pool(buffers, a, b)?))
+    match (lhs.dtype(), rhs.dtype()) {
+        (DType::F32, DType::F32) => {
+            same_dtype_binary!(buffers, lhs, rhs, f32, typed_rem_with_pool, "rem")
         }
-        (Tensor::I64(a), Tensor::I64(b)) => {
-            Ok(Tensor::I64(typed_integer_rem_with_pool(buffers, a, b)?))
+        (DType::F64, DType::F64) => {
+            same_dtype_binary!(buffers, lhs, rhs, f64, typed_rem_with_pool, "rem")
+        }
+        (DType::I32, DType::I32) => {
+            same_dtype_binary!(buffers, lhs, rhs, i32, typed_integer_rem_with_pool, "rem")
+        }
+        (DType::I64, DType::I64) => {
+            same_dtype_binary!(buffers, lhs, rhs, i64, typed_integer_rem_with_pool, "rem")
         }
         _ => Err(tensor_pair_error("rem", lhs, rhs)),
     }
@@ -2166,25 +2244,17 @@ pub fn rem_read_with_pool(
 ) -> crate::Result<Tensor> {
     let lhs_dtype = lhs.dtype();
     let rhs_dtype = rhs.dtype();
-    match (read_as_cpu_view(lhs), read_as_cpu_view(rhs)) {
-        (CpuReadView::F32(a), CpuReadView::F32(b)) => Ok(Tensor::F32(typed_binary_view_with_pool(
-            "rem",
-            buffers,
-            &a,
-            &b,
-            StdRem::rem,
-        )?)),
-        (CpuReadView::F64(a), CpuReadView::F64(b)) => Ok(Tensor::F64(typed_binary_view_with_pool(
-            "rem",
-            buffers,
-            &a,
-            &b,
-            StdRem::rem,
-        )?)),
-        (CpuReadView::I32(a), CpuReadView::I32(b)) => Ok(Tensor::I32(
+    match (read_as_cpu_view(lhs)?, read_as_cpu_view(rhs)?) {
+        (CpuReadView::F32(a), CpuReadView::F32(b)) => Ok(Tensor::from_typed::<f32>(
+            typed_binary_view_with_pool("rem", buffers, &a, &b, StdRem::rem)?,
+        )),
+        (CpuReadView::F64(a), CpuReadView::F64(b)) => Ok(Tensor::from_typed::<f64>(
+            typed_binary_view_with_pool("rem", buffers, &a, &b, StdRem::rem)?,
+        )),
+        (CpuReadView::I32(a), CpuReadView::I32(b)) => Ok(Tensor::from_typed::<i32>(
             typed_integer_rem_view_with_pool(buffers, &a, &b)?,
         )),
-        (CpuReadView::I64(a), CpuReadView::I64(b)) => Ok(Tensor::I64(
+        (CpuReadView::I64(a), CpuReadView::I64(b)) => Ok(Tensor::from_typed::<i64>(
             typed_integer_rem_view_with_pool(buffers, &a, &b)?,
         )),
         _ => Err(dtype_pair_error("rem", lhs_dtype, rhs_dtype)),
@@ -2212,19 +2282,49 @@ pub fn neg(input: &Tensor) -> crate::Result<Tensor> {
 
 #[doc(hidden)]
 pub fn neg_with_pool(buffers: &mut BufferPool, input: &Tensor) -> crate::Result<Tensor> {
-    match input {
-        Tensor::F32(t) => Ok(Tensor::F32(typed_neg_with_pool(buffers, t)?)),
-        Tensor::F64(t) => Ok(Tensor::F64(typed_neg_with_pool(buffers, t)?)),
-        Tensor::I32(t) => Ok(Tensor::I32(typed_wrapping_neg_with_pool(buffers, t)?)),
-        Tensor::I64(t) => Ok(Tensor::I64(typed_wrapping_neg_with_pool(buffers, t)?)),
-        Tensor::Bool(_) => Err(unary_dtype_error(
+    match input.dtype() {
+        DType::F32 => Ok(Tensor::from_typed::<f32>(typed_neg_with_pool(
+            buffers,
+            input.as_typed::<f32>().ok_or_else(|| {
+                unary_dtype_error("neg", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
+        DType::F64 => Ok(Tensor::from_typed::<f64>(typed_neg_with_pool(
+            buffers,
+            input.as_typed::<f64>().ok_or_else(|| {
+                unary_dtype_error("neg", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
+        DType::I32 => Ok(Tensor::from_typed::<i32>(typed_wrapping_neg_with_pool(
+            buffers,
+            input.as_typed::<i32>().ok_or_else(|| {
+                unary_dtype_error("neg", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
+        DType::I64 => Ok(Tensor::from_typed::<i64>(typed_wrapping_neg_with_pool(
+            buffers,
+            input.as_typed::<i64>().ok_or_else(|| {
+                unary_dtype_error("neg", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
+        DType::Bool | DType::External(_) => Err(unary_dtype_error(
             "neg",
             input.dtype(),
             "F32/F64/I32/I64/C32/C64",
             false,
         )),
-        Tensor::C32(t) => Ok(Tensor::C32(typed_neg_with_pool(buffers, t)?)),
-        Tensor::C64(t) => Ok(Tensor::C64(typed_neg_with_pool(buffers, t)?)),
+        DType::C32 => Ok(Tensor::from_typed::<Complex<f32>>(typed_neg_with_pool(
+            buffers,
+            input.as_typed::<Complex<f32>>().ok_or_else(|| {
+                unary_dtype_error("neg", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
+        DType::C64 => Ok(Tensor::from_typed::<Complex<f64>>(typed_neg_with_pool(
+            buffers,
+            input.as_typed::<Complex<f64>>().ok_or_else(|| {
+                unary_dtype_error("neg", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
     }
 }
 
@@ -2234,43 +2334,37 @@ pub fn neg_read_with_pool(
     input: TensorRead<'_>,
 ) -> crate::Result<Tensor> {
     let dtype = input.dtype();
-    match read_as_cpu_view(input) {
-        CpuReadView::F32(t) => Ok(Tensor::F32(typed_unary_view_with_pool(
+    match read_as_cpu_view(input)? {
+        CpuReadView::F32(t) => Ok(Tensor::from_typed::<f32>(typed_unary_view_with_pool(
             "neg",
             buffers,
             &t,
             Neg::neg,
         )?)),
-        CpuReadView::F64(t) => Ok(Tensor::F64(typed_unary_view_with_pool(
+        CpuReadView::F64(t) => Ok(Tensor::from_typed::<f64>(typed_unary_view_with_pool(
             "neg",
             buffers,
             &t,
             Neg::neg,
         )?)),
-        CpuReadView::I32(t) => Ok(Tensor::I32(typed_unary_view_with_pool(
+        CpuReadView::I32(t) => Ok(Tensor::from_typed::<i32>(typed_unary_view_with_pool(
             "neg",
             buffers,
             &t,
             WrappingIntegerElem::wrapping_neg_elem,
         )?)),
-        CpuReadView::I64(t) => Ok(Tensor::I64(typed_unary_view_with_pool(
+        CpuReadView::I64(t) => Ok(Tensor::from_typed::<i64>(typed_unary_view_with_pool(
             "neg",
             buffers,
             &t,
             WrappingIntegerElem::wrapping_neg_elem,
         )?)),
-        CpuReadView::C32(t) => Ok(Tensor::C32(typed_unary_view_with_pool(
-            "neg",
-            buffers,
-            &t,
-            Neg::neg,
-        )?)),
-        CpuReadView::C64(t) => Ok(Tensor::C64(typed_unary_view_with_pool(
-            "neg",
-            buffers,
-            &t,
-            Neg::neg,
-        )?)),
+        CpuReadView::C32(t) => Ok(Tensor::from_typed::<Complex<f32>>(
+            typed_unary_view_with_pool("neg", buffers, &t, Neg::neg)?,
+        )),
+        CpuReadView::C64(t) => Ok(Tensor::from_typed::<Complex<f64>>(
+            typed_unary_view_with_pool("neg", buffers, &t, Neg::neg)?,
+        )),
         _ => Err(unary_dtype_error(
             "neg",
             dtype,
@@ -2291,7 +2385,7 @@ pub fn neg_read_with_pool(
 ///
 /// let input = Tensor::from_vec_col_major(vec![1], vec![Complex64::new(1.0, 2.0)])?;
 /// let out = conj(&input)?;
-/// assert_eq!(out.as_slice::<Complex64>().unwrap(), &[Complex64::new(1.0, -2.0)]);
+/// assert_eq!(out.as_slice::<Complex<f64>>().unwrap(), &[Complex64::new(1.0, -2.0)]);
 /// # Ok::<(), tenferro_tensor::Error>(())
 /// ```
 #[cfg(test)]
@@ -2302,17 +2396,37 @@ pub fn conj(input: &Tensor) -> crate::Result<Tensor> {
 
 #[doc(hidden)]
 pub fn conj_with_pool(buffers: &mut BufferPool, input: &Tensor) -> crate::Result<Tensor> {
-    match input {
-        Tensor::F32(t) => Ok(Tensor::F32(typed_conj_with_pool(buffers, t)?)),
-        Tensor::F64(t) => Ok(Tensor::F64(typed_conj_with_pool(buffers, t)?)),
-        Tensor::I32(_) | Tensor::I64(_) | Tensor::Bool(_) => Err(unary_dtype_error(
+    match input.dtype() {
+        DType::F32 => Ok(Tensor::from_typed::<f32>(typed_conj_with_pool(
+            buffers,
+            input
+                .as_typed::<f32>()
+                .ok_or_else(|| unary_dtype_error("conj", input.dtype(), "F32/F64/C32/C64", true))?,
+        )?)),
+        DType::F64 => Ok(Tensor::from_typed::<f64>(typed_conj_with_pool(
+            buffers,
+            input
+                .as_typed::<f64>()
+                .ok_or_else(|| unary_dtype_error("conj", input.dtype(), "F32/F64/C32/C64", true))?,
+        )?)),
+        DType::I32 | DType::I64 | DType::Bool | DType::External(_) => Err(unary_dtype_error(
             "conj",
             input.dtype(),
             "F32/F64/C32/C64",
             true,
         )),
-        Tensor::C32(t) => Ok(Tensor::C32(typed_conj_with_pool(buffers, t)?)),
-        Tensor::C64(t) => Ok(Tensor::C64(typed_conj_with_pool(buffers, t)?)),
+        DType::C32 => Ok(Tensor::from_typed::<Complex<f32>>(typed_conj_with_pool(
+            buffers,
+            input
+                .as_typed::<Complex<f32>>()
+                .ok_or_else(|| unary_dtype_error("conj", input.dtype(), "F32/F64/C32/C64", true))?,
+        )?)),
+        DType::C64 => Ok(Tensor::from_typed::<Complex<f64>>(typed_conj_with_pool(
+            buffers,
+            input
+                .as_typed::<Complex<f64>>()
+                .ok_or_else(|| unary_dtype_error("conj", input.dtype(), "F32/F64/C32/C64", true))?,
+        )?)),
     }
 }
 
@@ -2322,31 +2436,25 @@ pub fn conj_read_with_pool(
     input: TensorRead<'_>,
 ) -> crate::Result<Tensor> {
     let dtype = input.dtype();
-    match read_as_cpu_view(input) {
-        CpuReadView::F32(t) => Ok(Tensor::F32(typed_unary_view_with_pool(
+    match read_as_cpu_view(input)? {
+        CpuReadView::F32(t) => Ok(Tensor::from_typed::<f32>(typed_unary_view_with_pool(
             "conj",
             buffers,
             &t,
             ConjElem::conj_elem,
         )?)),
-        CpuReadView::F64(t) => Ok(Tensor::F64(typed_unary_view_with_pool(
+        CpuReadView::F64(t) => Ok(Tensor::from_typed::<f64>(typed_unary_view_with_pool(
             "conj",
             buffers,
             &t,
             ConjElem::conj_elem,
         )?)),
-        CpuReadView::C32(t) => Ok(Tensor::C32(typed_unary_view_with_pool(
-            "conj",
-            buffers,
-            &t,
-            ConjElem::conj_elem,
-        )?)),
-        CpuReadView::C64(t) => Ok(Tensor::C64(typed_unary_view_with_pool(
-            "conj",
-            buffers,
-            &t,
-            ConjElem::conj_elem,
-        )?)),
+        CpuReadView::C32(t) => Ok(Tensor::from_typed::<Complex<f32>>(
+            typed_unary_view_with_pool("conj", buffers, &t, ConjElem::conj_elem)?,
+        )),
+        CpuReadView::C64(t) => Ok(Tensor::from_typed::<Complex<f64>>(
+            typed_unary_view_with_pool("conj", buffers, &t, ConjElem::conj_elem)?,
+        )),
         _ => Err(unary_dtype_error("conj", dtype, "F32/F64/C32/C64", true)),
     }
 }
@@ -2374,19 +2482,49 @@ pub fn abs(input: &Tensor) -> crate::Result<Tensor> {
 
 #[doc(hidden)]
 pub fn abs_with_pool(buffers: &mut BufferPool, input: &Tensor) -> crate::Result<Tensor> {
-    match input {
-        Tensor::F32(t) => Ok(Tensor::F32(typed_abs_with_pool(buffers, t)?)),
-        Tensor::F64(t) => Ok(Tensor::F64(typed_abs_with_pool(buffers, t)?)),
-        Tensor::I32(t) => Ok(Tensor::I32(typed_wrapping_abs_with_pool(buffers, t)?)),
-        Tensor::I64(t) => Ok(Tensor::I64(typed_wrapping_abs_with_pool(buffers, t)?)),
-        Tensor::Bool(_) => Err(unary_dtype_error(
+    match input.dtype() {
+        DType::F32 => Ok(Tensor::from_typed::<f32>(typed_abs_with_pool(
+            buffers,
+            input.as_typed::<f32>().ok_or_else(|| {
+                unary_dtype_error("abs", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
+        DType::F64 => Ok(Tensor::from_typed::<f64>(typed_abs_with_pool(
+            buffers,
+            input.as_typed::<f64>().ok_or_else(|| {
+                unary_dtype_error("abs", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
+        DType::I32 => Ok(Tensor::from_typed::<i32>(typed_wrapping_abs_with_pool(
+            buffers,
+            input.as_typed::<i32>().ok_or_else(|| {
+                unary_dtype_error("abs", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
+        DType::I64 => Ok(Tensor::from_typed::<i64>(typed_wrapping_abs_with_pool(
+            buffers,
+            input.as_typed::<i64>().ok_or_else(|| {
+                unary_dtype_error("abs", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
+        DType::Bool | DType::External(_) => Err(unary_dtype_error(
             "abs",
             input.dtype(),
             "F32/F64/I32/I64/C32/C64",
             false,
         )),
-        Tensor::C32(t) => Ok(Tensor::F32(typed_complex_abs_with_pool(buffers, t)?)),
-        Tensor::C64(t) => Ok(Tensor::F64(typed_complex_abs_with_pool(buffers, t)?)),
+        DType::C32 => Ok(Tensor::from_typed::<f32>(typed_complex_abs_with_pool(
+            buffers,
+            input.as_typed::<Complex<f32>>().ok_or_else(|| {
+                unary_dtype_error("abs", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
+        DType::C64 => Ok(Tensor::from_typed::<f64>(typed_complex_abs_with_pool(
+            buffers,
+            input.as_typed::<Complex<f64>>().ok_or_else(|| {
+                unary_dtype_error("abs", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
     }
 }
 
@@ -2396,33 +2534,37 @@ pub fn abs_read_with_pool(
     input: TensorRead<'_>,
 ) -> crate::Result<Tensor> {
     let dtype = input.dtype();
-    match read_as_cpu_view(input) {
-        CpuReadView::F32(t) => Ok(Tensor::F32(typed_unary_view_with_pool(
+    match read_as_cpu_view(input)? {
+        CpuReadView::F32(t) => Ok(Tensor::from_typed::<f32>(typed_unary_view_with_pool(
             "abs",
             buffers,
             &t,
             Tier2Elem::abs_elem,
         )?)),
-        CpuReadView::F64(t) => Ok(Tensor::F64(typed_unary_view_with_pool(
+        CpuReadView::F64(t) => Ok(Tensor::from_typed::<f64>(typed_unary_view_with_pool(
             "abs",
             buffers,
             &t,
             Tier2Elem::abs_elem,
         )?)),
-        CpuReadView::I32(t) => Ok(Tensor::I32(typed_unary_view_with_pool(
+        CpuReadView::I32(t) => Ok(Tensor::from_typed::<i32>(typed_unary_view_with_pool(
             "abs",
             buffers,
             &t,
             WrappingIntegerElem::wrapping_abs_elem,
         )?)),
-        CpuReadView::I64(t) => Ok(Tensor::I64(typed_unary_view_with_pool(
+        CpuReadView::I64(t) => Ok(Tensor::from_typed::<i64>(typed_unary_view_with_pool(
             "abs",
             buffers,
             &t,
             WrappingIntegerElem::wrapping_abs_elem,
         )?)),
-        CpuReadView::C32(t) => Ok(Tensor::F32(typed_complex_abs_view_with_pool(buffers, &t)?)),
-        CpuReadView::C64(t) => Ok(Tensor::F64(typed_complex_abs_view_with_pool(buffers, &t)?)),
+        CpuReadView::C32(t) => Ok(Tensor::from_typed::<f32>(typed_complex_abs_view_with_pool(
+            buffers, &t,
+        )?)),
+        CpuReadView::C64(t) => Ok(Tensor::from_typed::<f64>(typed_complex_abs_view_with_pool(
+            buffers, &t,
+        )?)),
         _ => Err(unary_dtype_error(
             "abs",
             dtype,
@@ -2453,19 +2595,49 @@ pub fn sign(input: &Tensor) -> crate::Result<Tensor> {
 
 #[doc(hidden)]
 pub fn sign_with_pool(buffers: &mut BufferPool, input: &Tensor) -> crate::Result<Tensor> {
-    match input {
-        Tensor::F32(t) => Ok(Tensor::F32(typed_sign_with_pool(buffers, t)?)),
-        Tensor::F64(t) => Ok(Tensor::F64(typed_sign_with_pool(buffers, t)?)),
-        Tensor::I32(t) => Ok(Tensor::I32(typed_integer_sign_with_pool(buffers, t)?)),
-        Tensor::I64(t) => Ok(Tensor::I64(typed_integer_sign_with_pool(buffers, t)?)),
-        Tensor::Bool(_) => Err(unary_dtype_error(
+    match input.dtype() {
+        DType::F32 => Ok(Tensor::from_typed::<f32>(typed_sign_with_pool(
+            buffers,
+            input.as_typed::<f32>().ok_or_else(|| {
+                unary_dtype_error("sign", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
+        DType::F64 => Ok(Tensor::from_typed::<f64>(typed_sign_with_pool(
+            buffers,
+            input.as_typed::<f64>().ok_or_else(|| {
+                unary_dtype_error("sign", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
+        DType::I32 => Ok(Tensor::from_typed::<i32>(typed_integer_sign_with_pool(
+            buffers,
+            input.as_typed::<i32>().ok_or_else(|| {
+                unary_dtype_error("sign", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
+        DType::I64 => Ok(Tensor::from_typed::<i64>(typed_integer_sign_with_pool(
+            buffers,
+            input.as_typed::<i64>().ok_or_else(|| {
+                unary_dtype_error("sign", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
+        DType::Bool | DType::External(_) => Err(unary_dtype_error(
             "sign",
             input.dtype(),
             "F32/F64/I32/I64/C32/C64",
             false,
         )),
-        Tensor::C32(t) => Ok(Tensor::C32(typed_sign_with_pool(buffers, t)?)),
-        Tensor::C64(t) => Ok(Tensor::C64(typed_sign_with_pool(buffers, t)?)),
+        DType::C32 => Ok(Tensor::from_typed::<Complex<f32>>(typed_sign_with_pool(
+            buffers,
+            input.as_typed::<Complex<f32>>().ok_or_else(|| {
+                unary_dtype_error("sign", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
+        DType::C64 => Ok(Tensor::from_typed::<Complex<f64>>(typed_sign_with_pool(
+            buffers,
+            input.as_typed::<Complex<f64>>().ok_or_else(|| {
+                unary_dtype_error("sign", input.dtype(), "F32/F64/I32/I64/C32/C64", false)
+            })?,
+        )?)),
     }
 }
 
@@ -2475,43 +2647,37 @@ pub fn sign_read_with_pool(
     input: TensorRead<'_>,
 ) -> crate::Result<Tensor> {
     let dtype = input.dtype();
-    match read_as_cpu_view(input) {
-        CpuReadView::F32(t) => Ok(Tensor::F32(typed_unary_view_with_pool(
+    match read_as_cpu_view(input)? {
+        CpuReadView::F32(t) => Ok(Tensor::from_typed::<f32>(typed_unary_view_with_pool(
             "sign",
             buffers,
             &t,
             Tier2Elem::sign_elem,
         )?)),
-        CpuReadView::F64(t) => Ok(Tensor::F64(typed_unary_view_with_pool(
+        CpuReadView::F64(t) => Ok(Tensor::from_typed::<f64>(typed_unary_view_with_pool(
             "sign",
             buffers,
             &t,
             Tier2Elem::sign_elem,
         )?)),
-        CpuReadView::I32(t) => Ok(Tensor::I32(typed_unary_view_with_pool(
+        CpuReadView::I32(t) => Ok(Tensor::from_typed::<i32>(typed_unary_view_with_pool(
             "sign",
             buffers,
             &t,
             WrappingIntegerElem::signum_elem,
         )?)),
-        CpuReadView::I64(t) => Ok(Tensor::I64(typed_unary_view_with_pool(
+        CpuReadView::I64(t) => Ok(Tensor::from_typed::<i64>(typed_unary_view_with_pool(
             "sign",
             buffers,
             &t,
             WrappingIntegerElem::signum_elem,
         )?)),
-        CpuReadView::C32(t) => Ok(Tensor::C32(typed_unary_view_with_pool(
-            "sign",
-            buffers,
-            &t,
-            Tier2Elem::sign_elem,
-        )?)),
-        CpuReadView::C64(t) => Ok(Tensor::C64(typed_unary_view_with_pool(
-            "sign",
-            buffers,
-            &t,
-            Tier2Elem::sign_elem,
-        )?)),
+        CpuReadView::C32(t) => Ok(Tensor::from_typed::<Complex<f32>>(
+            typed_unary_view_with_pool("sign", buffers, &t, Tier2Elem::sign_elem)?,
+        )),
+        CpuReadView::C64(t) => Ok(Tensor::from_typed::<Complex<f64>>(
+            typed_unary_view_with_pool("sign", buffers, &t, Tier2Elem::sign_elem)?,
+        )),
         _ => Err(unary_dtype_error(
             "sign",
             dtype,
@@ -2549,18 +2715,18 @@ pub fn maximum_with_pool(
 ) -> crate::Result<Tensor> {
     reject_complex_ordered_dtypes("maximum", &[lhs.dtype(), rhs.dtype()])?;
 
-    match (lhs, rhs) {
-        (Tensor::F32(a), Tensor::F32(b)) => {
-            Ok(Tensor::F32(typed_maximum_with_pool(buffers, a, b)?))
+    match (lhs.dtype(), rhs.dtype()) {
+        (DType::F32, DType::F32) => {
+            same_dtype_binary!(buffers, lhs, rhs, f32, typed_maximum_with_pool, "maximum")
         }
-        (Tensor::F64(a), Tensor::F64(b)) => {
-            Ok(Tensor::F64(typed_maximum_with_pool(buffers, a, b)?))
+        (DType::F64, DType::F64) => {
+            same_dtype_binary!(buffers, lhs, rhs, f64, typed_maximum_with_pool, "maximum")
         }
-        (Tensor::I32(a), Tensor::I32(b)) => {
-            Ok(Tensor::I32(typed_maximum_with_pool(buffers, a, b)?))
+        (DType::I32, DType::I32) => {
+            same_dtype_binary!(buffers, lhs, rhs, i32, typed_maximum_with_pool, "maximum")
         }
-        (Tensor::I64(a), Tensor::I64(b)) => {
-            Ok(Tensor::I64(typed_maximum_with_pool(buffers, a, b)?))
+        (DType::I64, DType::I64) => {
+            same_dtype_binary!(buffers, lhs, rhs, i64, typed_maximum_with_pool, "maximum")
         }
         _ => Err(tensor_pair_error("maximum", lhs, rhs)),
     }
@@ -2576,43 +2742,43 @@ pub fn maximum_read_with_pool(
     let rhs_dtype = rhs.dtype();
     reject_complex_ordered_dtypes("maximum", &[lhs_dtype, rhs_dtype])?;
 
-    match (read_as_cpu_view(lhs), read_as_cpu_view(rhs)) {
-        (CpuReadView::F32(a), CpuReadView::F32(b)) => {
-            Ok(Tensor::F32(typed_same_shape_binary_view_with_pool(
+    match (read_as_cpu_view(lhs)?, read_as_cpu_view(rhs)?) {
+        (CpuReadView::F32(a), CpuReadView::F32(b)) => Ok(Tensor::from_typed::<f32>(
+            typed_same_shape_binary_view_with_pool(
                 "maximum",
                 buffers,
                 &a,
                 &b,
                 OrderedElem::max_elem,
-            )?))
-        }
-        (CpuReadView::F64(a), CpuReadView::F64(b)) => {
-            Ok(Tensor::F64(typed_same_shape_binary_view_with_pool(
+            )?,
+        )),
+        (CpuReadView::F64(a), CpuReadView::F64(b)) => Ok(Tensor::from_typed::<f64>(
+            typed_same_shape_binary_view_with_pool(
                 "maximum",
                 buffers,
                 &a,
                 &b,
                 OrderedElem::max_elem,
-            )?))
-        }
-        (CpuReadView::I32(a), CpuReadView::I32(b)) => {
-            Ok(Tensor::I32(typed_same_shape_binary_view_with_pool(
+            )?,
+        )),
+        (CpuReadView::I32(a), CpuReadView::I32(b)) => Ok(Tensor::from_typed::<i32>(
+            typed_same_shape_binary_view_with_pool(
                 "maximum",
                 buffers,
                 &a,
                 &b,
                 OrderedElem::max_elem,
-            )?))
-        }
-        (CpuReadView::I64(a), CpuReadView::I64(b)) => {
-            Ok(Tensor::I64(typed_same_shape_binary_view_with_pool(
+            )?,
+        )),
+        (CpuReadView::I64(a), CpuReadView::I64(b)) => Ok(Tensor::from_typed::<i64>(
+            typed_same_shape_binary_view_with_pool(
                 "maximum",
                 buffers,
                 &a,
                 &b,
                 OrderedElem::max_elem,
-            )?))
-        }
+            )?,
+        )),
         _ => Err(dtype_pair_error("maximum", lhs_dtype, rhs_dtype)),
     }
 }
@@ -2645,18 +2811,18 @@ pub fn minimum_with_pool(
 ) -> crate::Result<Tensor> {
     reject_complex_ordered_dtypes("minimum", &[lhs.dtype(), rhs.dtype()])?;
 
-    match (lhs, rhs) {
-        (Tensor::F32(a), Tensor::F32(b)) => {
-            Ok(Tensor::F32(typed_minimum_with_pool(buffers, a, b)?))
+    match (lhs.dtype(), rhs.dtype()) {
+        (DType::F32, DType::F32) => {
+            same_dtype_binary!(buffers, lhs, rhs, f32, typed_minimum_with_pool, "minimum")
         }
-        (Tensor::F64(a), Tensor::F64(b)) => {
-            Ok(Tensor::F64(typed_minimum_with_pool(buffers, a, b)?))
+        (DType::F64, DType::F64) => {
+            same_dtype_binary!(buffers, lhs, rhs, f64, typed_minimum_with_pool, "minimum")
         }
-        (Tensor::I32(a), Tensor::I32(b)) => {
-            Ok(Tensor::I32(typed_minimum_with_pool(buffers, a, b)?))
+        (DType::I32, DType::I32) => {
+            same_dtype_binary!(buffers, lhs, rhs, i32, typed_minimum_with_pool, "minimum")
         }
-        (Tensor::I64(a), Tensor::I64(b)) => {
-            Ok(Tensor::I64(typed_minimum_with_pool(buffers, a, b)?))
+        (DType::I64, DType::I64) => {
+            same_dtype_binary!(buffers, lhs, rhs, i64, typed_minimum_with_pool, "minimum")
         }
         _ => Err(tensor_pair_error("minimum", lhs, rhs)),
     }
@@ -2672,43 +2838,43 @@ pub fn minimum_read_with_pool(
     let rhs_dtype = rhs.dtype();
     reject_complex_ordered_dtypes("minimum", &[lhs_dtype, rhs_dtype])?;
 
-    match (read_as_cpu_view(lhs), read_as_cpu_view(rhs)) {
-        (CpuReadView::F32(a), CpuReadView::F32(b)) => {
-            Ok(Tensor::F32(typed_same_shape_binary_view_with_pool(
+    match (read_as_cpu_view(lhs)?, read_as_cpu_view(rhs)?) {
+        (CpuReadView::F32(a), CpuReadView::F32(b)) => Ok(Tensor::from_typed::<f32>(
+            typed_same_shape_binary_view_with_pool(
                 "minimum",
                 buffers,
                 &a,
                 &b,
                 OrderedElem::min_elem,
-            )?))
-        }
-        (CpuReadView::F64(a), CpuReadView::F64(b)) => {
-            Ok(Tensor::F64(typed_same_shape_binary_view_with_pool(
+            )?,
+        )),
+        (CpuReadView::F64(a), CpuReadView::F64(b)) => Ok(Tensor::from_typed::<f64>(
+            typed_same_shape_binary_view_with_pool(
                 "minimum",
                 buffers,
                 &a,
                 &b,
                 OrderedElem::min_elem,
-            )?))
-        }
-        (CpuReadView::I32(a), CpuReadView::I32(b)) => {
-            Ok(Tensor::I32(typed_same_shape_binary_view_with_pool(
+            )?,
+        )),
+        (CpuReadView::I32(a), CpuReadView::I32(b)) => Ok(Tensor::from_typed::<i32>(
+            typed_same_shape_binary_view_with_pool(
                 "minimum",
                 buffers,
                 &a,
                 &b,
                 OrderedElem::min_elem,
-            )?))
-        }
-        (CpuReadView::I64(a), CpuReadView::I64(b)) => {
-            Ok(Tensor::I64(typed_same_shape_binary_view_with_pool(
+            )?,
+        )),
+        (CpuReadView::I64(a), CpuReadView::I64(b)) => Ok(Tensor::from_typed::<i64>(
+            typed_same_shape_binary_view_with_pool(
                 "minimum",
                 buffers,
                 &a,
                 &b,
                 OrderedElem::min_elem,
-            )?))
-        }
+            )?,
+        )),
         _ => Err(dtype_pair_error("minimum", lhs_dtype, rhs_dtype)),
     }
 }
@@ -2742,40 +2908,59 @@ pub fn compare_with_pool(
 ) -> crate::Result<Tensor> {
     reject_complex_unsupported_compare_dtypes(dir, &[lhs.dtype(), rhs.dtype()])?;
 
-    match (lhs, rhs) {
-        (Tensor::F32(a), Tensor::F32(b)) => Ok(Tensor::Bool(typed_ordered_compare_view_with_pool(
-            buffers,
-            &a.as_view(),
-            &b.as_view(),
-            dir,
-        )?)),
-        (Tensor::F64(a), Tensor::F64(b)) => Ok(Tensor::Bool(typed_ordered_compare_view_with_pool(
-            buffers,
-            &a.as_view(),
-            &b.as_view(),
-            dir,
-        )?)),
-        (Tensor::I32(a), Tensor::I32(b)) => Ok(Tensor::Bool(typed_ordered_compare_view_with_pool(
-            buffers,
-            &a.as_view(),
-            &b.as_view(),
-            dir,
-        )?)),
-        (Tensor::I64(a), Tensor::I64(b)) => Ok(Tensor::Bool(typed_ordered_compare_view_with_pool(
-            buffers,
-            &a.as_view(),
-            &b.as_view(),
-            dir,
-        )?)),
-        (Tensor::Bool(a), Tensor::Bool(b)) => Ok(Tensor::Bool(
-            typed_ordered_compare_view_with_pool(buffers, &a.as_view(), &b.as_view(), dir)?,
+    match (lhs.dtype(), rhs.dtype()) {
+        (DType::F32, DType::F32) => Ok(Tensor::from_typed::<bool>(
+            typed_ordered_compare_view_with_pool(
+                buffers,
+                &pair_operand::<f32>("compare", lhs, rhs, lhs)?.as_view(),
+                &pair_operand::<f32>("compare", lhs, rhs, rhs)?.as_view(),
+                dir,
+            )?,
         )),
-        (Tensor::C32(a), Tensor::C32(b)) => {
-            Ok(Tensor::Bool(typed_compare_with_pool(buffers, a, b, dir)?))
-        }
-        (Tensor::C64(a), Tensor::C64(b)) => {
-            Ok(Tensor::Bool(typed_compare_with_pool(buffers, a, b, dir)?))
-        }
+        (DType::F64, DType::F64) => Ok(Tensor::from_typed::<bool>(
+            typed_ordered_compare_view_with_pool(
+                buffers,
+                &pair_operand::<f64>("compare", lhs, rhs, lhs)?.as_view(),
+                &pair_operand::<f64>("compare", lhs, rhs, rhs)?.as_view(),
+                dir,
+            )?,
+        )),
+        (DType::I32, DType::I32) => Ok(Tensor::from_typed::<bool>(
+            typed_ordered_compare_view_with_pool(
+                buffers,
+                &pair_operand::<i32>("compare", lhs, rhs, lhs)?.as_view(),
+                &pair_operand::<i32>("compare", lhs, rhs, rhs)?.as_view(),
+                dir,
+            )?,
+        )),
+        (DType::I64, DType::I64) => Ok(Tensor::from_typed::<bool>(
+            typed_ordered_compare_view_with_pool(
+                buffers,
+                &pair_operand::<i64>("compare", lhs, rhs, lhs)?.as_view(),
+                &pair_operand::<i64>("compare", lhs, rhs, rhs)?.as_view(),
+                dir,
+            )?,
+        )),
+        (DType::Bool, DType::Bool) => Ok(Tensor::from_typed::<bool>(
+            typed_ordered_compare_view_with_pool(
+                buffers,
+                &pair_operand::<bool>("compare", lhs, rhs, lhs)?.as_view(),
+                &pair_operand::<bool>("compare", lhs, rhs, rhs)?.as_view(),
+                dir,
+            )?,
+        )),
+        (DType::C32, DType::C32) => Ok(Tensor::from_typed::<bool>(typed_compare_with_pool(
+            buffers,
+            pair_operand::<Complex<f32>>("compare", lhs, rhs, lhs)?,
+            pair_operand::<Complex<f32>>("compare", lhs, rhs, rhs)?,
+            dir,
+        )?)),
+        (DType::C64, DType::C64) => Ok(Tensor::from_typed::<bool>(typed_compare_with_pool(
+            buffers,
+            pair_operand::<Complex<f64>>("compare", lhs, rhs, lhs)?,
+            pair_operand::<Complex<f64>>("compare", lhs, rhs, rhs)?,
+            dir,
+        )?)),
         _ => Err(crate::Error::dtype_mismatch(
             "compare",
             lhs.dtype(),
@@ -2795,28 +2980,28 @@ pub fn compare_read_with_pool(
     let rhs_dtype = rhs.dtype();
     reject_complex_unsupported_compare_dtypes(dir, &[lhs_dtype, rhs_dtype])?;
 
-    match (read_as_cpu_view(lhs), read_as_cpu_view(rhs)) {
-        (CpuReadView::F32(a), CpuReadView::F32(b)) => Ok(Tensor::Bool(
+    match (read_as_cpu_view(lhs)?, read_as_cpu_view(rhs)?) {
+        (CpuReadView::F32(a), CpuReadView::F32(b)) => Ok(Tensor::from_typed::<bool>(
             typed_ordered_compare_view_with_pool(buffers, &a, &b, dir)?,
         )),
-        (CpuReadView::F64(a), CpuReadView::F64(b)) => Ok(Tensor::Bool(
+        (CpuReadView::F64(a), CpuReadView::F64(b)) => Ok(Tensor::from_typed::<bool>(
             typed_ordered_compare_view_with_pool(buffers, &a, &b, dir)?,
         )),
-        (CpuReadView::I32(a), CpuReadView::I32(b)) => Ok(Tensor::Bool(
+        (CpuReadView::I32(a), CpuReadView::I32(b)) => Ok(Tensor::from_typed::<bool>(
             typed_ordered_compare_view_with_pool(buffers, &a, &b, dir)?,
         )),
-        (CpuReadView::I64(a), CpuReadView::I64(b)) => Ok(Tensor::Bool(
+        (CpuReadView::I64(a), CpuReadView::I64(b)) => Ok(Tensor::from_typed::<bool>(
             typed_ordered_compare_view_with_pool(buffers, &a, &b, dir)?,
         )),
-        (CpuReadView::Bool(a), CpuReadView::Bool(b)) => Ok(Tensor::Bool(
+        (CpuReadView::Bool(a), CpuReadView::Bool(b)) => Ok(Tensor::from_typed::<bool>(
             typed_ordered_compare_view_with_pool(buffers, &a, &b, dir)?,
         )),
-        (CpuReadView::C32(a), CpuReadView::C32(b)) => Ok(Tensor::Bool(
+        (CpuReadView::C32(a), CpuReadView::C32(b)) => Ok(Tensor::from_typed::<bool>(
             typed_same_shape_binary_view_with_pool("compare", buffers, &a, &b, |x, y| {
                 x.compare_elem(y, dir)
             })?,
         )),
-        (CpuReadView::C64(a), CpuReadView::C64(b)) => Ok(Tensor::Bool(
+        (CpuReadView::C64(a), CpuReadView::C64(b)) => Ok(Tensor::from_typed::<bool>(
             typed_same_shape_binary_view_with_pool("compare", buffers, &a, &b, |x, y| {
                 x.compare_elem(y, dir)
             })?,
@@ -2855,29 +3040,50 @@ pub fn select_with_pool(
     on_true: &Tensor,
     on_false: &Tensor,
 ) -> crate::Result<Tensor> {
-    match (pred, on_true, on_false) {
-        (Tensor::Bool(p), Tensor::F32(t), Tensor::F32(f)) => {
-            Ok(Tensor::F32(typed_select_with_pool(buffers, p, t, f)?))
+    match (pred.dtype(), on_true.dtype(), on_false.dtype()) {
+        (DType::Bool, DType::F32, DType::F32) => {
+            let (p, t, f) = select_operands::<f32>("select", pred, on_true, on_false)?;
+            Ok(Tensor::from_typed::<f32>(typed_select_with_pool(
+                buffers, p, t, f,
+            )?))
         }
-        (Tensor::Bool(p), Tensor::F64(t), Tensor::F64(f)) => {
-            Ok(Tensor::F64(typed_select_with_pool(buffers, p, t, f)?))
+        (DType::Bool, DType::F64, DType::F64) => {
+            let (p, t, f) = select_operands::<f64>("select", pred, on_true, on_false)?;
+            Ok(Tensor::from_typed::<f64>(typed_select_with_pool(
+                buffers, p, t, f,
+            )?))
         }
-        (Tensor::Bool(p), Tensor::I32(t), Tensor::I32(f)) => {
-            Ok(Tensor::I32(typed_select_with_pool(buffers, p, t, f)?))
+        (DType::Bool, DType::I32, DType::I32) => {
+            let (p, t, f) = select_operands::<i32>("select", pred, on_true, on_false)?;
+            Ok(Tensor::from_typed::<i32>(typed_select_with_pool(
+                buffers, p, t, f,
+            )?))
         }
-        (Tensor::Bool(p), Tensor::I64(t), Tensor::I64(f)) => {
-            Ok(Tensor::I64(typed_select_with_pool(buffers, p, t, f)?))
+        (DType::Bool, DType::I64, DType::I64) => {
+            let (p, t, f) = select_operands::<i64>("select", pred, on_true, on_false)?;
+            Ok(Tensor::from_typed::<i64>(typed_select_with_pool(
+                buffers, p, t, f,
+            )?))
         }
-        (Tensor::Bool(p), Tensor::Bool(t), Tensor::Bool(f)) => {
-            Ok(Tensor::Bool(typed_select_with_pool(buffers, p, t, f)?))
+        (DType::Bool, DType::Bool, DType::Bool) => {
+            let (p, t, f) = select_operands::<bool>("select", pred, on_true, on_false)?;
+            Ok(Tensor::from_typed::<bool>(typed_select_with_pool(
+                buffers, p, t, f,
+            )?))
         }
-        (Tensor::Bool(p), Tensor::C32(t), Tensor::C32(f)) => {
-            Ok(Tensor::C32(typed_select_with_pool(buffers, p, t, f)?))
+        (DType::Bool, DType::C32, DType::C32) => {
+            let (p, t, f) = select_operands::<Complex<f32>>("select", pred, on_true, on_false)?;
+            Ok(Tensor::from_typed::<Complex<f32>>(typed_select_with_pool(
+                buffers, p, t, f,
+            )?))
         }
-        (Tensor::Bool(p), Tensor::C64(t), Tensor::C64(f)) => {
-            Ok(Tensor::C64(typed_select_with_pool(buffers, p, t, f)?))
+        (DType::Bool, DType::C64, DType::C64) => {
+            let (p, t, f) = select_operands::<Complex<f64>>("select", pred, on_true, on_false)?;
+            Ok(Tensor::from_typed::<Complex<f64>>(typed_select_with_pool(
+                buffers, p, t, f,
+            )?))
         }
-        (Tensor::Bool(_), _, _) => Err(crate::Error::dtype_mismatch(
+        (DType::Bool, _, _) => Err(crate::Error::dtype_mismatch(
             "select",
             on_true.dtype(),
             on_false.dtype(),
@@ -2887,6 +3093,47 @@ pub fn select_with_pool(
             pred.dtype(),
             crate::DType::Bool,
         )),
+    }
+}
+
+/// The predicate and value pair behind a select, or the refusal this table reports.
+///
+/// Callers reach this from a match on the three dtypes, so `None` means the tags and the runtime
+/// dtypes disagree rather than a caller mistake.
+fn select_operands<'a, T: TensorScalar>(
+    op: &'static str,
+    pred: &'a Tensor,
+    on_true: &'a Tensor,
+    on_false: &'a Tensor,
+) -> crate::Result<(
+    &'a TypedTensor<bool>,
+    &'a TypedTensor<T>,
+    &'a TypedTensor<T>,
+)> {
+    let p = pred
+        .as_typed::<bool>()
+        .ok_or_else(|| select_error(op, pred, on_true, on_false))?;
+    let t = on_true
+        .as_typed::<T>()
+        .ok_or_else(|| select_error(op, pred, on_true, on_false))?;
+    let f = on_false
+        .as_typed::<T>()
+        .ok_or_else(|| select_error(op, pred, on_true, on_false))?;
+    Ok((p, t, f))
+}
+
+/// The refusal the select table reports, which is the pair's or the predicate's depending on which
+/// arm would have answered.
+fn select_error(
+    op: &'static str,
+    pred: &Tensor,
+    on_true: &Tensor,
+    on_false: &Tensor,
+) -> crate::Error {
+    if pred.dtype() != DType::Bool {
+        crate::Error::dtype_mismatch(op, pred.dtype(), DType::Bool)
+    } else {
+        crate::Error::dtype_mismatch(op, on_true.dtype(), on_false.dtype())
     }
 }
 
@@ -2901,31 +3148,31 @@ pub fn select_read_with_pool(
     let true_dtype = on_true.dtype();
     let false_dtype = on_false.dtype();
     match (
-        read_as_cpu_view(pred),
-        read_as_cpu_view(on_true),
-        read_as_cpu_view(on_false),
+        read_as_cpu_view(pred)?,
+        read_as_cpu_view(on_true)?,
+        read_as_cpu_view(on_false)?,
     ) {
-        (CpuReadView::Bool(p), CpuReadView::F32(t), CpuReadView::F32(f)) => Ok(Tensor::F32(
-            typed_select_view_with_pool(buffers, &p, &t, &f)?,
-        )),
-        (CpuReadView::Bool(p), CpuReadView::F64(t), CpuReadView::F64(f)) => Ok(Tensor::F64(
-            typed_select_view_with_pool(buffers, &p, &t, &f)?,
-        )),
-        (CpuReadView::Bool(p), CpuReadView::I32(t), CpuReadView::I32(f)) => Ok(Tensor::I32(
-            typed_select_view_with_pool(buffers, &p, &t, &f)?,
-        )),
-        (CpuReadView::Bool(p), CpuReadView::I64(t), CpuReadView::I64(f)) => Ok(Tensor::I64(
-            typed_select_view_with_pool(buffers, &p, &t, &f)?,
-        )),
-        (CpuReadView::Bool(p), CpuReadView::Bool(t), CpuReadView::Bool(f)) => Ok(Tensor::Bool(
-            typed_select_view_with_pool(buffers, &p, &t, &f)?,
-        )),
-        (CpuReadView::Bool(p), CpuReadView::C32(t), CpuReadView::C32(f)) => Ok(Tensor::C32(
-            typed_select_view_with_pool(buffers, &p, &t, &f)?,
-        )),
-        (CpuReadView::Bool(p), CpuReadView::C64(t), CpuReadView::C64(f)) => Ok(Tensor::C64(
-            typed_select_view_with_pool(buffers, &p, &t, &f)?,
-        )),
+        (CpuReadView::Bool(p), CpuReadView::F32(t), CpuReadView::F32(f)) => Ok(
+            Tensor::from_typed::<f32>(typed_select_view_with_pool(buffers, &p, &t, &f)?),
+        ),
+        (CpuReadView::Bool(p), CpuReadView::F64(t), CpuReadView::F64(f)) => Ok(
+            Tensor::from_typed::<f64>(typed_select_view_with_pool(buffers, &p, &t, &f)?),
+        ),
+        (CpuReadView::Bool(p), CpuReadView::I32(t), CpuReadView::I32(f)) => Ok(
+            Tensor::from_typed::<i32>(typed_select_view_with_pool(buffers, &p, &t, &f)?),
+        ),
+        (CpuReadView::Bool(p), CpuReadView::I64(t), CpuReadView::I64(f)) => Ok(
+            Tensor::from_typed::<i64>(typed_select_view_with_pool(buffers, &p, &t, &f)?),
+        ),
+        (CpuReadView::Bool(p), CpuReadView::Bool(t), CpuReadView::Bool(f)) => Ok(
+            Tensor::from_typed::<bool>(typed_select_view_with_pool(buffers, &p, &t, &f)?),
+        ),
+        (CpuReadView::Bool(p), CpuReadView::C32(t), CpuReadView::C32(f)) => Ok(
+            Tensor::from_typed::<Complex<f32>>(typed_select_view_with_pool(buffers, &p, &t, &f)?),
+        ),
+        (CpuReadView::Bool(p), CpuReadView::C64(t), CpuReadView::C64(f)) => Ok(
+            Tensor::from_typed::<Complex<f64>>(typed_select_view_with_pool(buffers, &p, &t, &f)?),
+        ),
         (CpuReadView::Bool(_), _, _) => Err(crate::Error::dtype_mismatch(
             "select",
             true_dtype,
@@ -2987,15 +3234,15 @@ pub fn clamp_read_with_pool(
     reject_complex_ordered_dtypes("clamp", &[input_dtype, lower_dtype, upper_dtype])?;
 
     match (
-        read_as_cpu_view(input),
-        read_as_cpu_view(lower),
-        read_as_cpu_view(upper),
+        read_as_cpu_view(input)?,
+        read_as_cpu_view(lower)?,
+        read_as_cpu_view(upper)?,
     ) {
         (CpuReadView::F32(input), CpuReadView::F32(lower), CpuReadView::F32(upper)) => Ok(
-            Tensor::F32(typed_clamp_view_with_pool(buffers, &input, &lower, &upper)?),
+            Tensor::from_typed::<f32>(typed_clamp_view_with_pool(buffers, &input, &lower, &upper)?),
         ),
         (CpuReadView::F64(input), CpuReadView::F64(lower), CpuReadView::F64(upper)) => Ok(
-            Tensor::F64(typed_clamp_view_with_pool(buffers, &input, &lower, &upper)?),
+            Tensor::from_typed::<f64>(typed_clamp_view_with_pool(buffers, &input, &lower, &upper)?),
         ),
         _ => Err(crate::Error::dtype_mismatch(
             "clamp",

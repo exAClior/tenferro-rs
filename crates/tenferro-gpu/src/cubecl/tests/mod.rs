@@ -57,31 +57,35 @@ fn download(backend: &CudaBackend, tensor: &Tensor) -> Tensor {
 }
 
 fn tensor_f32(shape: Vec<usize>, data: Vec<f32>) -> Tensor {
-    Tensor::F32(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<f32>(TypedTensor::from_vec_col_major(shape, data).unwrap())
 }
 
 fn tensor_f64(shape: Vec<usize>, data: Vec<f64>) -> Tensor {
-    Tensor::F64(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(shape, data).unwrap())
 }
 
 fn tensor_i64(shape: Vec<usize>, data: Vec<i64>) -> Tensor {
-    Tensor::I64(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<i64>(TypedTensor::from_vec_col_major(shape, data).unwrap())
 }
 
 fn tensor_i32(shape: Vec<usize>, data: Vec<i32>) -> Tensor {
-    Tensor::I32(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<i32>(TypedTensor::from_vec_col_major(shape, data).unwrap())
 }
 
 fn tensor_bool(shape: Vec<usize>, data: Vec<bool>) -> Tensor {
-    Tensor::Bool(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<bool>(TypedTensor::from_vec_col_major(shape, data).unwrap())
 }
 
 fn tensor_c32(shape: Vec<usize>, data: Vec<Complex32>) -> Tensor {
-    Tensor::C32(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<tenferro_tensor::Complex32>(
+        TypedTensor::from_vec_col_major(shape, data).unwrap(),
+    )
 }
 
 fn tensor_c64(shape: Vec<usize>, data: Vec<Complex64>) -> Tensor {
-    Tensor::C64(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<tenferro_tensor::Complex64>(
+        TypedTensor::from_vec_col_major(shape, data).unwrap(),
+    )
 }
 
 fn assert_validation_kind(error: &Error, op: &'static str, kind: ValidationKind) {
@@ -97,8 +101,6 @@ fn assert_validation_kind(error: &Error, op: &'static str, kind: ValidationKind)
 
 fn assert_dtype_mismatch(error: &Error, op: &'static str, expected: DType, actual: DType) {
     assert_validation_kind(error, op, ValidationKind::DTypeMismatch);
-    let expected = core_dtype(expected);
-    let actual = core_dtype(actual);
     assert!(matches!(
         error,
         Error::Validation {
@@ -109,18 +111,6 @@ fn assert_dtype_mismatch(error: &Error, op: &'static str, expected: DType, actua
             ..
         } if *source_expected == expected && *source_actual == actual
     ));
-}
-
-fn core_dtype(dtype: DType) -> tenferro_tensor::core::DType {
-    match dtype {
-        DType::F32 => tenferro_tensor::core::DType::F32,
-        DType::F64 => tenferro_tensor::core::DType::F64,
-        DType::I32 => tenferro_tensor::core::DType::I32,
-        DType::I64 => tenferro_tensor::core::DType::I64,
-        DType::Bool => tenferro_tensor::core::DType::Bool,
-        DType::C32 => tenferro_tensor::core::DType::C32,
-        DType::C64 => tenferro_tensor::core::DType::C64,
-    }
 }
 
 fn assert_shape_mismatch(error: &Error, op: &'static str, lhs: &[usize], rhs: &[usize]) {
@@ -279,8 +269,9 @@ fn scatter_launch_meta_rejects_mismatched_update_batch_extents() {
 
 fn assert_tensor_close(actual: &Tensor, expected: &Tensor, tol: f64) {
     assert_eq!(actual.shape(), expected.shape());
-    match (actual, expected) {
-        (Tensor::F32(_), Tensor::F32(_)) => {
+    assert_eq!(actual.dtype(), expected.dtype(), "dtypes must match");
+    match actual.dtype() {
+        DType::F32 => {
             let actual = actual.as_slice::<f32>().unwrap();
             let expected = expected.as_slice::<f32>().unwrap();
             for (lhs, rhs) in actual.iter().zip(expected.iter()) {
@@ -291,7 +282,7 @@ fn assert_tensor_close(actual: &Tensor, expected: &Tensor, tol: f64) {
                 );
             }
         }
-        (Tensor::F64(_), Tensor::F64(_)) => {
+        DType::F64 => {
             let actual = actual.as_slice::<f64>().unwrap();
             let expected = expected.as_slice::<f64>().unwrap();
             for (idx, (lhs, rhs)) in actual.iter().zip(expected.iter()).enumerate() {
@@ -302,22 +293,22 @@ fn assert_tensor_close(actual: &Tensor, expected: &Tensor, tol: f64) {
                 );
             }
         }
-        (Tensor::I64(_), Tensor::I64(_)) => {
+        DType::I64 => {
             let actual = actual.as_slice::<i64>().unwrap();
             let expected = expected.as_slice::<i64>().unwrap();
             assert_eq!(actual, expected);
         }
-        (Tensor::I32(_), Tensor::I32(_)) => {
+        DType::I32 => {
             let actual = actual.as_slice::<i32>().unwrap();
             let expected = expected.as_slice::<i32>().unwrap();
             assert_eq!(actual, expected);
         }
-        (Tensor::Bool(_), Tensor::Bool(_)) => {
+        DType::Bool => {
             let actual = actual.as_slice::<bool>().unwrap();
             let expected = expected.as_slice::<bool>().unwrap();
             assert_eq!(actual, expected);
         }
-        (Tensor::C32(_), Tensor::C32(_)) => {
+        DType::C32 => {
             let actual = actual.as_slice::<Complex32>().unwrap();
             let expected = expected.as_slice::<Complex32>().unwrap();
             for (lhs, rhs) in actual.iter().zip(expected.iter()) {
@@ -329,7 +320,7 @@ fn assert_tensor_close(actual: &Tensor, expected: &Tensor, tol: f64) {
                 );
             }
         }
-        (Tensor::C64(_), Tensor::C64(_)) => {
+        DType::C64 => {
             let actual = actual.as_slice::<Complex64>().unwrap();
             let expected = expected.as_slice::<Complex64>().unwrap();
             for (lhs, rhs) in actual.iter().zip(expected.iter()) {

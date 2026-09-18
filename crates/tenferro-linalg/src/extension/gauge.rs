@@ -61,36 +61,47 @@ fn apply_canonical_pivot_eigh_gauge(outputs: &mut [Tensor]) -> tenferro_tensor::
     }
     let batch_count = checked_batch_count("tenferro-linalg.eigh", &vectors_shape[2..])?;
 
-    match vectors {
-        Tensor::F64(vectors) => canonicalize_eigh_gauge_f64(
-            vectors.host_data_mut()?,
+    match vectors.dtype() {
+        tenferro_tensor::DType::F64 => canonicalize_eigh_gauge_f64(
+            gauge_operand_mut::<f64>(vectors, "tenferro-linalg.eigh")?.host_data_mut()?,
             n,
             batch_count,
             "tenferro-linalg.eigh",
         ),
-        Tensor::F32(vectors) => canonicalize_eigh_gauge_f32(
-            vectors.host_data_mut()?,
+        tenferro_tensor::DType::F32 => canonicalize_eigh_gauge_f32(
+            gauge_operand_mut::<f32>(vectors, "tenferro-linalg.eigh")?.host_data_mut()?,
             n,
             batch_count,
             "tenferro-linalg.eigh",
         ),
-        Tensor::C64(vectors) => canonicalize_eigh_gauge_c64(
-            vectors.host_data_mut()?,
+        tenferro_tensor::DType::C64 => canonicalize_eigh_gauge_c64(
+            gauge_operand_mut::<Complex64>(vectors, "tenferro-linalg.eigh")?.host_data_mut()?,
             n,
             batch_count,
             "tenferro-linalg.eigh",
         ),
-        Tensor::C32(vectors) => canonicalize_eigh_gauge_c32(
-            vectors.host_data_mut()?,
+        tenferro_tensor::DType::C32 => canonicalize_eigh_gauge_c32(
+            gauge_operand_mut::<Complex32>(vectors, "tenferro-linalg.eigh")?.host_data_mut()?,
             n,
             batch_count,
             "tenferro-linalg.eigh",
         ),
-        vectors => Err(Error::unsupported(
+        _ => Err(Error::unsupported(
             "tenferro-linalg.eigh",
             format!("unsupported eigenvector dtype {:?}", vectors.dtype()),
         )),
     }
+}
+
+/// The typed tensor behind `tensor`, borrowed mutably, or this module's refusal for one.
+fn gauge_operand_mut<'a, T: tenferro_tensor::TensorScalar>(
+    tensor: &'a mut Tensor,
+    op: &'static str,
+) -> tenferro_tensor::Result<&'a mut tenferro_tensor::TypedTensor<T>> {
+    let actual = tensor.dtype();
+    tensor
+        .as_typed_mut::<T>()
+        .ok_or_else(|| Error::unsupported(op, format!("unsupported eigenvector dtype {actual:?}")))
 }
 
 fn apply_positive_diagonal_qr_gauge(outputs: &mut [Tensor]) -> tenferro_tensor::Result<()> {
@@ -134,49 +145,79 @@ fn apply_positive_diagonal_qr_gauge(outputs: &mut [Tensor]) -> tenferro_tensor::
     }
     let batch_count = checked_batch_count("tenferro-linalg.qr", &q_shape[2..])?;
 
-    match (q, r) {
-        (Tensor::F64(q), Tensor::F64(r)) => canonicalize_qr_gauge_f64(
-            q.host_data_mut()?,
-            r.host_data_mut()?,
-            m,
-            k,
-            n,
-            batch_count,
+    match (q.dtype(), r.dtype()) {
+        (tenferro_tensor::DType::F64, tenferro_tensor::DType::F64) => {
+            let (q, r) = gauge_pair_operands_mut::<f64>(q, r)?;
+            canonicalize_qr_gauge_f64(
+                q.host_data_mut()?,
+                r.host_data_mut()?,
+                m,
+                k,
+                n,
+                batch_count,
+                "tenferro-linalg.qr",
+            )
+        }
+        (tenferro_tensor::DType::F32, tenferro_tensor::DType::F32) => {
+            let (q, r) = gauge_pair_operands_mut::<f32>(q, r)?;
+            canonicalize_qr_gauge_f32(
+                q.host_data_mut()?,
+                r.host_data_mut()?,
+                m,
+                k,
+                n,
+                batch_count,
+                "tenferro-linalg.qr",
+            )
+        }
+        (tenferro_tensor::DType::C64, tenferro_tensor::DType::C64) => {
+            let (q, r) = gauge_pair_operands_mut::<Complex64>(q, r)?;
+            canonicalize_qr_gauge_c64(
+                q.host_data_mut()?,
+                r.host_data_mut()?,
+                m,
+                k,
+                n,
+                batch_count,
+                "tenferro-linalg.qr",
+            )
+        }
+        (tenferro_tensor::DType::C32, tenferro_tensor::DType::C32) => {
+            let (q, r) = gauge_pair_operands_mut::<Complex32>(q, r)?;
+            canonicalize_qr_gauge_c32(
+                q.host_data_mut()?,
+                r.host_data_mut()?,
+                m,
+                k,
+                n,
+                batch_count,
+                "tenferro-linalg.qr",
+            )
+        }
+        (q_dtype, r_dtype) => Err(Error::dtype_mismatch(
             "tenferro-linalg.qr",
-        ),
-        (Tensor::F32(q), Tensor::F32(r)) => canonicalize_qr_gauge_f32(
-            q.host_data_mut()?,
-            r.host_data_mut()?,
-            m,
-            k,
-            n,
-            batch_count,
-            "tenferro-linalg.qr",
-        ),
-        (Tensor::C64(q), Tensor::C64(r)) => canonicalize_qr_gauge_c64(
-            q.host_data_mut()?,
-            r.host_data_mut()?,
-            m,
-            k,
-            n,
-            batch_count,
-            "tenferro-linalg.qr",
-        ),
-        (Tensor::C32(q), Tensor::C32(r)) => canonicalize_qr_gauge_c32(
-            q.host_data_mut()?,
-            r.host_data_mut()?,
-            m,
-            k,
-            n,
-            batch_count,
-            "tenferro-linalg.qr",
-        ),
-        (q, r) => Err(Error::dtype_mismatch(
-            "tenferro-linalg.qr",
-            q.dtype(),
-            r.dtype(),
+            q_dtype,
+            r_dtype,
         )),
     }
+}
+
+/// The typed pair behind a same-dtype pair of mutable tensors, or this module's refusal.
+fn gauge_pair_operands_mut<'a, T: tenferro_tensor::TensorScalar>(
+    q: &'a mut Tensor,
+    r: &'a mut Tensor,
+) -> tenferro_tensor::Result<(
+    &'a mut tenferro_tensor::TypedTensor<T>,
+    &'a mut tenferro_tensor::TypedTensor<T>,
+)> {
+    let (q_dtype, r_dtype) = (q.dtype(), r.dtype());
+    let q_t = q
+        .as_typed_mut::<T>()
+        .ok_or_else(|| Error::dtype_mismatch("tenferro-linalg.qr", q_dtype, r_dtype))?;
+    let r_t = r
+        .as_typed_mut::<T>()
+        .ok_or_else(|| Error::dtype_mismatch("tenferro-linalg.qr", q_dtype, r_dtype))?;
+    Ok((q_t, r_t))
 }
 
 fn canonicalize_eigh_gauge_f64(

@@ -83,10 +83,7 @@ macro_rules! cutensor_variant_accessors {
         }
 
         fn unwrap_tensor_mut(tensor: &mut Tensor) -> Option<&mut TypedTensor<Self>> {
-            match tensor {
-                Tensor::$variant(tensor) => Some(tensor),
-                _ => None,
-            }
+            tensor.as_typed_mut::<Self>()
         }
     };
 }
@@ -102,10 +99,7 @@ impl CutensorScalar for f32 {
         handle.compute_desc_32f()
     }
     fn unwrap_tensor(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
-        match tensor {
-            Tensor::F32(tensor) => Some(tensor),
-            _ => None,
-        }
+        tensor.as_typed::<Self>()
     }
 
     fn launch_scale_in_place(
@@ -135,10 +129,7 @@ impl CutensorScalar for f64 {
         handle.compute_desc_64f()
     }
     fn unwrap_tensor(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
-        match tensor {
-            Tensor::F64(tensor) => Some(tensor),
-            _ => None,
-        }
+        tensor.as_typed::<Self>()
     }
 
     fn launch_scale_in_place(
@@ -168,10 +159,7 @@ impl CutensorScalar for Complex32 {
         handle.compute_desc_32f()
     }
     fn unwrap_tensor(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
-        match tensor {
-            Tensor::C32(tensor) => Some(tensor),
-            _ => None,
-        }
+        tensor.as_typed::<Self>()
     }
 
     fn launch_scale_in_place(
@@ -202,10 +190,7 @@ impl CutensorScalar for Complex64 {
         handle.compute_desc_64f()
     }
     fn unwrap_tensor(tensor: &Tensor) -> Option<&TypedTensor<Self>> {
-        match tensor {
-            Tensor::C64(tensor) => Some(tensor),
-            _ => None,
-        }
+        tensor.as_typed::<Self>()
     }
 
     fn launch_scale_in_place(
@@ -530,21 +515,39 @@ pub(super) fn dot_general(
     rhs: &Tensor,
     config: &DotGeneralConfig,
 ) -> crate::Result<Tensor> {
-    match (lhs, rhs) {
-        (Tensor::F32(lhs), Tensor::F32(rhs)) => {
-            dot_general_typed(backend, lhs, rhs, config).map(Tensor::F32)
+    match (lhs.dtype(), rhs.dtype()) {
+        (DType::F32, DType::F32) => {
+            let (lhs, rhs) = gemm_pair_operands::<f32>(OP, lhs, rhs)?;
+            dot_general_typed(backend, lhs, rhs, config).map(Tensor::from_typed::<f32>)
         }
-        (Tensor::F64(lhs), Tensor::F64(rhs)) => {
-            dot_general_typed(backend, lhs, rhs, config).map(Tensor::F64)
+        (DType::F64, DType::F64) => {
+            let (lhs, rhs) = gemm_pair_operands::<f64>(OP, lhs, rhs)?;
+            dot_general_typed(backend, lhs, rhs, config).map(Tensor::from_typed::<f64>)
         }
-        (Tensor::C32(lhs), Tensor::C32(rhs)) => {
-            dot_general_typed(backend, lhs, rhs, config).map(Tensor::C32)
+        (DType::C32, DType::C32) => {
+            let (lhs, rhs) = gemm_pair_operands::<Complex32>(OP, lhs, rhs)?;
+            dot_general_typed(backend, lhs, rhs, config).map(Tensor::from_typed::<Complex32>)
         }
-        (Tensor::C64(lhs), Tensor::C64(rhs)) => {
-            dot_general_typed(backend, lhs, rhs, config).map(Tensor::C64)
+        (DType::C64, DType::C64) => {
+            let (lhs, rhs) = gemm_pair_operands::<Complex64>(OP, lhs, rhs)?;
+            dot_general_typed(backend, lhs, rhs, config).map(Tensor::from_typed::<Complex64>)
         }
         _ => Err(dtype_mismatch(OP, lhs, rhs)),
     }
+}
+/// The typed operands behind a same-dtype pair, or the refusal a mismatched pair reports.
+fn gemm_pair_operands<'a, T: TensorScalar>(
+    op: &'static str,
+    lhs: &'a Tensor,
+    rhs: &'a Tensor,
+) -> crate::Result<(&'a TypedTensor<T>, &'a TypedTensor<T>)> {
+    let lhs_t = lhs
+        .as_typed::<T>()
+        .ok_or_else(|| dtype_mismatch(op, lhs, rhs))?;
+    let rhs_t = rhs
+        .as_typed::<T>()
+        .ok_or_else(|| dtype_mismatch(op, lhs, rhs))?;
+    Ok((lhs_t, rhs_t))
 }
 
 pub(super) fn dot_general_with_conj(
@@ -555,22 +558,26 @@ pub(super) fn dot_general_with_conj(
     lhs_conj: bool,
     rhs_conj: bool,
 ) -> crate::Result<Tensor> {
-    match (lhs, rhs) {
-        (Tensor::F32(lhs), Tensor::F32(rhs)) => {
+    match (lhs.dtype(), rhs.dtype()) {
+        (DType::F32, DType::F32) => {
+            let (lhs, rhs) = gemm_pair_operands::<f32>(OP, lhs, rhs)?;
             dot_general_typed_with_conj(backend, lhs, rhs, config, lhs_conj, rhs_conj)
-                .map(Tensor::F32)
+                .map(Tensor::from_typed::<f32>)
         }
-        (Tensor::F64(lhs), Tensor::F64(rhs)) => {
+        (DType::F64, DType::F64) => {
+            let (lhs, rhs) = gemm_pair_operands::<f64>(OP, lhs, rhs)?;
             dot_general_typed_with_conj(backend, lhs, rhs, config, lhs_conj, rhs_conj)
-                .map(Tensor::F64)
+                .map(Tensor::from_typed::<f64>)
         }
-        (Tensor::C32(lhs), Tensor::C32(rhs)) => {
+        (DType::C32, DType::C32) => {
+            let (lhs, rhs) = gemm_pair_operands::<Complex32>(OP, lhs, rhs)?;
             dot_general_typed_with_conj(backend, lhs, rhs, config, lhs_conj, rhs_conj)
-                .map(Tensor::C32)
+                .map(Tensor::from_typed::<Complex32>)
         }
-        (Tensor::C64(lhs), Tensor::C64(rhs)) => {
+        (DType::C64, DType::C64) => {
+            let (lhs, rhs) = gemm_pair_operands::<Complex64>(OP, lhs, rhs)?;
             dot_general_typed_with_conj(backend, lhs, rhs, config, lhs_conj, rhs_conj)
-                .map(Tensor::C64)
+                .map(Tensor::from_typed::<Complex64>)
         }
         _ => Err(dtype_mismatch(OP, lhs, rhs)),
     }
@@ -745,10 +752,14 @@ pub(super) fn dot_general_read_allocating(
     let shape =
         tenferro_tensor::backend::dot_general_output_shape(lhs.shape(), rhs.shape(), config, OP)?;
     let mut out = match dtype {
-        DType::F32 => Tensor::F32(alloc_output::<f32>(backend.runtime(), &shape)?),
-        DType::F64 => Tensor::F64(alloc_output::<f64>(backend.runtime(), &shape)?),
-        DType::C32 => Tensor::C32(alloc_output::<Complex32>(backend.runtime(), &shape)?),
-        DType::C64 => Tensor::C64(alloc_output::<Complex64>(backend.runtime(), &shape)?),
+        DType::F32 => Tensor::from_typed::<f32>(alloc_output::<f32>(backend.runtime(), &shape)?),
+        DType::F64 => Tensor::from_typed::<f64>(alloc_output::<f64>(backend.runtime(), &shape)?),
+        DType::C32 => {
+            Tensor::from_typed::<Complex32>(alloc_output::<Complex32>(backend.runtime(), &shape)?)
+        }
+        DType::C64 => {
+            Tensor::from_typed::<Complex64>(alloc_output::<Complex64>(backend.runtime(), &shape)?)
+        }
         dtype => return Err(unsupported_dtype(OP, dtype)),
     };
     let accumulation = DotGeneralAccumulation {

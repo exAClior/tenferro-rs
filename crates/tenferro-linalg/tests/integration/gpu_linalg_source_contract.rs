@@ -397,7 +397,7 @@ fn cuda_rrqr_has_no_payload_download_or_cpu_fallback() {
             "CUDA RRQR must not use payload host access, CPU fallback, or a single-worker launch: {banned}"
         );
     }
-    assert!(source.contains("Tensor::I64(status)"));
+    assert!(source.contains("Tensor::from_typed::<i64>(status)"));
     assert!(source.contains("rank remain device-resident"));
 }
 
@@ -408,7 +408,7 @@ fn cubecl_linalg_overrides_svd_read_with_backend_canonicalization() {
 
     for needle in [
         "self.to_contiguous(&view)?",
-        "let input = Tensor::F64(compact);",
+        "let input = Tensor::from_typed::<f64>(compact);",
         "self.svd(&input)",
     ] {
         assert!(
@@ -425,7 +425,7 @@ fn cubecl_linalg_overrides_qr_read_with_backend_canonicalization() {
 
     for needle in [
         "self.to_contiguous(&view)?",
-        "let input = Tensor::F64(compact);",
+        "let input = Tensor::from_typed::<f64>(compact);",
         "self.qr(&input)",
     ] {
         assert!(
@@ -442,7 +442,7 @@ fn cubecl_linalg_overrides_eigh_read_with_backend_canonicalization() {
 
     for needle in [
         "self.to_contiguous(&view)?",
-        "let input = Tensor::F64(compact);",
+        "let input = Tensor::from_typed::<f64>(compact);",
         "self.eigh(&input)",
     ] {
         assert!(
@@ -560,7 +560,7 @@ fn gpu_solve_paths_validate_residency_before_dtype_and_zero_fast_paths() {
         assert_before(
             lu_solve_prepared,
             needle,
-            "if !matches!(pivots, Tensor::I32(_))",
+            "if !matches!(pivots.dtype(), DType::I32)",
         );
         assert_before(
             lu_solve_prepared,
@@ -874,8 +874,14 @@ fn gpu_validate_nonsingular_uses_complex_magnitude_and_tolerance() {
         "GPU singularity validation should compute max diagonal magnitude for a scaled tolerance"
     );
     assert!(
-        source.contains("fn singularity_tolerance(dtype: DType, max_magnitude: f64) -> f64"),
+        source
+            .contains("fn singularity_tolerance(dtype: DType, max_magnitude: f64) -> Result<f64>"),
         "GPU singularity validation should use a dtype-aware tolerance helper"
+    );
+    assert!(
+        source.contains("DType::External(_) =>"),
+        "GPU singularity validation should reject a scalar tenferro does not declare instead of \
+         picking a tolerance for it"
     );
     assert!(
         validate.contains("value <= tolerance"),
@@ -935,7 +941,7 @@ fn cubecl_linalg_overrides_cholesky_read_with_backend_canonicalization() {
 
     for needle in [
         "self.to_contiguous(&view)?",
-        "let input = Tensor::F64(compact);",
+        "let input = Tensor::from_typed::<f64>(compact);",
         "self.cholesky(&input)",
     ] {
         assert!(
@@ -952,7 +958,7 @@ fn cubecl_linalg_overrides_lu_read_with_backend_canonicalization() {
 
     for needle in [
         "self.to_contiguous(&view)?",
-        "let input = Tensor::F64(compact);",
+        "let input = Tensor::from_typed::<f64>(compact);",
         "self.lu(&input)",
     ] {
         assert!(
@@ -969,7 +975,7 @@ fn cubecl_linalg_overrides_full_piv_lu_read_with_backend_canonicalization() {
 
     for needle in [
         "self.to_contiguous(&view)?",
-        "let input = Tensor::F64(compact);",
+        "let input = Tensor::from_typed::<f64>(compact);",
         "self.full_piv_lu(&input)",
     ] {
         assert!(
@@ -986,7 +992,7 @@ fn cubecl_linalg_overrides_eig_read_with_backend_canonicalization() {
 
     for needle in [
         "self.to_contiguous(&view)?",
-        "let input = Tensor::F64(compact);",
+        "let input = Tensor::from_typed::<f64>(compact);",
         "self.eig(&input)",
     ] {
         assert!(

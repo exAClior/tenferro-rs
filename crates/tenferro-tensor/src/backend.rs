@@ -197,8 +197,8 @@ pub fn validate_dot_general_read_into(
         return Err(validation(
             op,
             ValidationError::DTypeMismatch {
-                expected: crate::core_dtype(lhs.dtype()),
-                actual: crate::core_dtype(rhs.dtype()),
+                expected: lhs.dtype(),
+                actual: rhs.dtype(),
             },
         ));
     }
@@ -206,8 +206,8 @@ pub fn validate_dot_general_read_into(
         return Err(validation(
             op,
             ValidationError::DTypeMismatch {
-                expected: crate::core_dtype(lhs.dtype()),
-                actual: crate::core_dtype(out.dtype()),
+                expected: lhs.dtype(),
+                actual: out.dtype(),
             },
         ));
     }
@@ -287,11 +287,11 @@ impl ContractionScalar {
             DType::F64 => Ok(Self::F64(1.0)),
             DType::C32 => Ok(Self::C32(Complex32::new(1.0, 0.0))),
             DType::C64 => Ok(Self::C64(Complex64::new(1.0, 0.0))),
-            DType::I32 | DType::I64 | DType::Bool => Err(validation(
+            DType::I32 | DType::I64 | DType::Bool | DType::External(_) => Err(validation(
                 "ContractionScalar::one",
                 ValidationError::DTypeMismatch {
-                    expected: crate::core_dtype(dtype),
-                    actual: crate::core_dtype(DType::F32),
+                    expected: dtype,
+                    actual: DType::F32,
                 },
             )),
         }
@@ -317,11 +317,11 @@ impl ContractionScalar {
             DType::F64 => Ok(Self::F64(0.0)),
             DType::C32 => Ok(Self::C32(Complex32::new(0.0, 0.0))),
             DType::C64 => Ok(Self::C64(Complex64::new(0.0, 0.0))),
-            DType::I32 | DType::I64 | DType::Bool => Err(validation(
+            DType::I32 | DType::I64 | DType::Bool | DType::External(_) => Err(validation(
                 "ContractionScalar::zero",
                 ValidationError::DTypeMismatch {
-                    expected: crate::core_dtype(dtype),
-                    actual: crate::core_dtype(DType::F32),
+                    expected: dtype,
+                    actual: DType::F32,
                 },
             )),
         }
@@ -538,8 +538,8 @@ impl DotGeneralAccumulation {
             return Err(validation(
                 "DotGeneralAccumulation::scaled",
                 ValidationError::DTypeMismatch {
-                    expected: crate::core_dtype(alpha.dtype()),
-                    actual: crate::core_dtype(beta.dtype()),
+                    expected: alpha.dtype(),
+                    actual: beta.dtype(),
                 },
             ));
         }
@@ -557,8 +557,8 @@ impl DotGeneralAccumulation {
                 return Err(validation(
                     "dot_general",
                     ValidationError::DTypeMismatch {
-                        expected: crate::core_dtype(scalar.dtype()),
-                        actual: crate::core_dtype(dtype),
+                        expected: scalar.dtype(),
+                        actual: dtype,
                     },
                 ));
             }
@@ -678,8 +678,8 @@ pub fn validate_grouped_gemm(
         return Err(validation(
             op,
             ValidationError::DTypeMismatch {
-                expected: crate::core_dtype(lhs.dtype()),
-                actual: crate::core_dtype(rhs.dtype()),
+                expected: lhs.dtype(),
+                actual: rhs.dtype(),
             },
         ));
     }
@@ -687,8 +687,8 @@ pub fn validate_grouped_gemm(
         return Err(validation(
             op,
             ValidationError::DTypeMismatch {
-                expected: crate::core_dtype(lhs.dtype()),
-                actual: crate::core_dtype(out.dtype()),
+                expected: lhs.dtype(),
+                actual: out.dtype(),
             },
         ));
     }
@@ -910,13 +910,22 @@ where
 {
     validate_grouped_gemm(&lhs, &rhs, &out, config, "grouped_gemm")?;
     macro_rules! dispatch {
-        ($variant:ident, $wrapper:ty) => {
+        ($variant:ident, $scalar:ty, $wrapper:ty) => {
             match (&lhs, &rhs, &mut out) {
-                (
-                    TensorRead::Tensor(Tensor::$variant(a)),
-                    TensorRead::Tensor(Tensor::$variant(b)),
-                    TensorWrite::Tensor(Tensor::$variant(c)),
-                ) => {
+                (TensorRead::Tensor(a), TensorRead::Tensor(b), TensorWrite::Tensor(c))
+                    if a.dtype() == <$scalar as crate::TensorScalar>::dtype()
+                        && b.dtype() == <$scalar as crate::TensorScalar>::dtype()
+                        && c.dtype() == <$scalar as crate::TensorScalar>::dtype() =>
+                {
+                    let a = a
+                        .as_typed::<$scalar>()
+                        .expect("the dtype guard selects this arm");
+                    let b = b
+                        .as_typed::<$scalar>()
+                        .expect("the dtype guard selects this arm");
+                    let c = c
+                        .as_typed_mut::<$scalar>()
+                        .expect("the dtype guard selects this arm");
                     let (a_data, a_base) = typed_read_storage(a, "grouped_gemm")?;
                     let (b_data, b_base) = typed_read_storage(b, "grouped_gemm")?;
                     let mut c_view = c.as_view_mut();
@@ -931,10 +940,18 @@ where
                     );
                 }
                 (
-                    TensorRead::Tensor(Tensor::$variant(a)),
+                    TensorRead::Tensor(a),
                     TensorRead::View(TensorView::$variant(b)),
-                    TensorWrite::Tensor(Tensor::$variant(c)),
-                ) => {
+                    TensorWrite::Tensor(c),
+                ) if a.dtype() == <$scalar as crate::TensorScalar>::dtype()
+                    && c.dtype() == <$scalar as crate::TensorScalar>::dtype() =>
+                {
+                    let a = a
+                        .as_typed::<$scalar>()
+                        .expect("the dtype guard selects this arm");
+                    let c = c
+                        .as_typed_mut::<$scalar>()
+                        .expect("the dtype guard selects this arm");
                     let (a_data, a_base) = typed_read_storage(a, "grouped_gemm")?;
                     let mut c_view = c.as_view_mut();
                     return grouped_gemm_default_loop::<_, _, $wrapper>(
@@ -949,9 +966,17 @@ where
                 }
                 (
                     TensorRead::View(TensorView::$variant(a)),
-                    TensorRead::Tensor(Tensor::$variant(b)),
-                    TensorWrite::Tensor(Tensor::$variant(c)),
-                ) => {
+                    TensorRead::Tensor(b),
+                    TensorWrite::Tensor(c),
+                ) if b.dtype() == <$scalar as crate::TensorScalar>::dtype()
+                    && c.dtype() == <$scalar as crate::TensorScalar>::dtype() =>
+                {
+                    let b = b
+                        .as_typed::<$scalar>()
+                        .expect("the dtype guard selects this arm");
+                    let c = c
+                        .as_typed_mut::<$scalar>()
+                        .expect("the dtype guard selects this arm");
                     let (b_data, b_base) = typed_read_storage(b, "grouped_gemm")?;
                     let mut c_view = c.as_view_mut();
                     return grouped_gemm_default_loop::<_, _, $wrapper>(
@@ -967,8 +992,11 @@ where
                 (
                     TensorRead::View(TensorView::$variant(a)),
                     TensorRead::View(TensorView::$variant(b)),
-                    TensorWrite::Tensor(Tensor::$variant(c)),
-                ) => {
+                    TensorWrite::Tensor(c),
+                ) if c.dtype() == <$scalar as crate::TensorScalar>::dtype() => {
+                    let c = c
+                        .as_typed_mut::<$scalar>()
+                        .expect("the dtype guard selects this arm");
                     let mut c_view = c.as_view_mut();
                     return grouped_gemm_default_loop::<_, _, $wrapper>(
                         backend,
@@ -981,10 +1009,18 @@ where
                     );
                 }
                 (
-                    TensorRead::Tensor(Tensor::$variant(a)),
-                    TensorRead::Tensor(Tensor::$variant(b)),
+                    TensorRead::Tensor(a),
+                    TensorRead::Tensor(b),
                     TensorWrite::View(TensorViewMut::$variant(c)),
-                ) => {
+                ) if a.dtype() == <$scalar as crate::TensorScalar>::dtype()
+                    && b.dtype() == <$scalar as crate::TensorScalar>::dtype() =>
+                {
+                    let a = a
+                        .as_typed::<$scalar>()
+                        .expect("the dtype guard selects this arm");
+                    let b = b
+                        .as_typed::<$scalar>()
+                        .expect("the dtype guard selects this arm");
                     let (a_data, a_base) = typed_read_storage(a, "grouped_gemm")?;
                     let (b_data, b_base) = typed_read_storage(b, "grouped_gemm")?;
                     return grouped_gemm_default_loop::<_, _, $wrapper>(
@@ -992,10 +1028,13 @@ where
                     );
                 }
                 (
-                    TensorRead::Tensor(Tensor::$variant(a)),
+                    TensorRead::Tensor(a),
                     TensorRead::View(TensorView::$variant(b)),
                     TensorWrite::View(TensorViewMut::$variant(c)),
-                ) => {
+                ) if a.dtype() == <$scalar as crate::TensorScalar>::dtype() => {
+                    let a = a
+                        .as_typed::<$scalar>()
+                        .expect("the dtype guard selects this arm");
                     let (a_data, a_base) = typed_read_storage(a, "grouped_gemm")?;
                     return grouped_gemm_default_loop::<_, _, $wrapper>(
                         backend,
@@ -1009,9 +1048,12 @@ where
                 }
                 (
                     TensorRead::View(TensorView::$variant(a)),
-                    TensorRead::Tensor(Tensor::$variant(b)),
+                    TensorRead::Tensor(b),
                     TensorWrite::View(TensorViewMut::$variant(c)),
-                ) => {
+                ) if b.dtype() == <$scalar as crate::TensorScalar>::dtype() => {
+                    let b = b
+                        .as_typed::<$scalar>()
+                        .expect("the dtype guard selects this arm");
                     let (b_data, b_base) = typed_read_storage(b, "grouped_gemm")?;
                     return grouped_gemm_default_loop::<_, _, $wrapper>(
                         backend,
@@ -1043,15 +1085,15 @@ where
         };
     }
 
-    dispatch!(F32, GroupedF32);
-    dispatch!(F64, GroupedF64);
-    dispatch!(C32, GroupedC32);
-    dispatch!(C64, GroupedC64);
+    dispatch!(F32, f32, GroupedF32);
+    dispatch!(F64, f64, GroupedF64);
+    dispatch!(C32, Complex32, GroupedC32);
+    dispatch!(C64, Complex64, GroupedC64);
     Err(validation(
         "grouped_gemm",
         ValidationError::DTypeMismatch {
-            expected: crate::core_dtype(lhs.dtype()),
-            actual: crate::core_dtype(out.dtype()),
+            expected: lhs.dtype(),
+            actual: out.dtype(),
         },
     ))
 }
@@ -1077,14 +1119,26 @@ pub fn accumulate_dot_result_into(
 ) -> crate::Result<()> {
     macro_rules! dispatch {
         ($variant:ident, $ty:ty) => {
-            if let (
-                Tensor::$variant(dot),
-                ContractionScalar::$variant(alpha),
-                ContractionScalar::$variant(beta),
-            ) = (dot, accumulation.alpha, accumulation.beta)
-            {
+            if dot.dtype() == <$ty as crate::TensorScalar>::dtype() {
+                let (ContractionScalar::$variant(alpha), ContractionScalar::$variant(beta)) =
+                    (accumulation.alpha, accumulation.beta)
+                else {
+                    return Err(validation(
+                        "dot_general",
+                        ValidationError::DTypeMismatch {
+                            expected: dot.dtype(),
+                            actual: accumulation.alpha.dtype(),
+                        },
+                    ));
+                };
+                let dot = dot
+                    .as_typed::<$ty>()
+                    .expect("the dtype guard selects this arm");
                 match out {
-                    TensorWrite::Tensor(Tensor::$variant(out)) => {
+                    TensorWrite::Tensor(out) => {
+                        let out = out
+                            .as_typed_mut::<$ty>()
+                            .expect("the dtype guard selects this arm");
                         let mut out = out.as_view_mut();
                         accumulate_typed(dot.as_slice()?, alpha, beta, &mut out)?;
                         return Ok(());
@@ -1107,8 +1161,8 @@ pub fn accumulate_dot_result_into(
     Err(validation(
         "dot_general",
         ValidationError::DTypeMismatch {
-            expected: crate::core_dtype(accumulation.alpha.dtype()),
-            actual: crate::core_dtype(dot.dtype()),
+            expected: accumulation.alpha.dtype(),
+            actual: dot.dtype(),
         },
     ))
 }
@@ -1565,17 +1619,40 @@ fn typed_view_storage_identity<T: crate::TensorScalar + 'static>(
     }
 }
 
+/// The typed tensor behind `value`, or the refusal this module reports for one.
+///
+/// Callers reach this from a match on the dtype, so `None` means the tag and the runtime dtype
+/// disagree rather than a caller mistake.
+fn identity_operand<T: TensorScalar>(value: &Tensor) -> crate::Result<&TypedTensor<T>> {
+    value.as_typed::<T>().ok_or_else(|| {
+        crate::Error::unsupported_dtype(
+            "storage_identity",
+            value.dtype(),
+            "an externally defined payload has no storage identity",
+        )
+    })
+}
+
 fn tensor_read_storage_identity(input: &TensorRead<'_>) -> crate::Result<StorageIdentity> {
     macro_rules! typed_identity {
         ($value:expr) => {
-            match $value {
-                Tensor::F32(value) => typed_tensor_storage_identity(value),
-                Tensor::F64(value) => typed_tensor_storage_identity(value),
-                Tensor::I32(value) => typed_tensor_storage_identity(value),
-                Tensor::I64(value) => typed_tensor_storage_identity(value),
-                Tensor::Bool(value) => typed_tensor_storage_identity(value),
-                Tensor::C32(value) => typed_tensor_storage_identity(value),
-                Tensor::C64(value) => typed_tensor_storage_identity(value),
+            match $value.dtype() {
+                DType::F32 => typed_tensor_storage_identity(identity_operand::<f32>($value)?),
+                DType::F64 => typed_tensor_storage_identity(identity_operand::<f64>($value)?),
+                DType::I32 => typed_tensor_storage_identity(identity_operand::<i32>($value)?),
+                DType::I64 => typed_tensor_storage_identity(identity_operand::<i64>($value)?),
+                DType::Bool => typed_tensor_storage_identity(identity_operand::<bool>($value)?),
+                DType::C32 => typed_tensor_storage_identity(identity_operand::<Complex32>($value)?),
+                DType::C64 => typed_tensor_storage_identity(identity_operand::<Complex64>($value)?),
+                // A caller-owned payload has no allocation identity, so it cannot
+                // take part in an aliasing check.
+                DType::External(_) => {
+                    return Err(crate::Error::unsupported_dtype(
+                        "storage_identity",
+                        $value.dtype(),
+                        "an externally defined payload has no storage identity",
+                    ));
+                }
             }
         };
     }

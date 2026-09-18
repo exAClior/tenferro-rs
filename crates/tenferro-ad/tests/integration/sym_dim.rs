@@ -5,14 +5,15 @@ use tenferro_runtime::{SymDim, Tensor, TracedTensor, TypedTensor};
 use tenferro_tensor::{ErrorKind, ValidationKind};
 
 fn f64_tensor(shape: Vec<usize>, data: Vec<f64>) -> Tensor {
-    Tensor::F64(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(shape, data).unwrap())
 }
 
 fn get_f64_data(tensor: &Tensor) -> &[f64] {
-    match tensor {
-        Tensor::F64(inner) => inner.host_data().unwrap(),
-        other => panic!("expected f64 tensor, got {other:?}"),
-    }
+    tensor
+        .as_typed::<f64>()
+        .expect("the dtype guard selects this arm")
+        .host_data()
+        .unwrap()
 }
 
 fn sym_size(input: &TracedTensor, axis: usize) -> SymDim {

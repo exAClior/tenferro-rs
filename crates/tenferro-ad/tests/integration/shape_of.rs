@@ -4,17 +4,13 @@ use tenferro_ad::TracedTensorAdExt;
 use tenferro_runtime::{Tensor, TracedTensor, TypedTensor};
 
 fn f64_tensor(shape: Vec<usize>, data: Vec<f64>) -> Tensor {
-    Tensor::F64(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(shape, data).unwrap())
 }
 
 fn get_f64_scalar(tensor: &Tensor) -> f64 {
-    match tensor {
-        Tensor::F64(inner) => {
-            assert_eq!(inner.shape(), &[] as &[usize]);
-            inner.host_data().unwrap()[0]
-        }
-        other => panic!("expected F64 tensor, got {:?}", other.dtype()),
-    }
+    let inner = tensor.as_typed::<f64>().expect("expected F64 tensor");
+    assert_eq!(inner.shape(), &[] as &[usize]);
+    inner.host_data().unwrap()[0]
 }
 
 #[test]

@@ -7,14 +7,15 @@ const TOL: f64 = 1.0e-6;
 const FD_H: f64 = 1.0e-6;
 
 fn f64_scalar(value: f64) -> Tensor {
-    Tensor::F64(TypedTensor::from_vec_col_major(vec![], vec![value]).unwrap())
+    Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(vec![], vec![value]).unwrap())
 }
 
 fn get_f64_scalar(tensor: &Tensor) -> f64 {
-    match tensor {
-        Tensor::F64(inner) => inner.host_data().unwrap()[0],
-        other => panic!("expected F64 tensor, got {:?}", other.dtype()),
-    }
+    tensor
+        .as_typed::<f64>()
+        .expect("the dtype guard selects this arm")
+        .host_data()
+        .unwrap()[0]
 }
 
 fn eval_tensor(traced: TracedTensor) -> Tensor {

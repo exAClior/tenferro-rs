@@ -10,12 +10,12 @@ use tenferro_runtime::{DotGeneralConfig, Tensor, TensorRead, TracedTensor, Typed
 use tenferro_tensor::StorageBuffer;
 
 fn f64_tensor(shape: Vec<usize>, data: Vec<f64>) -> Tensor {
-    Tensor::F64(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(shape, data).unwrap())
 }
 
 fn assert_f64_tensor_close(actual: &Tensor, expected: &Tensor, rtol: f64, atol: f64) {
-    match (actual, expected) {
-        (Tensor::F64(actual), Tensor::F64(expected)) => {
+    match (actual.as_typed::<f64>(), expected.as_typed::<f64>()) {
+        (Some(actual), Some(expected)) => {
             assert_eq!(actual.shape(), expected.shape());
             for (idx, (&actual, &expected)) in actual
                 .host_data()
@@ -40,14 +40,25 @@ fn assert_device_backed(tensor: &Tensor) {
         matches!(buffer, StorageBuffer::Backend(buffer) if buffer.backend_family() == "cubecl")
     }
 
-    match tensor {
-        Tensor::F32(inner) => assert!(is_cubecl(inner.buffer())),
-        Tensor::F64(inner) => assert!(is_cubecl(inner.buffer())),
-        Tensor::I64(inner) => assert!(is_cubecl(inner.buffer())),
-        Tensor::C32(inner) => assert!(is_cubecl(inner.buffer())),
-        Tensor::C64(inner) => assert!(is_cubecl(inner.buffer())),
-        Tensor::I32(inner) => assert!(is_cubecl(inner.buffer())),
-        Tensor::Bool(inner) => assert!(is_cubecl(inner.buffer())),
+    fn assert_typed<T: tenferro_tensor::TensorScalar>(tensor: &Tensor) {
+        assert!(is_cubecl(
+            tensor
+                .as_typed::<T>()
+                .expect("the dtype guard selects this arm")
+                .buffer()
+        ));
+    }
+
+    match tensor.dtype() {
+        tenferro_tensor::DType::F32 => assert_typed::<f32>(tensor),
+        tenferro_tensor::DType::F64 => assert_typed::<f64>(tensor),
+        tenferro_tensor::DType::I64 => assert_typed::<i64>(tensor),
+        tenferro_tensor::DType::C32 => assert_typed::<num_complex::Complex32>(tensor),
+        tenferro_tensor::DType::C64 => assert_typed::<num_complex::Complex64>(tensor),
+        tenferro_tensor::DType::I32 => assert_typed::<i32>(tensor),
+        tenferro_tensor::DType::Bool => assert_typed::<bool>(tensor),
+        // A caller-owned payload has no device buffer to inspect.
+        _ => panic!("a caller-owned payload is not a device tensor"),
     }
 }
 

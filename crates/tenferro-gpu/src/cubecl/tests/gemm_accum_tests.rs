@@ -286,10 +286,12 @@ fn flat_f64(len: usize, seed: f64) -> Vec<f64> {
 }
 
 fn download_f64(gpu: &crate::cubecl::CudaBackend, tensor: &Tensor) -> Vec<f64> {
-    match download(gpu, tensor) {
-        Tensor::F64(host) => host.as_slice().unwrap().to_vec(),
-        other => panic!("expected f64 tensor, got {:?}", other.dtype()),
-    }
+    download(gpu, tensor)
+        .as_typed::<f64>()
+        .expect("the dtype guard selects this arm")
+        .as_slice()
+        .unwrap()
+        .to_vec()
 }
 
 #[test]
@@ -323,10 +325,10 @@ fn test_accum_view_operands_offset_regions_f64() {
     let lhs_gpu = upload(&gpu, &tensor_f64(vec![32], lhs_host));
     let rhs_gpu = upload(&gpu, &tensor_f64(vec![32], rhs_host));
     let mut out_gpu = upload(&gpu, &tensor_f64(vec![20], out_host));
-    let (Tensor::F64(lhs_t), Tensor::F64(rhs_t)) = (&lhs_gpu, &rhs_gpu) else {
+    let (Some(lhs_t), Some(rhs_t)) = (lhs_gpu.as_typed::<f64>(), rhs_gpu.as_typed::<f64>()) else {
         unreachable!()
     };
-    let Tensor::F64(out_t) = &mut out_gpu else {
+    let Some(out_t) = out_gpu.as_typed_mut::<f64>() else {
         unreachable!()
     };
     let lhs_view = lhs_t
@@ -391,7 +393,7 @@ fn test_read_view_operands_allocating_f64() {
 
     let lhs_gpu = upload(&gpu, &tensor_f64(vec![32], lhs_host));
     let rhs_gpu = upload(&gpu, &tensor_f64(vec![32], rhs_host));
-    let (Tensor::F64(lhs_t), Tensor::F64(rhs_t)) = (&lhs_gpu, &rhs_gpu) else {
+    let (Some(lhs_t), Some(rhs_t)) = (lhs_gpu.as_typed::<f64>(), rhs_gpu.as_typed::<f64>()) else {
         unreachable!()
     };
     let lhs_view = lhs_t
@@ -464,7 +466,7 @@ fn test_accum_block_diagonal_regions_of_one_buffer_f64() {
     let mut out_gpu = upload(&gpu, &tensor_f64(vec![16], out_host));
 
     for (lhs, rhs, offset) in [(&lhs_a_gpu, &rhs_a_gpu, 0), (&lhs_b_gpu, &rhs_b_gpu, 10)] {
-        let Tensor::F64(out_t) = &mut out_gpu else {
+        let Some(out_t) = out_gpu.as_typed_mut::<f64>() else {
             unreachable!()
         };
         let out_view = out_t
@@ -526,7 +528,7 @@ fn test_accum_negative_stride_view_rejected() {
     // nonnegative-stride contract: explicit error, no silent canonicalization.
     let mut gpu = gpu_backend();
     let lhs_gpu = upload(&gpu, &tensor_f64(vec![8], flat_f64(8, 0.0)));
-    let Tensor::F64(lhs_t) = &lhs_gpu else {
+    let Some(lhs_t) = lhs_gpu.as_typed::<f64>() else {
         unreachable!()
     };
     let lhs_view = lhs_t
@@ -566,7 +568,7 @@ fn test_accum_zero_contraction_view_output_beta_error() {
     let mut out_gpu = upload(&gpu, &tensor_f64(vec![8], out_host.clone()));
 
     for (beta, expect_ok) in [(1.0, true), (-2.0, false)] {
-        let Tensor::F64(out_t) = &mut out_gpu else {
+        let Some(out_t) = out_gpu.as_typed_mut::<f64>() else {
             unreachable!()
         };
         let out_view = out_t

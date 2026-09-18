@@ -4,6 +4,30 @@ use tenferro_tensor::{
     TensorViewCanonicalization, TypedTensorView, TypedTensorViewMut,
 };
 
+/// The Rust scalar type behind a preset variant name a macro received.
+macro_rules! preset_scalar {
+    (F32) => {
+        f32
+    };
+    (F64) => {
+        f64
+    };
+    (I32) => {
+        i32
+    };
+    (I64) => {
+        i64
+    };
+    (Bool) => {
+        bool
+    };
+    (C32) => {
+        num_complex::Complex32
+    };
+    (C64) => {
+        num_complex::Complex64
+    };
+}
 fn opaque_backend_placement() -> Placement {
     Placement {
         memory_kind: MemoryKind::Device,
@@ -55,7 +79,7 @@ fn cpu_runtime_materialization_dispatches_all_dtypes_with_backend_session_parity
 fn cpu_runtime_materialization_rejects_owned_host_buffer_with_device_placement() {
     let mut input = TypedTensor::<f64>::from_vec_col_major(vec![2], vec![1.0, 2.0]).unwrap();
     input.set_placement(opaque_backend_placement());
-    let input = Tensor::F64(input);
+    let input = Tensor::from_typed::<f64>(input);
     let mut backend = CpuBackend::new();
 
     let err = backend
@@ -95,12 +119,15 @@ fn cpu_runtime_copy_dispatches_all_dtypes_with_backend_session_parity() {
     macro_rules! assert_copied {
         ($variant:ident, $ty:ty, $values:expr, $zeros:expr) => {{
             let values: Vec<$ty> = $values;
-            let src =
-                Tensor::$variant(TypedTensor::from_vec_col_major(vec![2], values.clone()).unwrap());
-            let mut direct_dst =
-                Tensor::$variant(TypedTensor::from_vec_col_major(vec![2], $zeros).unwrap());
-            let mut session_dst =
-                Tensor::$variant(TypedTensor::from_vec_col_major(vec![2], $zeros).unwrap());
+            let src = Tensor::from_typed::<preset_scalar!($variant)>(
+                TypedTensor::from_vec_col_major(vec![2], values.clone()).unwrap(),
+            );
+            let mut direct_dst = Tensor::from_typed::<preset_scalar!($variant)>(
+                TypedTensor::from_vec_col_major(vec![2], $zeros).unwrap(),
+            );
+            let mut session_dst = Tensor::from_typed::<preset_scalar!($variant)>(
+                TypedTensor::from_vec_col_major(vec![2], $zeros).unwrap(),
+            );
             let mut backend = CpuBackend::with_threads(2).unwrap();
 
             backend
@@ -145,7 +172,7 @@ fn cpu_runtime_copy_dispatches_all_dtypes_with_backend_session_parity() {
 #[test]
 fn cpu_runtime_copy_handles_strided_source_and_destination_without_allocation() {
     let mut backend = CpuBackend::with_threads(2).unwrap();
-    backend.reclaim_buffer(Tensor::I32(
+    backend.reclaim_buffer(Tensor::from_typed::<i32>(
         TypedTensor::from_vec_col_major(vec![4], vec![0_i32; 4]).unwrap(),
     ));
     let retained_before = backend.buffer_pool_len().unwrap();
@@ -195,10 +222,10 @@ fn cpu_runtime_copy_reports_dtype_shape_and_placement_errors() {
     ));
 
     let mut misplaced = Tensor::from_vec_col_major(vec![2], vec![0_i32; 2]).unwrap();
-    match &mut misplaced {
-        Tensor::I32(tensor) => tensor.set_placement(opaque_backend_placement()),
-        _ => unreachable!(),
-    }
+    misplaced
+        .as_typed_mut::<i32>()
+        .expect("an i32 tensor")
+        .set_placement(opaque_backend_placement());
     assert!(matches!(
         backend.copy_read_into(
             TensorRead::from_tensor(&src),
@@ -337,8 +364,12 @@ fn test_reclaim_buffer_returns_host_buffer_to_pool() {
     assert_eq!(backend.buffer_pool_len().unwrap(), 0);
     let t = TensorElementwise::add(
         &mut backend,
-        &Tensor::F64(TypedTensor::from_vec_col_major(vec![2], vec![1.0, 2.0]).unwrap()),
-        &Tensor::F64(TypedTensor::from_vec_col_major(vec![2], vec![3.0, 4.0]).unwrap()),
+        &Tensor::from_typed::<f64>(
+            TypedTensor::from_vec_col_major(vec![2], vec![1.0, 2.0]).unwrap(),
+        ),
+        &Tensor::from_typed::<f64>(
+            TypedTensor::from_vec_col_major(vec![2], vec![3.0, 4.0]).unwrap(),
+        ),
     )
     .unwrap();
     backend.reclaim_buffer(t);
@@ -348,15 +379,17 @@ fn test_reclaim_buffer_returns_host_buffer_to_pool() {
 #[test]
 fn test_elementwise_add_acquires_output_from_pool() {
     let mut backend = CpuBackend::new();
-    backend.reclaim_buffer(Tensor::F64(
+    backend.reclaim_buffer(Tensor::from_typed::<f64>(
         TypedTensor::from_vec_col_major(vec![4], vec![0.0; 4]).unwrap(),
     ));
     assert_eq!(backend.buffer_pool_len().unwrap(), 1);
 
-    let lhs =
-        Tensor::F64(TypedTensor::from_vec_col_major(vec![4], vec![1.0, 2.0, 3.0, 4.0]).unwrap());
-    let rhs =
-        Tensor::F64(TypedTensor::from_vec_col_major(vec![4], vec![4.0, 3.0, 2.0, 1.0]).unwrap());
+    let lhs = Tensor::from_typed::<f64>(
+        TypedTensor::from_vec_col_major(vec![4], vec![1.0, 2.0, 3.0, 4.0]).unwrap(),
+    );
+    let rhs = Tensor::from_typed::<f64>(
+        TypedTensor::from_vec_col_major(vec![4], vec![4.0, 3.0, 2.0, 1.0]).unwrap(),
+    );
     let out = backend.add(&lhs, &rhs).unwrap();
 
     assert_eq!(backend.buffer_pool_len().unwrap(), 0);
@@ -369,8 +402,12 @@ fn test_elementwise_add_acquires_output_from_pool() {
 #[test]
 fn test_broadcast_multiply_fusion_computes_outer_product_without_materialized_inputs() {
     let mut backend = CpuBackend::new();
-    let lhs = Tensor::F64(TypedTensor::from_vec_col_major(vec![3], vec![2.0, 3.0, 5.0]).unwrap());
-    let rhs = Tensor::F64(TypedTensor::from_vec_col_major(vec![2], vec![7.0, 11.0]).unwrap());
+    let lhs = Tensor::from_typed::<f64>(
+        TypedTensor::from_vec_col_major(vec![3], vec![2.0, 3.0, 5.0]).unwrap(),
+    );
+    let rhs = Tensor::from_typed::<f64>(
+        TypedTensor::from_vec_col_major(vec![2], vec![7.0, 11.0]).unwrap(),
+    );
 
     let out = backend
         .execute_broadcast_multiply(
@@ -397,8 +434,10 @@ fn test_cpu_elementwise_fusion_executes_add_mul_plan() {
     let n = 65_536usize;
     let lhs_data = (0..n).map(|i| i as f64 + 1.0).collect::<Vec<_>>();
     let rhs_data = (0..n).map(|i| (i as f64 + 1.0) * 10.0).collect::<Vec<_>>();
-    let lhs = Tensor::F64(TypedTensor::from_vec_col_major(vec![n], lhs_data).unwrap());
-    let rhs = Tensor::F64(TypedTensor::from_vec_col_major(vec![n], rhs_data).unwrap());
+    let lhs =
+        Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(vec![n], lhs_data).unwrap());
+    let rhs =
+        Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(vec![n], rhs_data).unwrap());
     let fusion_plan = tenferro_tensor::backend::ElementwiseFusionPlan::new(
         DType::F64,
         2,
@@ -433,8 +472,11 @@ fn test_cpu_elementwise_fusion_executes_broadcast_chain_plan() {
     let mut backend = CpuBackend::new();
     let n = 8_192usize;
     let lhs_data = (0..n).map(|i| i as f64 + 1.0).collect::<Vec<_>>();
-    let lhs = Tensor::F64(TypedTensor::from_vec_col_major(vec![n], lhs_data).unwrap());
-    let rhs = Tensor::F64(TypedTensor::from_vec_col_major(vec![2], vec![7.0, 11.0]).unwrap());
+    let lhs =
+        Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(vec![n], lhs_data).unwrap());
+    let rhs = Tensor::from_typed::<f64>(
+        TypedTensor::from_vec_col_major(vec![2], vec![7.0, 11.0]).unwrap(),
+    );
     let output_shape = vec![n, 2];
     let fusion_plan = tenferro_tensor::backend::ElementwiseFusionPlan::with_input_views(
         DType::F64,
@@ -479,9 +521,11 @@ fn test_cpu_elementwise_fusion_executes_broadcast_chain_plan() {
 fn test_cpu_elementwise_fusion_broadcasts_mapped_unit_axes() {
     let mut backend = CpuBackend::new();
     let n = 16_384usize;
-    let lhs = Tensor::F64(TypedTensor::from_vec_col_major(vec![1], vec![3.0]).unwrap());
+    let lhs =
+        Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(vec![1], vec![3.0]).unwrap());
     let rhs_data = (0..n).map(|i| i as f64 + 1.0).collect::<Vec<_>>();
-    let rhs = Tensor::F64(TypedTensor::from_vec_col_major(vec![n], rhs_data).unwrap());
+    let rhs =
+        Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(vec![n], rhs_data).unwrap());
     let fusion_plan = tenferro_tensor::backend::ElementwiseFusionPlan::with_input_views(
         DType::F64,
         vec![
@@ -519,15 +563,15 @@ fn test_cpu_elementwise_fusion_broadcasts_mapped_unit_axes() {
 fn test_materialize_tensor_read_covers_host_tensor_and_view_variants() {
     let mut buffers = crate::buffer_pool::BufferPool::new();
     let tensors = [
-        Tensor::F32(TypedTensor::from_vec_col_major(vec![1], vec![1.0_f32]).unwrap()),
-        Tensor::F64(TypedTensor::from_vec_col_major(vec![1], vec![1.0_f64]).unwrap()),
-        Tensor::I32(TypedTensor::from_vec_col_major(vec![1], vec![1_i32]).unwrap()),
-        Tensor::I64(TypedTensor::from_vec_col_major(vec![1], vec![1_i64]).unwrap()),
-        Tensor::Bool(TypedTensor::from_vec_col_major(vec![1], vec![true]).unwrap()),
-        Tensor::C32(
+        Tensor::from_typed::<f32>(TypedTensor::from_vec_col_major(vec![1], vec![1.0_f32]).unwrap()),
+        Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(vec![1], vec![1.0_f64]).unwrap()),
+        Tensor::from_typed::<i32>(TypedTensor::from_vec_col_major(vec![1], vec![1_i32]).unwrap()),
+        Tensor::from_typed::<i64>(TypedTensor::from_vec_col_major(vec![1], vec![1_i64]).unwrap()),
+        Tensor::from_typed::<bool>(TypedTensor::from_vec_col_major(vec![1], vec![true]).unwrap()),
+        Tensor::from_typed::<tenferro_tensor::Complex32>(
             TypedTensor::from_vec_col_major(vec![1], vec![Complex32::new(1.0, 0.0)]).unwrap(),
         ),
-        Tensor::C64(
+        Tensor::from_typed::<tenferro_tensor::Complex64>(
             TypedTensor::from_vec_col_major(vec![1], vec![Complex64::new(1.0, 0.0)]).unwrap(),
         ),
     ];
@@ -854,16 +898,17 @@ fn cpu_structural_read_direct_helpers_cover_zero_stride_empty_and_rank_zero() {
 #[test]
 fn cpu_structural_read_direct_helpers_match_owned_validation_errors() {
     let mut buffers = crate::buffer_pool::BufferPool::new();
-    let input = Tensor::F64(TypedTensor::from_vec_col_major(vec![2], vec![1.0, 2.0]).unwrap());
+    let input = Tensor::from_typed::<f64>(
+        TypedTensor::from_vec_col_major(vec![2], vec![1.0, 2.0]).unwrap(),
+    );
 
     let owned_transpose =
         crate::structural::transpose_with_pool(&mut buffers, &input, &[1]).unwrap_err();
     let view_transpose = crate::structural::transpose_read_with_pool(
         &mut buffers,
-        TensorRead::from_view(TensorView::F64(match &input {
-            Tensor::F64(input) => input.as_view(),
-            _ => unreachable!(),
-        })),
+        TensorRead::from_view(TensorView::F64(
+            input.as_typed::<f64>().expect("an f64 tensor").as_view(),
+        )),
         &[1],
     )
     .unwrap_err();
@@ -873,10 +918,9 @@ fn cpu_structural_read_direct_helpers_match_owned_validation_errors() {
     let owned_reshape = crate::structural::reshape(&input, &[3]).unwrap_err();
     let view_reshape = crate::structural::reshape_read_with_pool(
         &mut buffers,
-        TensorRead::from_view(TensorView::F64(match &input {
-            Tensor::F64(input) => input.as_view(),
-            _ => unreachable!(),
-        })),
+        TensorRead::from_view(TensorView::F64(
+            input.as_typed::<f64>().expect("an f64 tensor").as_view(),
+        )),
         &[3],
     )
     .unwrap_err();
@@ -888,10 +932,9 @@ fn cpu_structural_read_direct_helpers_match_owned_validation_errors() {
             .unwrap_err();
     let view_broadcast = crate::structural::broadcast_in_dim_read_with_pool(
         &mut buffers,
-        TensorRead::from_view(TensorView::F64(match &input {
-            Tensor::F64(input) => input.as_view(),
-            _ => unreachable!(),
-        })),
+        TensorRead::from_view(TensorView::F64(
+            input.as_typed::<f64>().expect("an f64 tensor").as_view(),
+        )),
         &[3],
         &[0],
     )
@@ -1146,13 +1189,14 @@ fn cpu_view_materialization_rejects_backend_buffer_with_caller_operation_name() 
 #[test]
 fn test_structural_transpose_acquires_output_from_pool() {
     let mut backend = CpuBackend::new();
-    backend.reclaim_buffer(Tensor::F64(
+    backend.reclaim_buffer(Tensor::from_typed::<f64>(
         TypedTensor::from_vec_col_major(vec![4], vec![0.0; 4]).unwrap(),
     ));
     assert_eq!(backend.buffer_pool_len().unwrap(), 1);
 
-    let input =
-        Tensor::F64(TypedTensor::from_vec_col_major(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]).unwrap());
+    let input = Tensor::from_typed::<f64>(
+        TypedTensor::from_vec_col_major(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]).unwrap(),
+    );
     let out = backend.transpose(&input, &[1, 0]).unwrap();
 
     assert_eq!(backend.buffer_pool_len().unwrap(), 0);
@@ -1167,13 +1211,14 @@ fn test_structural_transpose_acquires_output_from_pool() {
 #[test]
 fn test_cast_acquires_output_from_dtype_pool() {
     let mut backend = CpuBackend::new();
-    backend.reclaim_buffer(Tensor::F32(
+    backend.reclaim_buffer(Tensor::from_typed::<f32>(
         TypedTensor::from_vec_col_major(vec![4], vec![0.0; 4]).unwrap(),
     ));
     assert_eq!(backend.buffer_pool_len().unwrap(), 1);
 
-    let input =
-        Tensor::F64(TypedTensor::from_vec_col_major(vec![4], vec![1.25, 2.5, 3.75, 4.0]).unwrap());
+    let input = Tensor::from_typed::<f64>(
+        TypedTensor::from_vec_col_major(vec![4], vec![1.25, 2.5, 3.75, 4.0]).unwrap(),
+    );
     let out = backend.cast(&input, DType::F32).unwrap();
 
     assert_eq!(backend.buffer_pool_len().unwrap(), 0);
@@ -1186,13 +1231,14 @@ fn test_cast_acquires_output_from_dtype_pool() {
 #[test]
 fn test_slice_acquires_output_from_pool() {
     let mut backend = CpuBackend::new();
-    backend.reclaim_buffer(Tensor::F64(
+    backend.reclaim_buffer(Tensor::from_typed::<f64>(
         TypedTensor::from_vec_col_major(vec![2], vec![0.0; 2]).unwrap(),
     ));
     assert_eq!(backend.buffer_pool_len().unwrap(), 1);
 
-    let input =
-        Tensor::F64(TypedTensor::from_vec_col_major(vec![4], vec![1.0, 2.0, 3.0, 4.0]).unwrap());
+    let input = Tensor::from_typed::<f64>(
+        TypedTensor::from_vec_col_major(vec![4], vec![1.0, 2.0, 3.0, 4.0]).unwrap(),
+    );
     let config = SliceConfig {
         starts: vec![1],
         limits: vec![3],
@@ -1210,12 +1256,14 @@ fn test_slice_acquires_output_from_pool() {
 #[test]
 fn test_pad_acquires_and_zeroes_output_from_pool() {
     let mut backend = CpuBackend::new();
-    backend.reclaim_buffer(Tensor::F64(
+    backend.reclaim_buffer(Tensor::from_typed::<f64>(
         TypedTensor::from_vec_col_major(vec![4], vec![9.0; 4]).unwrap(),
     ));
     assert_eq!(backend.buffer_pool_len().unwrap(), 1);
 
-    let input = Tensor::F64(TypedTensor::from_vec_col_major(vec![2], vec![1.0, 2.0]).unwrap());
+    let input = Tensor::from_typed::<f64>(
+        TypedTensor::from_vec_col_major(vec![2], vec![1.0, 2.0]).unwrap(),
+    );
     let config = PadConfig {
         edge_padding_low: vec![1],
         edge_padding_high: vec![1],
@@ -1235,15 +1283,19 @@ fn test_pad_acquires_and_zeroes_output_from_pool() {
 #[test]
 fn test_dynamic_update_slice_acquires_clone_from_pool() {
     let mut backend = CpuBackend::new();
-    backend.reclaim_buffer(Tensor::F64(
+    backend.reclaim_buffer(Tensor::from_typed::<f64>(
         TypedTensor::from_vec_col_major(vec![4], vec![9.0; 4]).unwrap(),
     ));
     assert_eq!(backend.buffer_pool_len().unwrap(), 1);
 
-    let operand =
-        Tensor::F64(TypedTensor::from_vec_col_major(vec![4], vec![0.0, 1.0, 2.0, 3.0]).unwrap());
-    let update = Tensor::F64(TypedTensor::from_vec_col_major(vec![2], vec![7.0, 8.0]).unwrap());
-    let starts = Tensor::I64(TypedTensor::from_vec_col_major(vec![1], vec![1]).unwrap());
+    let operand = Tensor::from_typed::<f64>(
+        TypedTensor::from_vec_col_major(vec![4], vec![0.0, 1.0, 2.0, 3.0]).unwrap(),
+    );
+    let update = Tensor::from_typed::<f64>(
+        TypedTensor::from_vec_col_major(vec![2], vec![7.0, 8.0]).unwrap(),
+    );
+    let starts =
+        Tensor::from_typed::<i64>(TypedTensor::from_vec_col_major(vec![1], vec![1]).unwrap());
     let out = backend
         .dynamic_update_slice(&operand, &update, &starts)
         .unwrap();
@@ -1260,13 +1312,15 @@ fn test_dynamic_update_slice_acquires_clone_from_pool() {
 #[test]
 fn test_reclaim_buffer_covers_all_dtypes() {
     let mut backend = CpuBackend::new();
-    let f32_t = Tensor::F32(TypedTensor::from_vec_col_major(vec![2], vec![1.0f32, 2.0]).unwrap());
+    let f32_t = Tensor::from_typed::<f32>(
+        TypedTensor::from_vec_col_major(vec![2], vec![1.0f32, 2.0]).unwrap(),
+    );
     backend.reclaim_buffer(f32_t);
-    let c32_t = Tensor::C32(
+    let c32_t = Tensor::from_typed::<tenferro_tensor::Complex32>(
         TypedTensor::from_vec_col_major(vec![1], vec![Complex32::new(1.0, 0.0)]).unwrap(),
     );
     backend.reclaim_buffer(c32_t);
-    let c64_t = Tensor::C64(
+    let c64_t = Tensor::from_typed::<tenferro_tensor::Complex64>(
         TypedTensor::from_vec_col_major(vec![1], vec![Complex64::new(1.0, 0.0)]).unwrap(),
     );
     backend.reclaim_buffer(c64_t);
@@ -1278,8 +1332,12 @@ fn test_install_with_pool_preserves_buffers() {
     let mut backend = CpuBackend::with_threads(1).unwrap();
     let t = TensorElementwise::add(
         &mut backend,
-        &Tensor::F64(TypedTensor::from_vec_col_major(vec![2], vec![1.0, 2.0]).unwrap()),
-        &Tensor::F64(TypedTensor::from_vec_col_major(vec![2], vec![3.0, 4.0]).unwrap()),
+        &Tensor::from_typed::<f64>(
+            TypedTensor::from_vec_col_major(vec![2], vec![1.0, 2.0]).unwrap(),
+        ),
+        &Tensor::from_typed::<f64>(
+            TypedTensor::from_vec_col_major(vec![2], vec![3.0, 4.0]).unwrap(),
+        ),
     )
     .unwrap();
     assert_eq!(get_f64(&t, &[0]), 4.0);
@@ -1290,7 +1348,7 @@ fn test_install_with_pool_preserves_buffers() {
 #[test]
 fn test_with_linalg_pool_reports_poison_after_panic() {
     let mut backend = CpuBackend::with_threads(1).unwrap();
-    backend.reclaim_buffer(Tensor::F64(
+    backend.reclaim_buffer(Tensor::from_typed::<f64>(
         TypedTensor::from_vec_col_major(vec![2], vec![1.0, 2.0]).unwrap(),
     ));
     assert_eq!(backend.buffer_pool_len().unwrap(), 1);
@@ -1309,7 +1367,7 @@ fn test_with_linalg_pool_reports_poison_after_panic() {
 #[test]
 fn test_backend_session_reports_poison_after_panic() {
     let mut backend = CpuBackend::with_threads(1).unwrap();
-    backend.reclaim_buffer(Tensor::F64(
+    backend.reclaim_buffer(Tensor::from_typed::<f64>(
         TypedTensor::from_vec_col_major(vec![2], vec![1.0, 2.0]).unwrap(),
     ));
     assert_eq!(backend.buffer_pool_len().unwrap(), 1);
@@ -1370,25 +1428,25 @@ fn test_exec_session_read_reductions_and_reclaim_cover_typed_paths() {
             &[3.0]
         );
 
-        exec.reclaim_buffer(Tensor::F32(
+        exec.reclaim_buffer(Tensor::from_typed::<f32>(
             TypedTensor::from_vec_col_major(vec![1], vec![0.0_f32]).unwrap(),
         ));
-        exec.reclaim_buffer(Tensor::F64(
+        exec.reclaim_buffer(Tensor::from_typed::<f64>(
             TypedTensor::from_vec_col_major(vec![1], vec![0.0_f64]).unwrap(),
         ));
-        exec.reclaim_buffer(Tensor::I32(
+        exec.reclaim_buffer(Tensor::from_typed::<i32>(
             TypedTensor::from_vec_col_major(vec![1], vec![0_i32]).unwrap(),
         ));
-        exec.reclaim_buffer(Tensor::I64(
+        exec.reclaim_buffer(Tensor::from_typed::<i64>(
             TypedTensor::from_vec_col_major(vec![1], vec![0_i64]).unwrap(),
         ));
-        exec.reclaim_buffer(Tensor::Bool(
+        exec.reclaim_buffer(Tensor::from_typed::<bool>(
             TypedTensor::from_vec_col_major(vec![1], vec![false]).unwrap(),
         ));
-        exec.reclaim_buffer(Tensor::C32(
+        exec.reclaim_buffer(Tensor::from_typed::<tenferro_tensor::Complex32>(
             TypedTensor::from_vec_col_major(vec![1], vec![Complex32::new(0.0, 0.0)]).unwrap(),
         ));
-        exec.reclaim_buffer(Tensor::C64(
+        exec.reclaim_buffer(Tensor::from_typed::<tenferro_tensor::Complex64>(
             TypedTensor::from_vec_col_major(vec![1], vec![Complex64::new(0.0, 0.0)]).unwrap(),
         ));
     });
@@ -1915,8 +1973,9 @@ fn test_default_backend_session_methods_cover_cache_fallbacks() {
 
 #[test]
 fn test_pool_backed_elementwise_public_paths_cover_dtypes_and_scalars() {
-    let f32_scalar = Tensor::F32(TypedTensor::from_vec_col_major(vec![], vec![2.0]).unwrap());
-    let c32_vec = Tensor::C32(
+    let f32_scalar =
+        Tensor::from_typed::<f32>(TypedTensor::from_vec_col_major(vec![], vec![2.0]).unwrap());
+    let c32_vec = Tensor::from_typed::<tenferro_tensor::Complex32>(
         TypedTensor::from_vec_col_major(
             vec![2],
             vec![Complex32::new(1.0, 1.0), Complex32::new(-3.0, 0.5)],
@@ -1952,8 +2011,9 @@ fn test_pool_backed_elementwise_public_paths_cover_dtypes_and_scalars() {
         Complex32::new(2.0, 2.0)
     );
 
-    let f64_scalar = Tensor::F64(TypedTensor::from_vec_col_major(vec![], vec![4.0]).unwrap());
-    let c64_vec = Tensor::C64(
+    let f64_scalar =
+        Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(vec![], vec![4.0]).unwrap());
+    let c64_vec = Tensor::from_typed::<tenferro_tensor::Complex64>(
         TypedTensor::from_vec_col_major(
             vec![2],
             vec![Complex64::new(1.0, -1.0), Complex64::new(0.0, 2.0)],
@@ -1991,14 +2051,14 @@ fn test_pool_backed_elementwise_public_paths_cover_dtypes_and_scalars() {
         &[-1]
     );
 
-    let a = Tensor::C64(
+    let a = Tensor::from_typed::<tenferro_tensor::Complex64>(
         TypedTensor::from_vec_col_major(
             vec![2],
             vec![Complex64::new(3.0, 4.0), Complex64::new(1.0, 0.0)],
         )
         .unwrap(),
     );
-    let b = Tensor::C64(
+    let b = Tensor::from_typed::<tenferro_tensor::Complex64>(
         TypedTensor::from_vec_col_major(
             vec![2],
             vec![Complex64::new(0.0, 2.0), Complex64::new(5.0, 0.0)],
@@ -2026,7 +2086,9 @@ fn test_pool_backed_elementwise_public_paths_cover_dtypes_and_scalars() {
             message,
         }) if message.contains("total order")
     ));
-    let pred = Tensor::Bool(TypedTensor::from_vec_col_major(vec![2], vec![true, true]).unwrap());
+    let pred = Tensor::from_typed::<bool>(
+        TypedTensor::from_vec_col_major(vec![2], vec![true, true]).unwrap(),
+    );
     assert_c64_close(
         get_c64(&select(&pred, &a, &b).unwrap(), &[1]),
         Complex64::new(1.0, 0.0),
@@ -2079,7 +2141,7 @@ fn test_pool_backed_analytic_public_paths_cover_supported_dtypes() {
         0.0,
     );
 
-    let complex = Tensor::C64(
+    let complex = Tensor::from_typed::<tenferro_tensor::Complex64>(
         TypedTensor::from_vec_col_major(vec![1], vec![Complex64::new(1.0, 0.0)]).unwrap(),
     );
     assert_c64_close(
@@ -2208,7 +2270,7 @@ fn test_pool_backed_structural_public_paths_cover_dispatch_and_helpers() {
     )
     .is_err());
 
-    let c32_matrix = Tensor::C32(
+    let c32_matrix = Tensor::from_typed::<tenferro_tensor::Complex32>(
         TypedTensor::from_vec_col_major(
             vec![2, 2],
             vec![
@@ -2234,7 +2296,9 @@ where
 {
     let lhs = Tensor::from_vec_col_major(vec![2], vec![1.0_f64, 4.0]).unwrap();
     let rhs = Tensor::from_vec_col_major(vec![2], vec![2.0_f64, 8.0]).unwrap();
-    let pred = Tensor::Bool(TypedTensor::from_vec_col_major(vec![2], vec![true, false]).unwrap());
+    let pred = Tensor::from_typed::<bool>(
+        TypedTensor::from_vec_col_major(vec![2], vec![true, false]).unwrap(),
+    );
     let lower = Tensor::from_vec_col_major(vec![2], vec![1.5_f64, 3.0]).unwrap();
     let upper = Tensor::from_vec_col_major(vec![2], vec![3.0_f64, 6.0]).unwrap();
     let view = TypedTensor::<f64>::from_vec_col_major(vec![2], vec![1.0, 4.0]).unwrap();

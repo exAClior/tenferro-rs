@@ -79,52 +79,52 @@ fn faer_parallelism_capability_runs_inside_a_cpu_session() {
 }
 
 fn get_f64(t: &Tensor, idx: &[usize]) -> f64 {
-    match t {
-        Tensor::F64(inner) => *inner.get(idx).unwrap(),
-        _ => panic!("expected F64 tensor"),
-    }
+    *t.as_typed::<f64>()
+        .expect("expected F64 tensor")
+        .get(idx)
+        .unwrap()
 }
 
 fn get_c64(t: &Tensor, idx: &[usize]) -> Complex64 {
-    match t {
-        Tensor::C64(inner) => *inner.get(idx).unwrap(),
-        _ => panic!("expected C64 tensor"),
-    }
+    *t.as_typed::<Complex64>()
+        .expect("expected C64 tensor")
+        .get(idx)
+        .unwrap()
 }
 
 fn get_f32(t: &Tensor, idx: &[usize]) -> f32 {
-    match t {
-        Tensor::F32(inner) => *inner.get(idx).unwrap(),
-        _ => panic!("expected F32 tensor"),
-    }
+    *t.as_typed::<f32>()
+        .expect("expected F32 tensor")
+        .get(idx)
+        .unwrap()
 }
 
 fn get_c32(t: &Tensor, idx: &[usize]) -> Complex32 {
-    match t {
-        Tensor::C32(inner) => *inner.get(idx).unwrap(),
-        _ => panic!("expected C32 tensor"),
-    }
+    *t.as_typed::<Complex32>()
+        .expect("expected C32 tensor")
+        .get(idx)
+        .unwrap()
 }
 
 fn get_i64(t: &Tensor, idx: &[usize]) -> i64 {
-    match t {
-        Tensor::I64(inner) => *inner.get(idx).unwrap(),
-        _ => panic!("expected I64 tensor"),
-    }
+    *t.as_typed::<i64>()
+        .expect("expected I64 tensor")
+        .get(idx)
+        .unwrap()
 }
 
 fn get_i32(t: &Tensor, idx: &[usize]) -> i32 {
-    match t {
-        Tensor::I32(inner) => *inner.get(idx).unwrap(),
-        _ => panic!("expected I32 tensor"),
-    }
+    *t.as_typed::<i32>()
+        .expect("expected I32 tensor")
+        .get(idx)
+        .unwrap()
 }
 
 fn get_bool(t: &Tensor, idx: &[usize]) -> bool {
-    match t {
-        Tensor::Bool(inner) => *inner.get(idx).unwrap(),
-        _ => panic!("expected Bool tensor"),
-    }
+    *t.as_typed::<bool>()
+        .expect("expected Bool tensor")
+        .get(idx)
+        .unwrap()
 }
 
 fn assert_f64_close(actual: f64, expected: f64) {
@@ -715,6 +715,7 @@ mod basic_ops;
 mod blas1;
 #[path = "tests/cpu_tests/capability.rs"]
 mod capability;
+mod cast_matrix_coverage_tests;
 #[path = "tests/cpu_tests/context.rs"]
 mod context;
 #[path = "tests/cpu_tests/dot_structural_analytic.rs"]
@@ -728,3 +729,85 @@ mod indexing_coverage;
 #[cfg(feature = "cpu-faer")]
 #[path = "tests/cpu_tests/uninit_dot_output.rs"]
 mod uninit_dot_output;
+
+/// The analytic read view carries one arm per preset scalar, and the read entry for `pow` takes it for both
+/// operands. The owned-tensor tests reach the floating arms only, so this drives every dtype, including the
+/// boolean arm, whose analytic view is a unit marker and is therefore refused.
+#[test]
+fn analytic_read_view_covers_every_preset_scalar() {
+    let mut buffers = crate::buffer_pool::BufferPool::new();
+
+    macro_rules! pow_output {
+        ($scalar:ty, $values:expr) => {{
+            let values: Vec<$scalar> = $values;
+            let lhs: Tensor =
+                Tensor::from_vec_col_major(vec![values.len()], values.clone()).unwrap();
+            let rhs: Tensor = Tensor::from_vec_col_major(vec![values.len()], values).unwrap();
+            crate::analytic::pow_read_with_pool(
+                &mut buffers,
+                tenferro_tensor::TensorRead::from_tensor(&lhs),
+                tenferro_tensor::TensorRead::from_tensor(&rhs),
+            )
+            .expect("pow admits this preset scalar")
+        }};
+    }
+
+    macro_rules! pow_case_exact {
+        ($scalar:ty, $values:expr, $expected:expr) => {{
+            let output = pow_output!($scalar, $values);
+            assert_eq!(output.as_slice::<$scalar>().unwrap(), $expected.as_slice());
+        }};
+    }
+
+    // The complex arm computes through `exp`/`log`, so its result is exact only to the
+    // precision of that pair; compare within a tolerance instead of demanding bit equality.
+    macro_rules! pow_case_close {
+        ($scalar:ty, $values:expr, $expected:expr) => {{
+            let output = pow_output!($scalar, $values);
+            let actual = output.as_slice::<$scalar>().unwrap();
+            let expected: Vec<$scalar> = $expected;
+            assert_eq!(actual.len(), expected.len());
+            for (a, e) in actual.iter().zip(&expected) {
+                assert!(
+                    (a.re - e.re).abs() < 1e-5 && (a.im - e.im).abs() < 1e-5,
+                    "pow({}) = {:?}, expected {:?}",
+                    stringify!($scalar),
+                    actual,
+                    expected
+                );
+            }
+        }};
+    }
+
+    pow_case_exact!(f32, vec![2.0_f32, 3.0], vec![4.0_f32, 27.0]);
+    pow_case_exact!(f64, vec![2.0_f64, 3.0], vec![4.0_f64, 27.0]);
+    pow_case_exact!(i32, vec![2_i32, 3], vec![4_i32, 27]);
+    pow_case_exact!(i64, vec![2_i64, 3], vec![4_i64, 27]);
+    pow_case_close!(
+        Complex32,
+        vec![Complex32::new(2.0, 0.0), Complex32::new(3.0, 0.0)],
+        vec![Complex32::new(4.0, 0.0), Complex32::new(27.0, 0.0)]
+    );
+    pow_case_close!(
+        Complex64,
+        vec![Complex64::new(2.0, 0.0), Complex64::new(3.0, 0.0)],
+        vec![Complex64::new(4.0, 0.0), Complex64::new(27.0, 0.0)]
+    );
+
+    // The boolean analytic view is a unit marker, so `pow` has no arm for it and reports a
+    // dtype mismatch rather than silently returning a value.
+    let bools: Tensor = Tensor::from_vec_col_major(vec![2], vec![false, true]).unwrap();
+    let error = crate::analytic::pow_read_with_pool(
+        &mut buffers,
+        tenferro_tensor::TensorRead::from_tensor(&bools),
+        tenferro_tensor::TensorRead::from_tensor(&bools),
+    )
+    .expect_err("pow refuses the boolean analytic view");
+    assert!(matches!(
+        error,
+        tenferro_tensor::Error::Validation {
+            op: "pow",
+            source: tenferro_tensor::ValidationError::DTypeMismatch { .. },
+        }
+    ));
+}

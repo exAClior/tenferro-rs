@@ -716,6 +716,39 @@ impl TracedTensor {
     /// Returns [`Error::RuntimeStateSource`] when graph metadata registration
     /// cannot retain the concrete tensor's shape or dtype.
     pub fn from_tensor_concrete_shape(tensor: Tensor) -> Result<Self> {
+        Self::from_tensor_concrete_shape_with_identity(tensor, None)
+    }
+
+    /// Build a [`TracedTensor`] leaf from a concrete tensor that declares the
+    /// canonical identity of its externally defined scalar.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use tenferro_runtime::TracedTensor;
+    /// use tenferro_tensor::DType;
+    ///
+    /// let dtype = DType::External(std::any::TypeId::of::<f64>());
+    /// let leaf = TracedTensor::input_concrete_shape_declaring_scalar(dtype, &[2], "example.scalar.v1")?;
+    /// assert!(leaf.is_concrete_shape());
+    /// # Ok::<(), tenferro_runtime::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RuntimeStateSource`] when graph metadata registration
+    /// cannot retain the concrete tensor's shape or dtype.
+    pub fn from_tensor_concrete_shape_declaring_scalar(
+        tensor: Tensor,
+        identity: &'static str,
+    ) -> Result<Self> {
+        Self::from_tensor_concrete_shape_with_identity(tensor, Some(identity))
+    }
+
+    fn from_tensor_concrete_shape_with_identity(
+        tensor: Tensor,
+        identity: Option<&'static str>,
+    ) -> Result<Self> {
         let shape = tensor.shape().to_vec();
         let rank = shape.len();
         let dtype = tensor.dtype();
@@ -723,6 +756,10 @@ impl TracedTensor {
         let id = next_traced_id();
         let data = Arc::new(RetainedValue::from_tensor(tensor));
         let meta = concrete_tensor_meta(dtype, &shape);
+        let meta = match identity {
+            Some(identity) => meta.with_scalar_identity(identity),
+            None => meta,
+        };
 
         let mut builder = GraphBuilder::new();
         let val = builder.add_input(key.clone());
@@ -875,6 +912,46 @@ impl TracedTensor {
     /// fails or the registry state is poisoned. `dtype` and `shape` are
     /// metadata values and are not revalidated by this constructor.
     pub fn input_concrete_shape(dtype: DType, shape: &[usize]) -> Result<Self> {
+        Self::input_concrete_shape_with_identity(dtype, shape, None)
+    }
+
+    /// Build a data-less placeholder leaf of a concrete shape that declares the
+    /// canonical identity of its externally defined scalar.
+    ///
+    /// A semantic program's identity must be reproducible across processes, while an
+    /// externally defined scalar's tag is a process-local `TypeId`, so an input whose
+    /// dtype is external must declare the stable name its contribution owns.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use tenferro_runtime::TracedTensor;
+    /// use tenferro_tensor::DType;
+    ///
+    /// let dtype = DType::External(std::any::TypeId::of::<f64>());
+    /// let x = TracedTensor::input_concrete_shape_declaring_scalar(dtype, &[2], "example.scalar.v1")?;
+    /// assert_eq!(x.rank, 1);
+    /// assert!(x.is_concrete_shape());
+    /// # Ok::<(), tenferro_runtime::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::RuntimeStateSource`] when graph metadata registration fails
+    /// or the registry state is poisoned.
+    pub fn input_concrete_shape_declaring_scalar(
+        dtype: DType,
+        shape: &[usize],
+        identity: &'static str,
+    ) -> Result<Self> {
+        Self::input_concrete_shape_with_identity(dtype, shape, Some(identity))
+    }
+
+    fn input_concrete_shape_with_identity(
+        dtype: DType,
+        shape: &[usize],
+        identity: Option<&'static str>,
+    ) -> Result<Self> {
         let shape = shape.to_vec();
         let rank = shape.len();
         let key = next_input_key();
@@ -884,9 +961,14 @@ impl TracedTensor {
         let val = builder.add_input(key.clone());
         builder.set_outputs(vec![val]);
         let graph = Arc::new(builder.build());
+        let meta = concrete_tensor_meta(dtype, &shape);
+        let meta = match identity {
+            Some(identity) => meta.with_scalar_identity(identity),
+            None => meta,
+        };
         let metadata_scope = register_metadata_or_runtime_state(register_scoped_value_metadata(
             graph.values()[val].key.clone(),
-            concrete_tensor_meta(dtype, &shape),
+            meta,
         ))?;
 
         Ok(Self {
@@ -1473,6 +1555,15 @@ impl TracedTensor {
             DType::Bool => StdTensorOp::constant(bool_from_real_for_op("scale_real", factor)?),
             DType::C64 => StdTensorOp::constant(Complex64::new(factor, 0.0)),
             DType::C32 => StdTensorOp::constant(Complex32::new(factor as f32, 0.0)),
+            // An externally defined scalar has no traced constant, so the closure
+            // rejects it instead of guessing one.
+            DType::External(_) => {
+                return Err(graph_invalid_argument(
+                    "scale_real",
+                    "dtype",
+                    format!("requires a preset tensor dtype, got {:?}", self.dtype),
+                ));
+            }
         };
         scale_with_constant(self, op)
     }
@@ -1507,13 +1598,16 @@ impl TracedTensor {
                 self,
                 StdTensorOp::constant(Complex32::new(factor.re as f32, factor.im as f32)),
             ),
-            DType::F32 | DType::F64 | DType::I32 | DType::I64 | DType::Bool => {
-                Err(graph_invalid_argument(
-                    "scale_complex",
-                    "dtype",
-                    format!("requires complex tensor dtype, got {:?}", self.dtype),
-                ))
-            }
+            DType::F32
+            | DType::F64
+            | DType::I32
+            | DType::I64
+            | DType::Bool
+            | DType::External(_) => Err(graph_invalid_argument(
+                "scale_complex",
+                "dtype",
+                format!("requires complex tensor dtype, got {:?}", self.dtype),
+            )),
         }
     }
 

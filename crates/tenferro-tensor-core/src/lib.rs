@@ -31,13 +31,20 @@
 use num_complex::{Complex32, Complex64};
 use smallvec::SmallVec;
 
+mod erased;
 mod error;
 mod layout;
 mod rank;
+mod scalar;
+#[macro_use]
+mod scalar_set;
 
+pub use erased::ErasedHostTensor;
 pub use error::{ErrorKind, ShapeMismatch, ValidationError, ValidationKind};
 pub use layout::TensorLayout;
 pub use rank::{DynRank, IntoRankShape, Rank, TensorRank};
+pub use scalar::{ad_admission, AdAdmissionError, Scalar, ScalarArithmetic, ScalarDomain};
+pub use scalar_set::{promote_specs, MemberKind, MemberSpec, ScalarSet};
 
 /// Small tensor shape vector with inline capacity for common dynamic ranks.
 ///
@@ -93,24 +100,45 @@ pub type StrideVec = SmallVec<[isize; 8]>;
 /// ```
 pub type Result<T> = std::result::Result<T, ValidationError>;
 
-/// Runtime scalar dtype tag.
-///
-/// # Examples
-///
-/// ```rust
-/// use tenferro_tensor_core::DType;
-///
-/// assert_eq!(DType::F64, DType::F64);
-/// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum DType {
-    F32,
-    F64,
-    I32,
-    I64,
-    Bool,
-    C32,
-    C64,
+define_scalar_set! {
+    /// Runtime scalar dtype tag.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use tenferro_tensor_core::DType;
+    ///
+    /// assert_eq!(DType::F64, DType::F64);
+    /// ```
+    pub enum DType {
+        /// 32-bit floating point.
+        F32 => f32 : Float 0 32,
+        /// 64-bit floating point.
+        F64 => f64 : Float 1 64,
+        /// 32-bit signed integer.
+        I32 => i32 : Integer 0 32,
+        /// 64-bit signed integer.
+        I64 => i64 : Integer 1 64,
+        /// Boolean.
+        Bool => bool : Boolean 0 0,
+        /// 32-bit complex floating point.
+        C32 => Complex32 : Complex 0 32,
+        /// 64-bit complex floating point.
+        C64 => Complex64 : Complex 1 64,
+    }
+    /// Value enum of the scalar set tenferro ships.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use tenferro_tensor_core::{DType, DefaultScalars, HostTensor, ScalarSet};
+    ///
+    /// let value = DefaultScalars::I32(HostTensor::from_vec_col_major(vec![1], vec![7_i32])?);
+    /// assert_eq!(value.tag(), DType::I32);
+    /// # Ok::<(), tenferro_tensor_core::ValidationError>(())
+    /// ```
+    pub enum DefaultScalars;
+    external External(core::any::TypeId);
 }
 
 /// Sealed trait for scalar types supported by the core tensor data model.
@@ -123,7 +151,7 @@ pub enum DType {
 /// assert_eq!(f64::dtype(), DType::F64);
 /// assert_eq!(num_complex::Complex64::dtype(), DType::C64);
 /// ```
-pub trait TensorScalar: Copy + Clone + Send + Sync + 'static + private::Sealed {
+pub trait TensorScalar: Scalar + Copy + Clone + Send + Sync + 'static + private::Sealed {
     /// Real-valued counterpart of this scalar type.
     type Real: TensorScalar;
 
@@ -173,8 +201,102 @@ mod private {
     impl Sealed for num_complex::Complex64 {}
 }
 
+macro_rules! scalar_domain {
+    (float) => {
+        ScalarDomain::Field
+    };
+    (complex) => {
+        ScalarDomain::Field
+    };
+    (integer) => {
+        ScalarDomain::Field
+    };
+    (boolean) => {
+        ScalarDomain::NonField
+    };
+}
+
+macro_rules! impl_scalar_arithmetic {
+    ($ty:ty, float) => {
+        impl ScalarArithmetic for $ty {
+            fn scalar_zero() -> Self {
+                0.0
+            }
+
+            fn scalar_one() -> Self {
+                1.0
+            }
+
+            fn scalar_add(self, rhs: Self) -> Self {
+                std::ops::Add::add(self, rhs)
+            }
+
+            fn scalar_sub(self, rhs: Self) -> Self {
+                std::ops::Sub::sub(self, rhs)
+            }
+
+            fn scalar_mul(self, rhs: Self) -> Self {
+                std::ops::Mul::mul(self, rhs)
+            }
+        }
+    };
+    ($ty:ty, complex) => {
+        impl ScalarArithmetic for $ty {
+            fn scalar_zero() -> Self {
+                <$ty>::new(0.0, 0.0)
+            }
+
+            fn scalar_one() -> Self {
+                <$ty>::new(1.0, 0.0)
+            }
+
+            fn scalar_add(self, rhs: Self) -> Self {
+                std::ops::Add::add(self, rhs)
+            }
+
+            fn scalar_sub(self, rhs: Self) -> Self {
+                std::ops::Sub::sub(self, rhs)
+            }
+
+            fn scalar_mul(self, rhs: Self) -> Self {
+                std::ops::Mul::mul(self, rhs)
+            }
+        }
+    };
+    ($ty:ty, integer) => {
+        impl ScalarArithmetic for $ty {
+            fn scalar_zero() -> Self {
+                0
+            }
+
+            fn scalar_one() -> Self {
+                1
+            }
+
+            fn scalar_add(self, rhs: Self) -> Self {
+                self.wrapping_add(rhs)
+            }
+
+            fn scalar_sub(self, rhs: Self) -> Self {
+                self.wrapping_sub(rhs)
+            }
+
+            fn scalar_mul(self, rhs: Self) -> Self {
+                self.wrapping_mul(rhs)
+            }
+        }
+    };
+    ($ty:ty, boolean) => {};
+}
+
 macro_rules! impl_scalar {
-    ($ty:ty, $real:ty, $dtype:expr, $variant:ident) => {
+    ($ty:ty, $real:ty, $dtype:expr, $variant:ident, $kind:ident) => {
+        impl Scalar for $ty {
+            const DOMAIN: ScalarDomain = scalar_domain!($kind);
+        }
+
+        impl_scalar_arithmetic!($ty, $kind);
+
         impl TensorScalar for $ty {
             type Real = $real;
 
@@ -210,13 +332,16 @@ macro_rules! impl_scalar {
     };
 }
 
-impl_scalar!(f32, f32, DType::F32, F32);
-impl_scalar!(f64, f64, DType::F64, F64);
-impl_scalar!(i32, i32, DType::I32, I32);
-impl_scalar!(i64, i64, DType::I64, I64);
-impl_scalar!(bool, bool, DType::Bool, Bool);
-impl_scalar!(Complex32, f32, DType::C32, C32);
-impl_scalar!(Complex64, f64, DType::C64, C64);
+// The single preset table: tag, real counterpart, erased variant, and algebra
+// kind are declared once here and expanded into every contract the preset
+// scalars implement.
+impl_scalar!(f32, f32, DType::F32, F32, float);
+impl_scalar!(f64, f64, DType::F64, F64, float);
+impl_scalar!(i32, i32, DType::I32, I32, integer);
+impl_scalar!(i64, i64, DType::I64, I64, integer);
+impl_scalar!(bool, bool, DType::Bool, Bool, boolean);
+impl_scalar!(Complex32, f32, DType::C32, C32, complex);
+impl_scalar!(Complex64, f64, DType::C64, C64, complex);
 
 /// Explicit slice descriptor.
 ///
@@ -267,16 +392,7 @@ pub struct HostTensor<T> {
 /// assert_eq!(tensor.dtype(), DType::F64);
 /// # Ok::<(), tenferro_tensor_core::ValidationError>(())
 /// ```
-#[derive(Clone, Debug, PartialEq)]
-pub enum Tensor {
-    F32(HostTensor<f32>),
-    F64(HostTensor<f64>),
-    I32(HostTensor<i32>),
-    I64(HostTensor<i64>),
-    Bool(HostTensor<bool>),
-    C32(HostTensor<Complex32>),
-    C64(HostTensor<Complex64>),
-}
+pub use DefaultScalars as Tensor;
 
 /// Borrowed host tensor view with shape, strides, and offset metadata.
 ///
@@ -981,7 +1097,7 @@ impl<'a, T> HostTensorView<'a, T> {
     }
 }
 
-impl Tensor {
+impl DefaultScalars {
     /// Create a dynamic tensor from a column-major host buffer.
     ///
     /// # Examples

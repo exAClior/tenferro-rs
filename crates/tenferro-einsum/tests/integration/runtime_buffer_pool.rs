@@ -7,14 +7,15 @@ use tenferro_runtime::{GraphCompiler, Tensor, TraceContext, TypedTensor};
 use super::support;
 
 fn f64_tensor(shape: Vec<usize>, data: Vec<f64>) -> Tensor {
-    Tensor::F64(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(shape, data).unwrap())
 }
 
 fn get_f64_data(tensor: &Tensor) -> &[f64] {
-    match tensor {
-        Tensor::F64(inner) => inner.host_data().unwrap(),
-        _ => panic!("expected F64"),
-    }
+    tensor
+        .as_typed::<f64>()
+        .expect("expected F64")
+        .host_data()
+        .unwrap()
 }
 
 fn traced_input(trace: &mut TraceContext, tensor: &Tensor) -> tenferro_runtime::TraceValue {

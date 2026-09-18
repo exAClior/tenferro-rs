@@ -23,6 +23,30 @@
     allow(dead_code, unused_imports)
 )]
 
+/// The Rust scalar type behind a preset variant name a macro received.
+macro_rules! preset_scalar {
+    (F32) => {
+        f32
+    };
+    (F64) => {
+        f64
+    };
+    (I32) => {
+        i32
+    };
+    (I64) => {
+        i64
+    };
+    (Bool) => {
+        bool
+    };
+    (C32) => {
+        num_complex::Complex32
+    };
+    (C64) => {
+        num_complex::Complex64
+    };
+}
 #[cfg(not(any(feature = "cpu-faer", feature = "cpu-blas")))]
 compile_error!("enable at least one CPU backend: cpu-faer or cpu-blas");
 
@@ -84,6 +108,7 @@ mod runtime_adapter;
 mod structural;
 mod topology;
 
+use num_complex::{Complex32, Complex64};
 use std::ptr::NonNull;
 #[cfg(test)]
 use strided_kernel::col_major_strides as kernel_col_major_strides;
@@ -178,6 +203,12 @@ pub use runtime_adapter::{
     runtime_engine_id, runtime_engine_registration, runtime_engine_registration_with_id,
     runtime_hardware_class,
 };
+/// Ordinary CPU entry points that take a caller-provided destination and the
+/// caller's own arithmetic instead of the typed pool.
+pub use tenferro_internal_cpu_kernels::scalar_ops::{
+    scalar_binary_into, scalar_fold, AddOp, BinaryScalarOp, MulOp, SubOp,
+};
+pub use tenferro_internal_cpu_kernels::{same_variant_pair, same_variant_unary};
 pub use topology::{
     discover_cpu_topology, CpuId, CpuNode, CpuSet, CpuSetError, CpuTopology, CpuTopologyError,
     NumaNodeId,
@@ -384,7 +415,13 @@ pub(crate) fn copy_tensor_read_into(
         ($variant:ident, $src:expr) => {{
             let src = $src;
             match dst {
-                TensorWrite::Tensor(Tensor::$variant(dst)) => {
+                TensorWrite::Tensor(dst)
+                    if dst.dtype()
+                        == <preset_scalar!($variant) as tenferro_tensor::TensorScalar>::dtype() =>
+                {
+                    let dst = dst
+                        .as_typed_mut::<preset_scalar!($variant)>()
+                        .expect("the dtype guard selects this arm");
                     let mut dst = dst.as_view_mut();
                     structural::typed_copy_view_into(&src, &mut dst, op)
                 }
@@ -395,15 +432,69 @@ pub(crate) fn copy_tensor_read_into(
             }
         }};
     }
+    /// The typed tensor behind a read adapter's tensor, or the refusal this adapter reports.
+    fn read_refusal(tensor: &Tensor) -> crate::Error {
+        crate::Error::unsupported_dtype(
+            "copy_tensor_read_into",
+            tensor.dtype(),
+            "an externally defined payload is not a runtime read",
+        )
+    }
 
     match src {
-        TensorRead::Tensor(Tensor::F32(src)) => copy_source!(F32, src.as_view()),
-        TensorRead::Tensor(Tensor::F64(src)) => copy_source!(F64, src.as_view()),
-        TensorRead::Tensor(Tensor::I32(src)) => copy_source!(I32, src.as_view()),
-        TensorRead::Tensor(Tensor::I64(src)) => copy_source!(I64, src.as_view()),
-        TensorRead::Tensor(Tensor::Bool(src)) => copy_source!(Bool, src.as_view()),
-        TensorRead::Tensor(Tensor::C32(src)) => copy_source!(C32, src.as_view()),
-        TensorRead::Tensor(Tensor::C64(src)) => copy_source!(C64, src.as_view()),
+        TensorRead::Tensor(tensor) => match tensor.dtype() {
+            DType::F32 => copy_source!(
+                F32,
+                tensor
+                    .as_typed::<f32>()
+                    .ok_or_else(|| read_refusal(tensor))?
+                    .as_view()
+            ),
+            DType::F64 => copy_source!(
+                F64,
+                tensor
+                    .as_typed::<f64>()
+                    .ok_or_else(|| read_refusal(tensor))?
+                    .as_view()
+            ),
+            DType::I32 => copy_source!(
+                I32,
+                tensor
+                    .as_typed::<i32>()
+                    .ok_or_else(|| read_refusal(tensor))?
+                    .as_view()
+            ),
+            DType::I64 => copy_source!(
+                I64,
+                tensor
+                    .as_typed::<i64>()
+                    .ok_or_else(|| read_refusal(tensor))?
+                    .as_view()
+            ),
+            DType::Bool => copy_source!(
+                Bool,
+                tensor
+                    .as_typed::<bool>()
+                    .ok_or_else(|| read_refusal(tensor))?
+                    .as_view()
+            ),
+            DType::C32 => copy_source!(
+                C32,
+                tensor
+                    .as_typed::<Complex32>()
+                    .ok_or_else(|| read_refusal(tensor))?
+                    .as_view()
+            ),
+            DType::C64 => copy_source!(
+                C64,
+                tensor
+                    .as_typed::<Complex64>()
+                    .ok_or_else(|| read_refusal(tensor))?
+                    .as_view()
+            ),
+            // A caller-owned payload has no compact runtime read.
+            DType::External(_) => Err(read_refusal(tensor)),
+        },
         TensorRead::View(TensorView::F32(src)) => copy_source!(F32, src),
         TensorRead::View(TensorView::F64(src)) => copy_source!(F64, src),
         TensorRead::View(TensorView::I32(src)) => copy_source!(I32, src),
@@ -411,6 +502,7 @@ pub(crate) fn copy_tensor_read_into(
         TensorRead::View(TensorView::Bool(src)) => copy_source!(Bool, src),
         TensorRead::View(TensorView::C32(src)) => copy_source!(C32, src),
         TensorRead::View(TensorView::C64(src)) => copy_source!(C64, src),
+        // A caller-owned payload is opaque here, so it cannot be copied into a
     }
 }
 
@@ -419,19 +511,74 @@ fn clone_host_tensor_read(op: &'static str, tensor: &Tensor) -> crate::Result<Te
         ($variant:ident, $tensor:expr) => {{
             structural::validate_cpu_host_placement(op, "source", $tensor.placement())?;
             typed_host_data(op, $tensor)?;
-            $tensor.duplicate().map(Tensor::$variant)
+            $tensor
+                .duplicate()
+                .map(Tensor::from_typed::<preset_scalar!($variant)>)
         }};
     }
 
-    match tensor {
-        Tensor::F32(tensor) => clone_host!(F32, tensor),
-        Tensor::F64(tensor) => clone_host!(F64, tensor),
-        Tensor::I32(tensor) => clone_host!(I32, tensor),
-        Tensor::I64(tensor) => clone_host!(I64, tensor),
-        Tensor::Bool(tensor) => clone_host!(Bool, tensor),
-        Tensor::C32(tensor) => clone_host!(C32, tensor),
-        Tensor::C64(tensor) => clone_host!(C64, tensor),
+    match tensor.dtype() {
+        DType::F32 => {
+            let tensor = host_typed::<f32>(op, tensor)?;
+            clone_host!(F32, tensor)
+        }
+        DType::F64 => {
+            let tensor = host_typed::<f64>(op, tensor)?;
+            clone_host!(F64, tensor)
+        }
+        DType::I32 => {
+            let tensor = host_typed::<i32>(op, tensor)?;
+            clone_host!(I32, tensor)
+        }
+        DType::I64 => {
+            let tensor = host_typed::<i64>(op, tensor)?;
+            clone_host!(I64, tensor)
+        }
+        DType::Bool => {
+            let tensor = host_typed::<bool>(op, tensor)?;
+            clone_host!(Bool, tensor)
+        }
+        DType::C32 => {
+            let tensor = host_typed::<Complex32>(op, tensor)?;
+            clone_host!(C32, tensor)
+        }
+        DType::C64 => {
+            let tensor = host_typed::<Complex64>(op, tensor)?;
+            clone_host!(C64, tensor)
+        }
+        // A caller-owned payload is a compact host tensor, so a contiguous copy is
+        // the payload itself, copied into storage this value owns. Sharing the
+        // payload would alias the caller's storage instead of copying it.
+        DType::External(_) => Ok(Tensor::external_with_placement(
+            tensor
+                .external_payload()
+                .ok_or_else(|| host_typed_error(op, tensor))?
+                .duplicate(),
+            tensor.placement().clone(),
+        )),
     }
+}
+
+/// The typed tensor behind `tensor`, or this module's refusal for a dtype it cannot clone.
+///
+/// Callers reach this from a match on `tensor.dtype()`, so `None` means the tag table and the
+/// runtime dtype disagree rather than a caller mistake.
+fn host_typed<'a, T: TensorScalar>(
+    op: &'static str,
+    tensor: &'a Tensor,
+) -> crate::Result<&'a TypedTensor<T>> {
+    tensor
+        .as_typed::<T>()
+        .ok_or_else(|| host_typed_error(op, tensor))
+}
+
+/// The refusal the accessor reports when the tag and the runtime dtype disagree.
+fn host_typed_error(op: &'static str, tensor: &Tensor) -> crate::Error {
+    crate::Error::unsupported_dtype(
+        op,
+        tensor.dtype(),
+        "the CPU host clone requires a preset scalar",
+    )
 }
 
 fn materialize_tensor_view(
@@ -441,7 +588,7 @@ fn materialize_tensor_view(
 ) -> crate::Result<Tensor> {
     macro_rules! materialize {
         ($variant:ident, $view:expr) => {{
-            Ok(Tensor::$variant(
+            Ok(Tensor::from_typed::<preset_scalar!($variant)>(
                 structural::typed_materialize_view_with_pool(buffers, &$view, op)?,
             ))
         }};

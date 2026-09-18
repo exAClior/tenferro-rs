@@ -23,14 +23,14 @@ const TOL: f64 = 1e-6;
 const FD_H: f64 = 1e-6;
 
 fn f64_scalar(val: f64) -> Tensor {
-    Tensor::F64(TypedTensor::from_vec_col_major(vec![], vec![val]).unwrap())
+    Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(vec![], vec![val]).unwrap())
 }
 
 fn get_f64_scalar(t: &Tensor) -> f64 {
-    match t {
-        Tensor::F64(inner) => inner.host_data().unwrap()[0],
-        _ => panic!("expected F64"),
-    }
+    t.as_typed::<f64>()
+        .expect("expected F64")
+        .host_data()
+        .unwrap()[0]
 }
 
 /// Count total ops across all graphs in the graph tree, deduplicating

@@ -115,7 +115,7 @@ fn cubecl_session_scales_output_in_place() {
                 Ok(output)
             })
             .unwrap();
-        let mut output_enum = tenferro_tensor::Tensor::F32(output);
+        let mut output_enum = tenferro_tensor::Tensor::from_typed::<f32>(output);
         session
             .with_cubecl("test.cubecl_scale", |cubecl| {
                 cubecl.scale_tensor_write(
@@ -124,10 +124,9 @@ fn cubecl_session_scales_output_in_place() {
                 )
             })
             .unwrap();
-        let typed = match output_enum {
-            tenferro_tensor::Tensor::F32(typed) => typed,
-            _ => unreachable!(),
-        };
+        let typed = output_enum
+            .into_typed::<f32>()
+            .expect("the scale output keeps its dtype");
         let bytes = session
             .with_raw("test.cubecl_scale_raw2", |raw| {
                 raw.download_tensor::<f32>(&typed, "test.cubecl_scale_raw2")

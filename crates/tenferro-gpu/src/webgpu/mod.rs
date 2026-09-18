@@ -206,6 +206,9 @@ fn provider_dtype_size(dtype: DType) -> usize {
         DType::Bool => core::mem::size_of::<bool>(),
         DType::C32 => core::mem::size_of::<num_complex::Complex32>(),
         DType::C64 => core::mem::size_of::<num_complex::Complex64>(),
+        // INVARIANT: WebGPU provider buffers are sized for the preset scalars the
+        // provider supports. An externally defined scalar has no fixed width.
+        DType::External(_) => 0,
     }
 }
 
@@ -568,25 +571,31 @@ pub(super) fn alloc_tensor_in_runtime(
     shape: &[usize],
 ) -> crate::Result<Tensor> {
     match dtype {
-        DType::F32 => alloc_output::<f32>(rt, shape, "apple_alloc").map(Tensor::F32),
-        DType::F64 => alloc_output::<f64>(rt, shape, "apple_alloc").map(Tensor::F64),
-        DType::I32 => alloc_output::<i32>(rt, shape, "apple_alloc").map(Tensor::I32),
-        DType::I64 => alloc_output::<i64>(rt, shape, "apple_alloc").map(Tensor::I64),
-        DType::C32 => {
-            alloc_output::<num_complex::Complex32>(rt, shape, "apple_alloc").map(Tensor::C32)
-        }
-        DType::C64 => {
-            alloc_output::<num_complex::Complex64>(rt, shape, "apple_alloc").map(Tensor::C64)
-        }
+        // An externally defined scalar has no WebGPU buffer mapping, so the
+        // provider rejects it instead of guessing a representation.
+        DType::External(_) => Err(Error::unsupported(
+            "apple_alloc",
+            "an externally defined scalar has no WebGPU buffer",
+        )),
+        DType::F32 => alloc_output::<f32>(rt, shape, "apple_alloc").map(Tensor::from_typed::<f32>),
+        DType::F64 => alloc_output::<f64>(rt, shape, "apple_alloc").map(Tensor::from_typed::<f64>),
+        DType::I32 => alloc_output::<i32>(rt, shape, "apple_alloc").map(Tensor::from_typed::<i32>),
+        DType::I64 => alloc_output::<i64>(rt, shape, "apple_alloc").map(Tensor::from_typed::<i64>),
+        DType::C32 => alloc_output::<num_complex::Complex32>(rt, shape, "apple_alloc")
+            .map(Tensor::from_typed::<tenferro_tensor::Complex32>),
+        DType::C64 => alloc_output::<num_complex::Complex64>(rt, shape, "apple_alloc")
+            .map(Tensor::from_typed::<tenferro_tensor::Complex64>),
         DType::Bool => {
             let len = checked_shape_product("apple_alloc", shape)?;
             let handle = rt.client().empty(len);
             let buffer = WebGpuBuffer::new_for_runtime(rt, handle, len, "apple_alloc")?;
-            Ok(Tensor::Bool(TypedTensor::from_backend_allocation(
-                shape.to_vec(),
-                Box::new(buffer),
-                webgpu_placement(rt),
-            )?))
+            Ok(Tensor::from_typed::<bool>(
+                TypedTensor::from_backend_allocation(
+                    shape.to_vec(),
+                    Box::new(buffer),
+                    webgpu_placement(rt),
+                )?,
+            ))
         }
     }
 }

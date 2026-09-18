@@ -1084,7 +1084,7 @@ fn backend_buffers_return_errors_when_host_access_is_requested() {
     assert_eq!(tensor.placement().device.as_ref().unwrap().ordinal, 0);
 
     assert!(tensor.host_data().is_err());
-    let erased = Tensor::F64(tensor);
+    let erased = Tensor::from_typed::<f64>(tensor);
     assert!(erased.as_slice::<f64>().is_err());
     assert!(erased.get::<f64>(&[0]).is_err());
 
@@ -1095,7 +1095,7 @@ fn backend_buffers_return_errors_when_host_access_is_requested() {
     )
     .unwrap();
     assert!(mutable_tensor.host_data_mut().is_err());
-    let mut erased_mut = Tensor::F64(mutable_tensor);
+    let mut erased_mut = Tensor::from_typed::<f64>(mutable_tensor);
     assert!(erased_mut.as_slice_mut::<f64>().is_err());
     assert!(erased_mut.get_mut::<f64>(&[0]).is_err());
 }
@@ -1235,19 +1235,23 @@ fn typed_tensor_metadata_accessors_keep_owned_scalar_storage_rooted() {
 
 #[test]
 fn tensor_shape_and_dtype_cover_all_variants() {
-    let f32_tensor =
-        Tensor::F32(TypedTensor::from_vec_col_major(vec![2], vec![1.0_f32, 2.0]).unwrap());
-    let f64_tensor = Tensor::F64(TypedTensor::from_vec_col_major(vec![], vec![3.0_f64]).unwrap());
-    let i32_tensor =
-        Tensor::I32(TypedTensor::from_vec_col_major(vec![2], vec![1_i32, -2]).unwrap());
-    let c32_tensor = Tensor::C32(
+    let f32_tensor = Tensor::from_typed::<f32>(
+        TypedTensor::from_vec_col_major(vec![2], vec![1.0_f32, 2.0]).unwrap(),
+    );
+    let f64_tensor =
+        Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(vec![], vec![3.0_f64]).unwrap());
+    let i32_tensor = Tensor::from_typed::<i32>(
+        TypedTensor::from_vec_col_major(vec![2], vec![1_i32, -2]).unwrap(),
+    );
+    let c32_tensor = Tensor::from_typed::<crate::Complex32>(
         TypedTensor::from_vec_col_major(vec![1], vec![Complex32::new(1.0, -2.0)]).unwrap(),
     );
-    let c64_tensor = Tensor::C64(
+    let c64_tensor = Tensor::from_typed::<crate::Complex64>(
         TypedTensor::from_vec_col_major(vec![1, 1], vec![Complex64::new(-3.0, 4.0)]).unwrap(),
     );
-    let bool_tensor =
-        Tensor::Bool(TypedTensor::from_vec_col_major(vec![2], vec![true, false]).unwrap());
+    let bool_tensor = Tensor::from_typed::<bool>(
+        TypedTensor::from_vec_col_major(vec![2], vec![true, false]).unwrap(),
+    );
 
     assert_eq!(f32_tensor.shape(), &[2]);
     assert_eq!(f32_tensor.dtype(), DType::F32);
@@ -1792,7 +1796,7 @@ fn tensor_read_as_slice_rejects_backend_owned_storage_without_transfer() {
     )
     .unwrap();
 
-    let err = TensorRead::from_tensor(&Tensor::F64(tensor))
+    let err = TensorRead::from_tensor(&Tensor::from_typed::<f64>(tensor))
         .as_slice::<f64>()
         .unwrap_err();
 
@@ -2238,4 +2242,123 @@ fn as_view_paths_do_not_allocate_or_clone_storage() {
     let mut tensor = tensor.duplicate().unwrap();
     let view_mut = tensor.as_view_mut();
     assert_eq!(view_mut.shape(), &[2, 2]);
+}
+
+#[test]
+fn value_types_are_send_and_sync() {
+    // Stage 2 carries an externally defined scalar by erasing its payload. That
+    // contract needs the runtime value types to move between threads and to be
+    // shared behind a reference, so the property is asserted rather than assumed.
+    fn assert_send_sync<T: Send + Sync + 'static>() {}
+
+    assert_send_sync::<TypedTensor<f64>>();
+    assert_send_sync::<TypedTensor<Complex64>>();
+    assert_send_sync::<Tensor>();
+    assert_send_sync::<TensorView<'_>>();
+}
+
+/// The erased payload's accessor contract: every preset dtype round-trips through the one
+/// `Native` payload, only the matching scalar is accepted, mutable access reaches the same
+/// storage, and swapping or replacing the whole value leaves a usable tensor behind.
+#[test]
+fn erased_payload_accessors_cover_every_preset_dtype() {
+    fn round_trip<T: TensorScalar + PartialEq + std::fmt::Debug>(values: Vec<T>) {
+        let tensor = Tensor::from_vec_col_major(vec![values.len()], values.clone()).unwrap();
+        assert_eq!(tensor.dtype(), T::dtype());
+        assert_eq!(
+            tensor
+                .as_typed::<T>()
+                .expect("the dtype matches")
+                .host_data()
+                .unwrap(),
+            values.as_slice()
+        );
+        if T::dtype() != DType::F32 {
+            assert!(tensor.as_typed::<f32>().is_none(), "a mismatch is refused");
+        }
+
+        let mut tensor = tensor;
+        tensor
+            .as_typed_mut::<T>()
+            .expect("the dtype matches")
+            .host_data_mut()
+            .unwrap()[0] = values[0];
+        assert_eq!(
+            tensor
+                .as_typed::<T>()
+                .expect("the dtype still matches")
+                .host_data()
+                .unwrap(),
+            values.as_slice()
+        );
+
+        let scalar = Tensor::from_vec_col_major(vec![1], vec![values[0]]).unwrap();
+        let mut first = scalar.duplicate().unwrap();
+        let mut second = scalar;
+        std::mem::swap(&mut first, &mut second);
+        assert!(first.as_typed::<T>().is_some());
+        assert!(second.as_typed::<T>().is_some());
+        let replaced = std::mem::replace(&mut first, second);
+        assert!(replaced.as_typed::<T>().is_some());
+        assert!(first.as_typed::<T>().is_some());
+        assert_eq!(
+            first.into_typed::<T>().unwrap().host_data().unwrap(),
+            &[values[0]]
+        );
+    }
+
+    round_trip(vec![1.0_f32, 2.0]);
+    round_trip(vec![1.0_f64, 2.0]);
+    round_trip(vec![1_i32, 2]);
+    round_trip(vec![1_i64, 2]);
+    round_trip(vec![false, true]);
+    round_trip(vec![Complex32::new(1.0, 1.0), Complex32::new(2.0, 0.0)]);
+    round_trip(vec![Complex64::new(1.0, 1.0), Complex64::new(2.0, 0.0)]);
+}
+
+#[test]
+fn an_external_payload_is_carried_by_the_value_type() {
+    use tenferro_tensor_core::{ErasedHostTensor, HostTensor};
+
+    let payload =
+        ErasedHostTensor::new(HostTensor::from_vec_col_major(vec![2], vec![1.0_f64, 2.0]).unwrap());
+    let element = payload.element_type_id();
+    let tensor = Tensor::external(payload);
+
+    assert_eq!(tensor.dtype(), DType::External(element));
+    assert_eq!(tensor.shape(), &[2]);
+    assert_eq!(tensor.placement().memory_kind, MemoryKind::UnpinnedHost);
+    assert!(!tensor.is_backend_buffer());
+
+    // The value type answers what it holds, and operations with no externally
+    // defined implementation reject it with a typed error instead of guessing.
+    assert!(tensor.layout_linear_offset(&[0]).is_err());
+
+    // Duplication goes through the payload's own entry point: the copy keeps the
+    // element type, holds its own storage, and leaves the original unchanged.
+    let mut duplicate = tensor.duplicate().expect("duplication copies the payload");
+    assert_eq!(duplicate.dtype(), DType::External(element));
+    assert_eq!(duplicate.shape(), &[2]);
+    match duplicate.external_payload_mut() {
+        Some(payload) => {
+            payload
+                .downcast_mut::<f64>()
+                .expect("payload type")
+                .as_mut_slice()[0] = 9.0;
+            assert_eq!(
+                payload.as_dense::<f64>().expect("dense payload").0,
+                &[9.0, 2.0]
+            );
+        }
+        None => panic!("expected an external payload"),
+    }
+    let payload = tensor.external_payload().expect("an external payload");
+    assert_eq!(
+        payload.as_dense::<f64>().expect("dense payload").0,
+        &[1.0, 2.0]
+    );
+    // A metadata-only clone shares the payload instead of copying it.
+    let original = tensor.external_payload().expect("an external payload");
+    assert!(original.clone().shares_payload_with(original));
+    assert!(!original.duplicate().shares_payload_with(original));
 }

@@ -1,8 +1,33 @@
 use cubecl::prelude::{CubeCount, CubeDim, TensorBinding};
+use tenferro_tensor::DType;
 
 use super::*;
 use crate::{rank_revealing_qr::validate_rank_revealing_qr_options, RankRevealingQrOptions};
 
+/// The Rust scalar type behind a preset variant name a macro received.
+macro_rules! preset_scalar {
+    (F32) => {
+        f32
+    };
+    (F64) => {
+        f64
+    };
+    (I32) => {
+        i32
+    };
+    (I64) => {
+        i64
+    };
+    (Bool) => {
+        bool
+    };
+    (C32) => {
+        num_complex::Complex32
+    };
+    (C64) => {
+        num_complex::Complex64
+    };
+}
 const OP: &str = "rank_revealing_qr";
 const RRQR_PLANE_WIDTH: u32 = 32;
 
@@ -297,14 +322,16 @@ macro_rules! impl_cuda_rrqr_complex {
             fn device_imaginary_unit(
                 backend: &mut CudaExecSession<'_>,
             ) -> Result<Option<TypedTensor<Self>>> {
-                let host = Tensor::$variant(TypedTensor::from_vec_col_major(
-                    vec![1],
-                    vec![<$scalar>::new(0.0 as $real, 1.0 as $real)],
-                )?);
-                match tenferro_gpu::cuda::upload_tensor(backend.runtime(), &host)? {
-                    Tensor::$variant(tensor) => Ok(Some(tensor)),
-                    _ => Err(Error::Internal("RRQR constant upload changed dtype".into())),
-                }
+                let host = Tensor::from_typed::<preset_scalar!($variant)>(
+                    TypedTensor::from_vec_col_major(
+                        vec![1],
+                        vec![<$scalar>::new(0.0 as $real, 1.0 as $real)],
+                    )?,
+                );
+                tenferro_gpu::cuda::upload_tensor(backend.runtime(), &host)?
+                    .into_typed::<preset_scalar!($variant)>()
+                    .map(Some)
+                    .map_err(|_| Error::Internal("RRQR constant upload changed dtype".into()))
             }
 
             fn launch_norms(
@@ -490,51 +517,68 @@ pub(super) fn rank_revealing_qr(
     options: RankRevealingQrOptions,
 ) -> Result<Vec<Tensor>> {
     validate_rank_revealing_qr_options(OP, options)?;
-    match input {
-        Tensor::F32(input) => {
+    match input.dtype() {
+        DType::F32 => {
+            let input = gpu_linalg_typed::<f32>(OP, input)?;
             rank_revealing_qr_typed(backend, input, options).map(|(q, r, p, rank)| {
                 vec![
-                    Tensor::F32(q),
-                    Tensor::F32(r),
-                    Tensor::I64(p),
-                    Tensor::I64(rank),
+                    Tensor::from_typed::<f32>(q),
+                    Tensor::from_typed::<f32>(r),
+                    Tensor::from_typed::<i64>(p),
+                    Tensor::from_typed::<i64>(rank),
                 ]
             })
         }
-        Tensor::F64(input) => {
+        DType::F64 => {
+            let input = gpu_linalg_typed::<f64>(OP, input)?;
             rank_revealing_qr_typed(backend, input, options).map(|(q, r, p, rank)| {
                 vec![
-                    Tensor::F64(q),
-                    Tensor::F64(r),
-                    Tensor::I64(p),
-                    Tensor::I64(rank),
+                    Tensor::from_typed::<f64>(q),
+                    Tensor::from_typed::<f64>(r),
+                    Tensor::from_typed::<i64>(p),
+                    Tensor::from_typed::<i64>(rank),
                 ]
             })
         }
-        Tensor::C32(input) => {
+        DType::C32 => {
+            let input = gpu_linalg_typed::<Complex32>(OP, input)?;
             rank_revealing_qr_typed(backend, input, options).map(|(q, r, p, rank)| {
                 vec![
-                    Tensor::C32(q),
-                    Tensor::C32(r),
-                    Tensor::I64(p),
-                    Tensor::I64(rank),
+                    Tensor::from_typed::<tenferro_tensor::Complex32>(q),
+                    Tensor::from_typed::<tenferro_tensor::Complex32>(r),
+                    Tensor::from_typed::<i64>(p),
+                    Tensor::from_typed::<i64>(rank),
                 ]
             })
         }
-        Tensor::C64(input) => {
+        DType::C64 => {
+            let input = gpu_linalg_typed::<Complex64>(OP, input)?;
             rank_revealing_qr_typed(backend, input, options).map(|(q, r, p, rank)| {
                 vec![
-                    Tensor::C64(q),
-                    Tensor::C64(r),
-                    Tensor::I64(p),
-                    Tensor::I64(rank),
+                    Tensor::from_typed::<tenferro_tensor::Complex64>(q),
+                    Tensor::from_typed::<tenferro_tensor::Complex64>(r),
+                    Tensor::from_typed::<i64>(p),
+                    Tensor::from_typed::<i64>(rank),
                 ]
             })
         }
-        Tensor::I32(_) | Tensor::I64(_) | Tensor::Bool(_) => {
+        DType::I32 | DType::I64 | DType::Bool | DType::External(_) => {
             Err(unsupported_linalg_dtype(OP, input))
         }
     }
+}
+
+/// The typed tensor behind `input`, or this module's standard refusal.
+///
+/// Callers reach this from a match on `input.dtype()`, so `None` means the tag table
+/// and the runtime dtype disagree rather than a caller mistake.
+fn gpu_linalg_typed<'a, T: tenferro_tensor::TensorScalar>(
+    op: &'static str,
+    input: &'a Tensor,
+) -> Result<&'a tenferro_tensor::TypedTensor<T>> {
+    input
+        .as_typed::<T>()
+        .ok_or_else(|| unsupported_linalg_dtype(op, input))
 }
 
 fn rank_revealing_qr_typed<T>(
@@ -682,12 +726,11 @@ where
     // The only CUDA-to-host read is this bounded provider-status vector. Matrix
     // payloads, norms, pivots, permutation, and rank remain device-resident.
     backend.runtime().synchronize()?;
-    let host_status = download_tensor(backend.runtime(), &Tensor::I64(status))?;
-    let Tensor::I64(host_status) = host_status else {
-        return Err(Error::Internal(
-            "rank_revealing_qr: unexpected provider-status dtype".into(),
-        ));
-    };
+    let host_status = download_tensor(backend.runtime(), &Tensor::from_typed::<i64>(status))?
+        .into_typed::<i64>()
+        .map_err(|_| {
+            Error::Internal("rank_revealing_qr: unexpected provider-status dtype".into())
+        })?;
     if host_status.host_data()?.iter().any(|&value| value != 0) {
         return Err(crate::error::into_tensor_error(
             OP,
@@ -852,18 +895,20 @@ macro_rules! impl_rrqr_tensor_variant {
     ($scalar:ty, $variant:ident) => {
         impl RrqrTensorVariant for $scalar {
             fn wrap(tensor: TypedTensor<Self>) -> Tensor {
-                Tensor::$variant(tensor)
+                Tensor::from_typed::<preset_scalar!($variant)>(tensor)
             }
 
             fn unwrap(tensor: Tensor) -> Result<TypedTensor<Self>> {
-                match tensor {
-                    Tensor::$variant(tensor) => Ok(tensor),
-                    other => Err(Error::dtype_mismatch(
-                        OP,
-                        <$scalar as TensorScalar>::dtype(),
-                        other.dtype(),
-                    )),
-                }
+                let actual = tensor.dtype();
+                tensor
+                    .into_typed::<preset_scalar!($variant)>()
+                    .map_err(|_| {
+                        Error::dtype_mismatch(
+                            OP,
+                            <$scalar as tenferro_tensor::TensorScalar>::dtype(),
+                            actual,
+                        )
+                    })
             }
         }
     };

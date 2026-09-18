@@ -1,3 +1,4 @@
+use num_complex::{Complex32, Complex64};
 use std::any::TypeId;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -7,6 +8,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant};
+use tenferro_tensor::DType;
 
 use crate::arbiter::{with_execution_owner, ResourceArbiter, ResourceOwner, ResourcePermit};
 use crate::buffer_pool::{BufferPool, BufferPoolStats, PoolScalar};
@@ -50,19 +52,24 @@ use super::{
 };
 
 pub(crate) fn tag_fresh_output(output: &mut Tensor, domain: CpuDomainId) {
-    macro_rules! tag {
-        ($tensor:expr) => {{
-            $tensor.set_cpu_affinity(Some(domain));
-        }};
+    match output.dtype() {
+        DType::F32 => tag_fresh_typed::<f32>(output, domain),
+        DType::F64 => tag_fresh_typed::<f64>(output, domain),
+        DType::I32 => tag_fresh_typed::<i32>(output, domain),
+        DType::I64 => tag_fresh_typed::<i64>(output, domain),
+        DType::Bool => tag_fresh_typed::<bool>(output, domain),
+        DType::C32 => tag_fresh_typed::<Complex32>(output, domain),
+        DType::C64 => tag_fresh_typed::<Complex64>(output, domain),
+        // A caller-owned payload has no pooled storage to tag, and a tag the accessor
+        // cannot recover leaves the placement untouched, which is the same outcome.
+        DType::External(_) => {}
     }
-    match output {
-        Tensor::F32(tensor) => tag!(tensor),
-        Tensor::F64(tensor) => tag!(tensor),
-        Tensor::I32(tensor) => tag!(tensor),
-        Tensor::I64(tensor) => tag!(tensor),
-        Tensor::Bool(tensor) => tag!(tensor),
-        Tensor::C32(tensor) => tag!(tensor),
-        Tensor::C64(tensor) => tag!(tensor),
+}
+
+/// Mark a freshly allocated output with the CPU domain its pool belongs to.
+fn tag_fresh_typed<T: TensorScalar>(output: &mut Tensor, domain: CpuDomainId) {
+    if let Some(tensor) = output.as_typed_mut::<T>() {
+        tensor.set_cpu_affinity(Some(domain));
     }
 }
 
@@ -1145,6 +1152,9 @@ fn external_engine_resolution(
     }
 }
 
+// The error type carries a `DType`, which grew when the tag gained an
+// externally defined variant; boxing it per call would cost more than it saves.
+#[allow(clippy::result_large_err)]
 fn external_domain_backend_kind(
     op: &'static str,
     domains: &[ExternalCpuDomain],
@@ -1354,6 +1364,9 @@ impl CpuBackend {
         })
     }
 
+    // The error type carries a `DType`, which grew when the tag gained an
+    // externally defined variant; boxing it per call would cost more than it saves.
+    #[allow(clippy::result_large_err)]
     /// Create one coordinator from caller-owned CPU domain executors.
     ///
     /// The descriptors are moved into prebuilt engines. `Auto` selects
@@ -1430,6 +1443,9 @@ impl CpuBackend {
         )
     }
 
+    // The error type carries a `DType`, which grew when the tag gained an
+    // externally defined variant; boxing it per call would cost more than it saves.
+    #[allow(clippy::result_large_err)]
     /// Create one coordinator from caller-owned CPU domain executors and an
     /// immutable provider bundle.
     ///
@@ -1504,6 +1520,9 @@ impl CpuBackend {
         )
     }
 
+    // The error type carries a `DType`, which grew when the tag gained an
+    // externally defined variant; boxing it per call would cost more than it saves.
+    #[allow(clippy::result_large_err)]
     fn from_external_managed_domains_with_topology_arbiter_and_provider_bundle(
         default_domain: CpuDomainId,
         domains: impl IntoIterator<Item = ExternalCpuDomain>,
@@ -1647,6 +1666,9 @@ impl CpuBackend {
         Ok(backend)
     }
 
+    // The error type carries a `DType`, which grew when the tag gained an
+    // externally defined variant; boxing it per call would cost more than it saves.
+    #[allow(clippy::result_large_err)]
     /// Create a CPU backend using the selected compiled provider.
     ///
     /// # Examples
@@ -1676,6 +1698,9 @@ impl CpuBackend {
         .map_err(|error| CpuBackendError::placement(op, error))
     }
 
+    // The error type carries a `DType`, which grew when the tag gained an
+    // externally defined variant; boxing it per call would cost more than it saves.
+    #[allow(clippy::result_large_err)]
     /// Try to create a CPU backend using `RAYON_NUM_THREADS`.
     ///
     /// # Examples
@@ -1760,6 +1785,9 @@ impl CpuBackend {
         Self::compatibility(ctx, max_retained_capacity_bytes, kind)
     }
 
+    // The error type carries a `DType`, which grew when the tag gained an
+    // externally defined variant; boxing it per call would cost more than it saves.
+    #[allow(clippy::result_large_err)]
     /// Create a CPU backend with a custom thread count.
     ///
     /// # Examples
@@ -1788,6 +1816,9 @@ impl CpuBackend {
         .map_err(|error| CpuBackendError::placement(op, error))
     }
 
+    // The error type carries a `DType`, which grew when the tag gained an
+    // externally defined variant; boxing it per call would cost more than it saves.
+    #[allow(clippy::result_large_err)]
     /// Create a CPU backend with a custom thread count and provider.
     ///
     /// # Examples
@@ -3684,22 +3715,40 @@ impl BackendSessionHost for CpuBackend {
     }
 }
 
+/// Hand a tensor back to the pool's typed free list, keyed by its runtime tag.
+///
+/// A caller-owned payload owns no pooled storage, and a tag the conversion cannot recover
+/// behaves the same way rather than guessing. Every reclaim entry point shares this one table.
+pub(crate) fn reclaim_tensor(buffers: &mut BufferPool, tensor: Tensor) {
+    match tensor.dtype() {
+        DType::F32 => reclaim_tensor_typed::<f32>(buffers, tensor),
+        DType::F64 => reclaim_tensor_typed::<f64>(buffers, tensor),
+        DType::I32 => reclaim_tensor_typed::<i32>(buffers, tensor),
+        DType::I64 => reclaim_tensor_typed::<i64>(buffers, tensor),
+        DType::Bool => reclaim_tensor_typed::<bool>(buffers, tensor),
+        DType::C32 => reclaim_tensor_typed::<Complex32>(buffers, tensor),
+        DType::C64 => reclaim_tensor_typed::<Complex64>(buffers, tensor),
+        DType::External(_) => {}
+    }
+}
+
+/// Hand the typed tensor back to the pool when the tag table reached the matching tag.
+fn reclaim_tensor_typed<T: tenferro_cpu_basic::PoolScalar>(
+    buffers: &mut BufferPool,
+    tensor: Tensor,
+) {
+    if let Ok(typed) = tensor.into_typed::<T>() {
+        reclaim_typed(buffers, typed);
+    }
+}
+
 impl TensorBuffer for CpuBackend {
     fn reclaim_buffer(&mut self, tensor: Tensor) {
         let admission = self.infallible_execution_admission();
         let permit = admission.permit();
         with_execution_owner(permit.owner(), || {
             self.with_execution_resources(permit, |resources| {
-                let buffers = &mut resources.buffers;
-                match tensor {
-                    Tensor::F32(t) => reclaim_typed(buffers, t),
-                    Tensor::F64(t) => reclaim_typed(buffers, t),
-                    Tensor::I32(t) => reclaim_typed(buffers, t),
-                    Tensor::I64(t) => reclaim_typed(buffers, t),
-                    Tensor::Bool(t) => reclaim_typed(buffers, t),
-                    Tensor::C32(t) => reclaim_typed(buffers, t),
-                    Tensor::C64(t) => reclaim_typed(buffers, t),
-                }
+                reclaim_tensor(&mut resources.buffers, tensor);
             })
         })
     }

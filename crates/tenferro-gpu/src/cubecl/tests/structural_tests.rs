@@ -139,10 +139,10 @@ fn test_cuda_read_entry_points_accept_borrowed_views() {
     let device = upload(&gpu, &host);
     let device_scalar = upload(&gpu, &scalar);
 
-    let Tensor::F64(device_typed) = &device else {
+    let Some(device_typed) = device.as_typed::<f64>() else {
         unreachable!("f64 upload preserves the dtype")
     };
-    let Tensor::F64(scalar_typed) = &device_scalar else {
+    let Some(scalar_typed) = device_scalar.as_typed::<f64>() else {
         unreachable!("f64 upload preserves the dtype")
     };
     let view = || TensorRead::from_view(TensorView::F64(device_typed.as_view()));
@@ -622,6 +622,9 @@ fn assert_cast_tensor_equal(actual: &Tensor, expected: &Tensor) {
             (a.re == e.re || (a.re.is_nan() && e.re.is_nan()))
                 && (a.im == e.im || (a.im.is_nan() && e.im.is_nan()))
         }),
+        // Test fixtures cover the preset dtypes; an externally defined scalar has no
+        // fixture and would change what this test asserts.
+        DType::External(_) => unreachable!("test fixtures cover the preset dtypes"),
     }
 }
 
@@ -631,7 +634,7 @@ fn cuda_to_contiguous_keeps_tensor_on_cuda() {
     let mut gpu = gpu_backend();
     let input = tensor_i32(vec![2, 3], vec![1, 2, 3, 4, 5, 6]);
     let gpu_input = upload(&gpu, &input);
-    let Tensor::I32(gpu_tensor) = gpu_input else {
+    let Some(gpu_tensor) = gpu_input.as_typed::<i32>() else {
         panic!("expected i32 tensor");
     };
     let view = gpu_tensor.as_view().transpose_view([1, 0]).unwrap();
@@ -648,7 +651,7 @@ fn cuda_to_contiguous_keeps_tensor_on_cuda() {
             .map(|device| &device.kind),
         Some(tenferro_tensor::DeviceKind::Gpu(GpuBackendKind::Cuda))
     ));
-    let actual = download(&gpu, &Tensor::I32(compact));
+    let actual = download(&gpu, &Tensor::from_typed::<i32>(compact));
     assert_eq!(actual.as_slice::<i32>().unwrap(), &[1, 3, 5, 2, 4, 6]);
 }
 
@@ -679,7 +682,7 @@ fn cuda_cutensor_permutation_transpose_and_to_contiguous_match_cpu() {
     assert_eq!(cache_after_second.entries, 1);
     assert_eq!(cache_after_second.hits, 1);
 
-    let Tensor::F64(gpu_tensor) = &gpu_input else {
+    let Some(gpu_tensor) = gpu_input.as_typed::<f64>() else {
         panic!("expected f64 tensor");
     };
     let materialize_view = gpu_tensor.as_view().transpose_view([1, 0]).unwrap();
@@ -713,7 +716,7 @@ fn cuda_cutensor_permutation_transpose_and_to_contiguous_match_cpu() {
         .transpose_view([1, 0])
         .unwrap();
     let compact = gpu.to_contiguous(&view).unwrap();
-    let actual = download(&gpu, &Tensor::F64(compact));
+    let actual = download(&gpu, &Tensor::from_typed::<f64>(compact));
     assert_eq!(
         actual.as_slice::<f64>().unwrap(),
         &[2.0, 4.0, 6.0, 1.0, 3.0, 5.0]
@@ -725,7 +728,7 @@ fn cuda_cutensor_permutation_transpose_and_to_contiguous_match_cpu() {
 fn cuda_runtime_materialization_is_object_safe_and_stays_on_device() {
     let mut gpu = gpu_backend();
     let gpu_input = upload(&gpu, &tensor_i32(vec![2, 3], vec![1, 2, 3, 4, 5, 6]));
-    let Tensor::I32(input) = &gpu_input else {
+    let Some(input) = gpu_input.as_typed::<i32>() else {
         panic!("expected i32 tensor");
     };
     let view = input.as_view().transpose_view([1, 0]).unwrap();
@@ -747,7 +750,7 @@ fn cuda_runtime_copy_is_object_safe_and_updates_strided_destination() {
     let mut gpu = gpu_backend();
     let gpu_src = upload(&gpu, &tensor_i32(vec![2, 2], vec![1, 2, 3, 4]));
     let mut gpu_dst = upload(&gpu, &tensor_i32(vec![2, 2], vec![0, 0, 0, 0]));
-    let Tensor::I32(dst) = &mut gpu_dst else {
+    let Some(dst) = gpu_dst.as_typed_mut::<i32>() else {
         panic!("expected i32 destination");
     };
     let dst_view = dst.as_view_mut().transpose_view([1, 0]).unwrap();
@@ -774,7 +777,7 @@ fn cuda_runtime_copy_into_cutensor_matches_destination_reuse_and_survives_source
     let mut gpu_dst = upload(&gpu, &tensor_f64(vec![2, 3], vec![0.0; 6]));
     let replacement = upload(&gpu, &tensor_f64(vec![3, 2], vec![9.0; 6]));
 
-    let Tensor::F64(dst) = &mut gpu_dst else {
+    let Some(dst) = gpu_dst.as_typed_mut::<f64>() else {
         panic!("expected f64 destination");
     };
     let dst_view = dst.as_view_mut().transpose_view([1, 0]).unwrap();
@@ -790,10 +793,10 @@ fn cuda_runtime_copy_into_cutensor_matches_destination_reuse_and_survives_source
         &[1.0, 4.0, 2.0, 5.0, 3.0, 6.0]
     );
 
-    let Tensor::F64(replacement) = &replacement else {
+    let Some(replacement) = replacement.as_typed::<f64>() else {
         panic!("expected f64 replacement");
     };
-    let Tensor::F64(src_mut) = &mut gpu_src else {
+    let Some(src_mut) = gpu_src.as_typed_mut::<f64>() else {
         panic!("expected mutable f64 source");
     };
     gpu.copy_into(&replacement.as_view(), &mut src_mut.as_view_mut())
@@ -830,7 +833,7 @@ fn cuda_runtime_copy_into_cutensor_matches_complex_destination_reuse() {
         &gpu,
         &tensor_c32(vec![2, 2, 2], vec![Complex32::new(0.0, 0.0); 8]),
     );
-    let Tensor::C32(dst) = &mut gpu_dst else {
+    let Some(dst) = gpu_dst.as_typed_mut::<Complex32>() else {
         panic!("expected complex destination");
     };
     let dst_view = dst.as_view_mut().transpose_view([1, 0, 2]).unwrap();
@@ -875,7 +878,7 @@ fn cuda_runtime_copy_into_1522_a100_destination_reuse_benchmark() {
         permutation: &[usize],
     ) -> Vec<f64> {
         let mut run = || {
-            let Tensor::F64(dst) = destination else {
+            let Some(dst) = destination.as_typed_mut::<f64>() else {
                 panic!("expected f64 destination");
             };
             let view = dst.as_view_mut().transpose_view(permutation).unwrap();
@@ -927,7 +930,7 @@ fn cuda_runtime_copy_rejects_noncompact_source_with_erased_operation_name() {
     let mut gpu = gpu_backend();
     let gpu_src = upload(&gpu, &tensor_i32(vec![2, 2], vec![1, 2, 3, 4]));
     let mut gpu_dst = upload(&gpu, &tensor_i32(vec![2, 2], vec![0, 0, 0, 0]));
-    let Tensor::I32(src) = &gpu_src else {
+    let Some(src) = gpu_src.as_typed::<i32>() else {
         panic!("expected i32 source");
     };
     let src_view = src.as_view().transpose_view([1, 0]).unwrap();
@@ -989,7 +992,7 @@ fn cuda_to_contiguous_preserves_negative_stride_view() {
     let mut gpu = gpu_backend();
     let input = tensor_i32(vec![4], vec![1, 2, 3, 4]);
     let gpu_input = upload(&gpu, &input);
-    let Tensor::I32(gpu_tensor) = gpu_input else {
+    let Some(gpu_tensor) = gpu_input.as_typed::<i32>() else {
         panic!("expected i32 tensor");
     };
     let view = gpu_tensor
@@ -999,7 +1002,7 @@ fn cuda_to_contiguous_preserves_negative_stride_view() {
 
     let compact = gpu.to_contiguous(&view).unwrap();
 
-    let actual = download(&gpu, &Tensor::I32(compact));
+    let actual = download(&gpu, &Tensor::from_typed::<i32>(compact));
     assert_eq!(actual.as_slice::<i32>().unwrap(), &[4, 3, 2, 1]);
 }
 
@@ -1009,7 +1012,7 @@ fn cuda_to_contiguous_rank_zero_scalar_stays_on_cuda() {
     let mut gpu = gpu_backend();
     let input = tensor_i32(vec![], vec![7]);
     let gpu_input = upload(&gpu, &input);
-    let Tensor::I32(gpu_tensor) = gpu_input else {
+    let Some(gpu_tensor) = gpu_input.as_typed::<i32>() else {
         panic!("expected i32 tensor");
     };
 
@@ -1017,7 +1020,7 @@ fn cuda_to_contiguous_rank_zero_scalar_stays_on_cuda() {
 
     assert_eq!(compact.shape(), &[] as &[usize]);
     assert_eq!(compact.placement().memory_kind, MemoryKind::Device);
-    let actual = download(&gpu, &Tensor::I32(compact));
+    let actual = download(&gpu, &Tensor::from_typed::<i32>(compact));
     assert_eq!(actual.as_slice::<i32>().unwrap(), &[7]);
 }
 
@@ -1027,7 +1030,7 @@ fn cuda_to_contiguous_empty_view_stays_on_cuda() {
     let mut gpu = gpu_backend();
     let input = tensor_i32(vec![0, 3], vec![]);
     let gpu_input = upload(&gpu, &input);
-    let Tensor::I32(gpu_tensor) = gpu_input else {
+    let Some(gpu_tensor) = gpu_input.as_typed::<i32>() else {
         panic!("expected i32 tensor");
     };
 
@@ -1035,7 +1038,7 @@ fn cuda_to_contiguous_empty_view_stays_on_cuda() {
 
     assert_eq!(compact.shape(), &[0, 3]);
     assert_eq!(compact.placement().memory_kind, MemoryKind::Device);
-    let actual = download(&gpu, &Tensor::I32(compact));
+    let actual = download(&gpu, &Tensor::from_typed::<i32>(compact));
     assert_eq!(actual.shape(), &[0, 3]);
     assert_eq!(actual.as_slice::<i32>().unwrap(), &[] as &[i32]);
 }
@@ -1046,7 +1049,7 @@ fn cuda_to_contiguous_bool_view_returns_unsupported_dtype() {
     let mut gpu = gpu_backend();
     let input = tensor_bool(vec![2], vec![true, false]);
     let gpu_input = upload(&gpu, &input);
-    let Tensor::Bool(gpu_tensor) = gpu_input else {
+    let Some(gpu_tensor) = gpu_input.as_typed::<bool>() else {
         panic!("expected bool tensor");
     };
 
@@ -1077,7 +1080,7 @@ fn cuda_copy_into_host_source_returns_upload_hint() {
     let src = TypedTensor::<i32>::from_vec_col_major(vec![2], vec![1, 2]).unwrap();
     let dst_host = tensor_i32(vec![2], vec![0, 0]);
     let mut gpu_dst = upload(&gpu, &dst_host);
-    let Tensor::I32(dst) = &mut gpu_dst else {
+    let Some(dst) = gpu_dst.as_typed_mut::<i32>() else {
         panic!("expected i32 tensor");
     };
 
@@ -1098,7 +1101,7 @@ fn cuda_copy_into_host_destination_returns_upload_hint() {
     let mut gpu = gpu_backend();
     let src_host = tensor_i32(vec![2], vec![1, 2]);
     let gpu_src = upload(&gpu, &src_host);
-    let Tensor::I32(src) = &gpu_src else {
+    let Some(src) = gpu_src.as_typed::<i32>() else {
         panic!("expected i32 tensor");
     };
     let mut dst = TypedTensor::<i32>::from_vec_col_major(vec![2], vec![0, 0]).unwrap();
@@ -1123,7 +1126,7 @@ fn cuda_copy_into_updates_strided_view_on_cuda() {
     let mut gpu_dst = upload(&gpu, &dst_host);
     let gpu_src = upload(&gpu, &src_host);
 
-    let (Tensor::I32(dst), Tensor::I32(src)) = (&mut gpu_dst, &gpu_src) else {
+    let (Some(dst), Some(src)) = (gpu_dst.as_typed_mut::<i32>(), gpu_src.as_typed::<i32>()) else {
         panic!("expected i32 tensors");
     };
     let mut dst_view = dst.as_view_mut().transpose_view([1, 0]).unwrap();
@@ -1142,7 +1145,7 @@ fn cuda_copy_into_rejects_arbitrary_stride_source_without_materializing() {
     let dst_host = tensor_i32(vec![2, 2], vec![0, 0, 0, 0]);
     let gpu_src = upload(&gpu, &src_host);
     let mut gpu_dst = upload(&gpu, &dst_host);
-    let (Tensor::I32(src), Tensor::I32(dst)) = (&gpu_src, &mut gpu_dst) else {
+    let (Some(src), Some(dst)) = (gpu_src.as_typed::<i32>(), gpu_dst.as_typed_mut::<i32>()) else {
         panic!("expected i32 tensors");
     };
     let src_view = src.as_view().transpose_view([1, 0]).unwrap();
@@ -1173,7 +1176,7 @@ fn cuda_copy_into_rejects_source_on_wrong_device() {
     let dst_host = tensor_i32(vec![2], vec![0, 0]);
     let gpu_src = upload(&gpu, &src_host);
     let mut gpu_dst = upload(&gpu, &dst_host);
-    let (Tensor::I32(src), Tensor::I32(dst)) = (gpu_src, &mut gpu_dst) else {
+    let (Ok(src), Some(dst)) = (gpu_src.into_typed::<i32>(), gpu_dst.as_typed_mut::<i32>()) else {
         panic!("expected i32 tensors");
     };
     let wrong_src = with_cuda_ordinal(src, 1);
@@ -1199,7 +1202,7 @@ fn cuda_copy_into_rejects_destination_on_wrong_device() {
     let dst_host = tensor_i32(vec![2], vec![0, 0]);
     let gpu_src = upload(&gpu, &src_host);
     let gpu_dst = upload(&gpu, &dst_host);
-    let (Tensor::I32(src), Tensor::I32(dst)) = (&gpu_src, gpu_dst) else {
+    let (Some(src), Ok(dst)) = (gpu_src.as_typed::<i32>(), gpu_dst.into_typed::<i32>()) else {
         panic!("expected i32 tensors");
     };
     let mut wrong_dst = with_cuda_ordinal(dst, 1);
@@ -1223,7 +1226,7 @@ fn cuda_copy_into_reports_typed_shape_mismatch() {
     let mut gpu = gpu_backend();
     let gpu_src = upload(&gpu, &tensor_i32(vec![2], vec![1, 2]));
     let mut gpu_dst = upload(&gpu, &tensor_i32(vec![3], vec![0, 0, 0]));
-    let (Tensor::I32(src), Tensor::I32(dst)) = (&gpu_src, &mut gpu_dst) else {
+    let (Some(src), Some(dst)) = (gpu_src.as_typed::<i32>(), gpu_dst.as_typed_mut::<i32>()) else {
         panic!("expected i32 tensors");
     };
 

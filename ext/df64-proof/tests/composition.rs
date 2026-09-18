@@ -1,0 +1,260 @@
+use tenferro_cpu::{scalar_binary_into, scalar_fold, AddOp};
+use tenferro_df64_proof::{Df64, Df64Add};
+use tenferro_tensor_core::HostTensor;
+use tenferro_tensor_core::{ad_admission, AdAdmissionError, ScalarArithmetic, ScalarDomain};
+
+fn df64(values: &[f64]) -> HostTensor<Df64> {
+    HostTensor::from_vec_col_major(
+        vec![values.len()],
+        values.iter().copied().map(Df64::from_f64).collect(),
+    )
+    .expect("shape matches data")
+}
+
+#[test]
+fn external_scalar_sum_retains_low_order_information() {
+    let low = 2f64.powi(-80);
+    let values = df64(&[1.0, low]);
+
+    let total =
+        scalar_fold::<Df64, Df64Add>("sum", &values, Df64::zero()).expect("reduction succeeds");
+    let difference = total - Df64::from_f64(1.0);
+
+    assert_eq!(difference, Df64 { hi: low, lo: 0.0 });
+    assert_eq!(difference.narrow_to_f64(), low);
+
+    // Control: the same computation in f64 loses the low component entirely.
+    let f64_total = (1.0_f64 + low) - 1.0;
+    assert_eq!(f64_total, 0.0);
+}
+
+#[test]
+fn external_scalar_runs_through_the_elementwise_entry_point() {
+    let lhs = df64(&[1.0, 3.0]);
+    let rhs = df64(&[2.0, 4.0]);
+    let mut destination = df64(&[0.0, 0.0]);
+
+    scalar_binary_into::<Df64, Df64Add>("add", &mut destination, &lhs, &rhs)
+        .expect("addition succeeds");
+
+    assert_eq!(
+        destination.as_slice(),
+        &[Df64::from_f64(3.0), Df64::from_f64(7.0)]
+    );
+}
+
+#[test]
+fn external_scalar_keeps_low_order_information_through_the_elementwise_entry_point() {
+    let low = 2f64.powi(-80);
+    let lhs = df64(&[1.0]);
+    let rhs = df64(&[low]);
+    let mut destination = df64(&[0.0]);
+
+    scalar_binary_into::<Df64, Df64Add>("add", &mut destination, &lhs, &rhs)
+        .expect("addition succeeds");
+
+    assert_eq!(destination.as_slice()[0], Df64 { hi: 1.0, lo: low });
+    assert_eq!(destination.as_slice()[0].narrow_to_f64(), 1.0);
+}
+
+#[test]
+fn preset_scalar_f64_uses_the_same_entry_points() {
+    let lhs = HostTensor::from_vec_col_major(vec![2], vec![1.0_f64, 2.0]).unwrap();
+    let rhs = HostTensor::from_vec_col_major(vec![2], vec![10.0_f64, 20.0]).unwrap();
+    let mut destination = HostTensor::from_vec_col_major(vec![2], vec![0.0_f64, 0.0]).unwrap();
+
+    scalar_binary_into::<f64, AddOp>("add", &mut destination, &lhs, &rhs).unwrap();
+    assert_eq!(destination.as_slice(), &[11.0, 22.0]);
+
+    let total = scalar_fold::<f64, AddOp>("sum", &destination, 0.0_f64).unwrap();
+    assert_eq!(total, 33.0);
+}
+
+#[test]
+fn mutable_borrow_through_the_public_tensor_type_reaches_the_entry_point() {
+    let mut values = df64(&[1.0, 2.0]);
+    for element in values.as_mut_slice() {
+        *element = *element + Df64::from_f64(1.0);
+    }
+
+    let lhs = df64(&[10.0, 10.0]);
+    let mut destination = df64(&[0.0, 0.0]);
+    scalar_binary_into::<Df64, Df64Add>("add", &mut destination, &values, &lhs).unwrap();
+
+    assert_eq!(
+        destination.as_slice(),
+        &[Df64::from_f64(12.0), Df64::from_f64(13.0)]
+    );
+}
+
+#[test]
+fn mismatched_shapes_are_rejected_without_touching_the_destination() {
+    let lhs = df64(&[1.0, 2.0]);
+    let rhs = df64(&[1.0]);
+    let mut destination = df64(&[9.0, 9.0]);
+
+    let error = scalar_binary_into::<Df64, Df64Add>("add", &mut destination, &lhs, &rhs)
+        .expect_err("shape mismatch is rejected");
+
+    assert_eq!(
+        error.kind(),
+        tenferro_tensor_core::ErrorKind::Validation(
+            tenferro_tensor_core::ValidationKind::ShapeMismatch
+        )
+    );
+    assert_eq!(
+        destination.as_slice(),
+        &[Df64::from_f64(9.0), Df64::from_f64(9.0)]
+    );
+}
+
+#[test]
+fn empty_input_folds_to_the_initial_value() {
+    let empty: HostTensor<Df64> = HostTensor::from_vec_col_major(vec![0], Vec::new()).unwrap();
+    let total = scalar_fold::<Df64, Df64Add>("sum", &empty, Df64::zero()).unwrap();
+    assert_eq!(total, Df64::zero());
+}
+
+#[test]
+fn external_scalar_implements_the_public_contract() {
+    assert_eq!(
+        <Df64 as tenferro_tensor_core::Scalar>::DOMAIN,
+        ScalarDomain::Field
+    );
+    assert_eq!(
+        Df64::scalar_add(Df64::from_f64(1.0), Df64::from_f64(2.0)),
+        Df64::from_f64(3.0)
+    );
+    assert_eq!(
+        Df64::scalar_mul(Df64::from_f64(3.0), Df64::from_f64(4.0)),
+        Df64::from_f64(12.0)
+    );
+    assert_eq!(
+        Df64::scalar_sub(Df64::from_f64(3.0), Df64::from_f64(4.0)),
+        Df64::from_f64(-1.0)
+    );
+    assert_eq!(Df64::scalar_one(), Df64::from_f64(1.0));
+    assert_eq!(Df64::scalar_zero(), Df64::zero());
+}
+
+#[test]
+fn external_scalar_reaches_the_shared_admission_query() {
+    // First order is admissible in principle but has no rules yet: the shared
+    // query rejects it explicitly instead of producing a zero gradient.
+    assert_eq!(
+        ad_admission::<Df64>(1),
+        Err(AdAdmissionError::AdRuleUnavailable)
+    );
+    assert_eq!(
+        ad_admission::<Df64>(2),
+        Err(AdAdmissionError::UnsupportedAdOrder { order: 2 })
+    );
+    // A non-field preset scalar is rejected on the same query.
+    assert_eq!(
+        ad_admission::<bool>(1),
+        Err(AdAdmissionError::NonFieldScalar)
+    );
+}
+
+#[test]
+fn external_crate_defines_its_own_scalar_set() {
+    use tenferro_df64_proof::{ExtendedSet, ExtendedTag};
+    use tenferro_tensor_core::{HostTensor, ScalarSet};
+
+    let value = ExtendedSet::Df64(
+        HostTensor::from_vec_col_major(vec![1], vec![Df64::from_f64(2.0)]).unwrap(),
+    );
+    assert_eq!(value.tag(), ExtendedTag::Df64);
+    assert_eq!(
+        <ExtendedSet as ScalarSet>::TAGS,
+        &[ExtendedTag::F64, ExtendedTag::Df64]
+    );
+
+    // The external set and the set tenferro ships coexist without sharing a type.
+    assert_eq!(
+        <tenferro_tensor_core::DefaultScalars as ScalarSet>::TAGS.len(),
+        7
+    );
+    assert_eq!(<ExtendedSet as ScalarSet>::TAGS.len(), 2);
+}
+
+#[test]
+fn erased_values_carry_a_scalar_tenferro_does_not_define() {
+    use tenferro_tensor_core::{ErasedHostTensor, HostTensor};
+
+    let low = 2f64.powi(-80);
+    let mut values = [
+        ErasedHostTensor::new(HostTensor::from_vec_col_major(vec![2], vec![1.0_f64, low]).unwrap()),
+        ErasedHostTensor::new(
+            HostTensor::from_vec_col_major(vec![1], vec![Df64::from_f64(2.0)]).unwrap(),
+        ),
+    ];
+
+    // Identity is the actual Rust type, not a tag and not a size.
+    assert!(values[0].is::<f64>());
+    assert!(!values[0].is::<Df64>());
+    assert!(values[1].is::<Df64>());
+    assert!(!values[1].is::<f64>());
+
+    // The external member reaches the shared numerical body through the same
+    // erased container tenferro's own scalars use.
+    let typed = values[1].downcast_ref::<Df64>().unwrap();
+    let total = scalar_fold::<Df64, Df64Add>("sum", typed, Df64::zero()).unwrap();
+    assert_eq!(total, Df64::from_f64(2.0));
+
+    // A mismatched recovery returns nothing rather than reinterpreting bytes.
+    assert!(values[0].downcast_ref::<Df64>().is_none());
+    let owned =
+        ErasedHostTensor::new(HostTensor::from_vec_col_major(vec![1], vec![1.0_f64]).unwrap());
+    assert!(owned.into_typed::<Df64>().is_none());
+
+    // Mutation through the erased value reaches the stored tensor.
+    values[1].downcast_mut::<Df64>().unwrap().as_mut_slice()[0] = Df64::from_f64(5.0);
+    assert_eq!(
+        values[1].downcast_ref::<Df64>().unwrap().as_slice(),
+        &[Df64::from_f64(5.0)]
+    );
+}
+
+#[test]
+fn two_sets_containing_the_same_scalar_share_one_numerical_instantiation() {
+    use tenferro_df64_proof::ExtendedSet;
+    use tenferro_tensor_core::{DefaultScalars, HostTensor};
+
+    // Extract the same f64 scalar from two different sets.
+    let from_default = match DefaultScalars::F64(
+        HostTensor::from_vec_col_major(vec![2], vec![1.0_f64, 2.0]).unwrap(),
+    ) {
+        DefaultScalars::F64(tensor) => tensor,
+        _ => unreachable!(),
+    };
+    let from_extended = match ExtendedSet::F64(
+        HostTensor::from_vec_col_major(vec![2], vec![10.0_f64, 20.0]).unwrap(),
+    ) {
+        ExtendedSet::F64(tensor) => tensor,
+        _ => unreachable!(),
+    };
+
+    let mut out = HostTensor::from_vec_col_major(vec![2], vec![0.0_f64, 0.0]).unwrap();
+    scalar_binary_into::<f64, AddOp>("add", &mut out, &from_default, &from_extended).unwrap();
+
+    assert_eq!(out.as_slice(), &[11.0, 22.0]);
+}
+
+#[test]
+fn an_external_set_promotes_within_its_own_lattice() {
+    use tenferro_df64_proof::{ExtendedSet, ExtendedTag};
+    use tenferro_tensor_core::ScalarSet;
+
+    // Double precision and the external scalar are both real floats, so the
+    // higher-ranked member represents both. tenferro's own lattice is untouched.
+    assert_eq!(
+        <ExtendedSet as ScalarSet>::promote(ExtendedTag::F64, ExtendedTag::Df64),
+        ExtendedTag::Df64
+    );
+    assert_eq!(
+        <ExtendedSet as ScalarSet>::promote(ExtendedTag::F64, ExtendedTag::F64),
+        ExtendedTag::F64
+    );
+    assert_eq!(ExtendedTag::Df64.spec().level, 1);
+}

@@ -14,6 +14,30 @@ use tenferro_tensor::{
     TypedTensor, TypedTensorView, TypedTensorViewMut,
 };
 
+/// The Rust scalar type behind a preset variant name a macro received.
+macro_rules! preset_scalar {
+    (F32) => {
+        f32
+    };
+    (F64) => {
+        f64
+    };
+    (I32) => {
+        i32
+    };
+    (I64) => {
+        i64
+    };
+    (Bool) => {
+        bool
+    };
+    (C32) => {
+        num_complex::Complex32
+    };
+    (C64) => {
+        num_complex::Complex64
+    };
+}
 #[cfg(test)]
 use super::tensor_from_array;
 #[cfg(test)]
@@ -79,45 +103,114 @@ fn validate_permutation(op: &'static str, perm: &[usize], rank: usize) -> crate:
 }
 
 macro_rules! dispatch_tensor_unary_result {
-    ($input:expr, |$tensor:ident| $body:expr) => {
-        match $input {
-            Tensor::F32($tensor) => Ok(Tensor::F32($body?)),
-            Tensor::F64($tensor) => Ok(Tensor::F64($body?)),
-            Tensor::I32($tensor) => Ok(Tensor::I32($body?)),
-            Tensor::I64($tensor) => Ok(Tensor::I64($body?)),
-            Tensor::Bool($tensor) => Ok(Tensor::Bool($body?)),
-            Tensor::C32($tensor) => Ok(Tensor::C32($body?)),
-            Tensor::C64($tensor) => Ok(Tensor::C64($body?)),
+    ($input:expr, |$tensor:ident| $body:expr) => {{
+        let input = $input;
+        match input.dtype() {
+            DType::F32 => {
+                let $tensor = structural_operand::<f32>(input)?;
+                Ok(Tensor::from_typed::<f32>($body?))
+            }
+            DType::F64 => {
+                let $tensor = structural_operand::<f64>(input)?;
+                Ok(Tensor::from_typed::<f64>($body?))
+            }
+            DType::I32 => {
+                let $tensor = structural_operand::<i32>(input)?;
+                Ok(Tensor::from_typed::<i32>($body?))
+            }
+            DType::I64 => {
+                let $tensor = structural_operand::<i64>(input)?;
+                Ok(Tensor::from_typed::<i64>($body?))
+            }
+            DType::Bool => {
+                let $tensor = structural_operand::<bool>(input)?;
+                Ok(Tensor::from_typed::<bool>($body?))
+            }
+            DType::C32 => {
+                let $tensor = structural_operand::<Complex32>(input)?;
+                Ok(Tensor::from_typed::<Complex32>($body?))
+            }
+            DType::C64 => {
+                let $tensor = structural_operand::<Complex64>(input)?;
+                Ok(Tensor::from_typed::<Complex64>($body?))
+            }
+            // A caller-owned payload has no CPU implementation for this operation.
+            DType::External(type_id) => Err(crate::Error::unsupported_dtype(
+                "structural",
+                DType::External(type_id),
+                "an externally defined payload is not supported by this CPU operation",
+            )),
         }
-    };
+    }};
+}
+
+/// The typed tensor behind `input`, or the refusal this dispatch reports for one.
+fn structural_operand<T: tenferro_tensor::TensorScalar>(
+    input: &Tensor,
+) -> crate::Result<&TypedTensor<T>> {
+    input.as_typed::<T>().ok_or_else(|| {
+        crate::Error::unsupported_dtype(
+            "structural",
+            input.dtype(),
+            "an externally defined payload is not supported by this CPU operation",
+        )
+    })
 }
 
 macro_rules! dispatch_tensor_view_unary_result {
     ($input:expr, |$view:ident| $body:expr) => {
         match $input {
-            TensorView::F32($view) => Ok(Tensor::F32($body?)),
-            TensorView::F64($view) => Ok(Tensor::F64($body?)),
-            TensorView::I32($view) => Ok(Tensor::I32($body?)),
-            TensorView::I64($view) => Ok(Tensor::I64($body?)),
-            TensorView::Bool($view) => Ok(Tensor::Bool($body?)),
-            TensorView::C32($view) => Ok(Tensor::C32($body?)),
-            TensorView::C64($view) => Ok(Tensor::C64($body?)),
+            TensorView::F32($view) => Ok(Tensor::from_typed::<f32>($body?)),
+            TensorView::F64($view) => Ok(Tensor::from_typed::<f64>($body?)),
+            TensorView::I32($view) => Ok(Tensor::from_typed::<i32>($body?)),
+            TensorView::I64($view) => Ok(Tensor::from_typed::<i64>($body?)),
+            TensorView::Bool($view) => Ok(Tensor::from_typed::<bool>($body?)),
+            TensorView::C32($view) => Ok(Tensor::from_typed::<tenferro_tensor::Complex32>($body?)),
+            TensorView::C64($view) => Ok(Tensor::from_typed::<tenferro_tensor::Complex64>($body?)),
         }
     };
 }
 
 macro_rules! dispatch_tensor_unary_with_bool_special_result {
-    ($input:expr, |$tensor:ident| $body:expr, bool |$bool_tensor:ident| $bool_body:expr) => {
-        match $input {
-            Tensor::F32($tensor) => Ok(Tensor::F32($body?)),
-            Tensor::F64($tensor) => Ok(Tensor::F64($body?)),
-            Tensor::I32($tensor) => Ok(Tensor::I32($body?)),
-            Tensor::I64($tensor) => Ok(Tensor::I64($body?)),
-            Tensor::Bool($bool_tensor) => Ok(Tensor::Bool($bool_body?)),
-            Tensor::C32($tensor) => Ok(Tensor::C32($body?)),
-            Tensor::C64($tensor) => Ok(Tensor::C64($body?)),
+    ($input:expr, |$tensor:ident| $body:expr, bool |$bool_tensor:ident| $bool_body:expr) => {{
+        let input = $input;
+        match input.dtype() {
+            DType::Bool => {
+                let $bool_tensor = structural_operand::<bool>(input)?;
+                Ok(Tensor::from_typed::<bool>($bool_body?))
+            }
+            DType::F32 => {
+                let $tensor = structural_operand::<f32>(input)?;
+                Ok(Tensor::from_typed::<f32>($body?))
+            }
+            DType::F64 => {
+                let $tensor = structural_operand::<f64>(input)?;
+                Ok(Tensor::from_typed::<f64>($body?))
+            }
+            DType::I32 => {
+                let $tensor = structural_operand::<i32>(input)?;
+                Ok(Tensor::from_typed::<i32>($body?))
+            }
+            DType::I64 => {
+                let $tensor = structural_operand::<i64>(input)?;
+                Ok(Tensor::from_typed::<i64>($body?))
+            }
+            DType::C32 => {
+                let $tensor = structural_operand::<Complex32>(input)?;
+                Ok(Tensor::from_typed::<Complex32>($body?))
+            }
+            DType::C64 => {
+                let $tensor = structural_operand::<Complex64>(input)?;
+                Ok(Tensor::from_typed::<Complex64>($body?))
+            }
+            // A caller-owned payload has no CPU implementation for this operation.
+            DType::External(type_id) => Err(crate::Error::unsupported_dtype(
+                "structural",
+                DType::External(type_id),
+                "an externally defined payload is not supported by this CPU operation",
+            )),
         }
-    };
+    }};
 }
 
 fn host_view<'a, T: Copy + TensorScalar>(
@@ -506,107 +599,190 @@ pub(crate) fn cast_with_pool(
 ) -> crate::Result<Tensor> {
     macro_rules! converted {
         ($variant:ident, $tensor:expr, $map:expr) => {
-            Ok(Tensor::$variant(typed_convert_with_pool(
-                buffers, $tensor, $map,
-            )?))
+            Ok(Tensor::from_typed::<preset_scalar!($variant)>(
+                typed_convert_with_pool(buffers, $tensor, $map)?,
+            ))
         };
     }
 
-    match (input, to) {
-        (Tensor::F32(t), DType::F32) => Ok(Tensor::F32(t.duplicate()?)),
-        (Tensor::F32(t), DType::F64) => converted!(F64, t, |x| x as f64),
-        (Tensor::F32(t), DType::I32) => {
-            validate_real_values_cast_to_i32(t, |x| x as f64)?;
-            converted!(I32, t, |x| x as i32)
+    match (input.dtype(), to) {
+        (DType::F32, DType::F32) => Ok(Tensor::from_typed::<f32>(
+            cast_operand::<f32>(input)?.duplicate()?,
+        )),
+        (DType::F32, DType::F64) => converted!(F64, cast_operand::<f32>(input)?, |x| x as f64),
+        (DType::F32, DType::I32) => {
+            validate_real_values_cast_to_i32(cast_operand::<f32>(input)?, |x| x as f64)?;
+            converted!(I32, cast_operand::<f32>(input)?, |x| x as i32)
         }
-        (Tensor::F32(t), DType::I64) => {
-            validate_real_values_cast_to_i64(t, |x| x as f64)?;
-            converted!(I64, t, |x| x as i64)
+        (DType::F32, DType::I64) => {
+            validate_real_values_cast_to_i64(cast_operand::<f32>(input)?, |x| x as f64)?;
+            converted!(I64, cast_operand::<f32>(input)?, |x| x as i64)
         }
-        (Tensor::F32(t), DType::Bool) => converted!(Bool, t, |x| x != 0.0),
-        (Tensor::F32(t), DType::C32) => converted!(C32, t, |x| Complex32::new(x, 0.0)),
-        (Tensor::F32(t), DType::C64) => {
-            converted!(C64, t, |x| Complex64::new(x as f64, 0.0))
+        (DType::F32, DType::Bool) => converted!(Bool, cast_operand::<f32>(input)?, |x| x != 0.0),
+        (DType::F32, DType::C32) => {
+            converted!(C32, cast_operand::<f32>(input)?, |x| Complex32::new(x, 0.0))
         }
-        (Tensor::F64(t), DType::F32) => converted!(F32, t, |x| x as f32),
-        (Tensor::F64(t), DType::F64) => Ok(Tensor::F64(t.duplicate()?)),
-        (Tensor::F64(t), DType::I32) => {
-            validate_real_values_cast_to_i32(t, |x| x)?;
-            converted!(I32, t, |x| x as i32)
+        (DType::F32, DType::C64) => {
+            converted!(C64, cast_operand::<f32>(input)?, |x| Complex64::new(
+                x as f64, 0.0
+            ))
         }
-        (Tensor::F64(t), DType::I64) => {
-            validate_real_values_cast_to_i64(t, |x| x)?;
-            converted!(I64, t, |x| x as i64)
+        (DType::F64, DType::F32) => converted!(F32, cast_operand::<f64>(input)?, |x| x as f32),
+        (DType::F64, DType::F64) => Ok(Tensor::from_typed::<f64>(
+            cast_operand::<f64>(input)?.duplicate()?,
+        )),
+        (DType::F64, DType::I32) => {
+            validate_real_values_cast_to_i32(cast_operand::<f64>(input)?, |x| x)?;
+            converted!(I32, cast_operand::<f64>(input)?, |x| x as i32)
         }
-        (Tensor::F64(t), DType::Bool) => converted!(Bool, t, |x| x != 0.0),
-        (Tensor::F64(t), DType::C32) => {
-            converted!(C32, t, |x| Complex32::new(x as f32, 0.0))
+        (DType::F64, DType::I64) => {
+            validate_real_values_cast_to_i64(cast_operand::<f64>(input)?, |x| x)?;
+            converted!(I64, cast_operand::<f64>(input)?, |x| x as i64)
         }
-        (Tensor::F64(t), DType::C64) => converted!(C64, t, |x| Complex64::new(x, 0.0)),
-        (Tensor::I32(t), DType::F32) => converted!(F32, t, |x| x as f32),
-        (Tensor::I32(t), DType::F64) => converted!(F64, t, |x| x as f64),
-        (Tensor::I32(t), DType::I32) => Ok(Tensor::I32(t.duplicate()?)),
-        (Tensor::I32(t), DType::I64) => converted!(I64, t, |x| x as i64),
-        (Tensor::I32(t), DType::Bool) => converted!(Bool, t, |x| x != 0),
-        (Tensor::I32(t), DType::C32) => {
-            converted!(C32, t, |x| Complex32::new(x as f32, 0.0))
+        (DType::F64, DType::Bool) => converted!(Bool, cast_operand::<f64>(input)?, |x| x != 0.0),
+        (DType::F64, DType::C32) => {
+            converted!(C32, cast_operand::<f64>(input)?, |x| Complex32::new(
+                x as f32, 0.0
+            ))
         }
-        (Tensor::I32(t), DType::C64) => {
-            converted!(C64, t, |x| Complex64::new(x as f64, 0.0))
+        (DType::F64, DType::C64) => {
+            converted!(C64, cast_operand::<f64>(input)?, |x| Complex64::new(x, 0.0))
         }
-        (Tensor::I64(t), DType::F32) => converted!(F32, t, |x| x as f32),
-        (Tensor::I64(t), DType::F64) => converted!(F64, t, |x| x as f64),
-        (Tensor::I64(t), DType::I32) => converted!(I32, t, |x| x as i32),
-        (Tensor::I64(t), DType::I64) => Ok(Tensor::I64(t.duplicate()?)),
-        (Tensor::I64(t), DType::Bool) => converted!(Bool, t, |x| x != 0),
-        (Tensor::I64(t), DType::C32) => {
-            converted!(C32, t, |x| Complex32::new(x as f32, 0.0))
+        (DType::I32, DType::F32) => converted!(F32, cast_operand::<i32>(input)?, |x| x as f32),
+        (DType::I32, DType::F64) => converted!(F64, cast_operand::<i32>(input)?, |x| x as f64),
+        (DType::I32, DType::I32) => Ok(Tensor::from_typed::<i32>(
+            cast_operand::<i32>(input)?.duplicate()?,
+        )),
+        (DType::I32, DType::I64) => converted!(I64, cast_operand::<i32>(input)?, |x| x as i64),
+        (DType::I32, DType::Bool) => converted!(Bool, cast_operand::<i32>(input)?, |x| x != 0),
+        (DType::I32, DType::C32) => {
+            converted!(C32, cast_operand::<i32>(input)?, |x| Complex32::new(
+                x as f32, 0.0
+            ))
         }
-        (Tensor::I64(t), DType::C64) => {
-            converted!(C64, t, |x| Complex64::new(x as f64, 0.0))
+        (DType::I32, DType::C64) => {
+            converted!(C64, cast_operand::<i32>(input)?, |x| Complex64::new(
+                x as f64, 0.0
+            ))
         }
-        (Tensor::Bool(t), DType::F32) => converted!(F32, t, |x| if x { 1.0 } else { 0.0 }),
-        (Tensor::Bool(t), DType::F64) => converted!(F64, t, |x| if x { 1.0 } else { 0.0 }),
-        (Tensor::Bool(t), DType::I32) => converted!(I32, t, |x| if x { 1 } else { 0 }),
-        (Tensor::Bool(t), DType::I64) => converted!(I64, t, |x| if x { 1 } else { 0 }),
-        (Tensor::Bool(t), DType::Bool) => Ok(Tensor::Bool(t.duplicate()?)),
-        (Tensor::Bool(t), DType::C32) => {
-            converted!(C32, t, |x| Complex32::new(if x { 1.0 } else { 0.0 }, 0.0))
+        (DType::I64, DType::F32) => converted!(F32, cast_operand::<i64>(input)?, |x| x as f32),
+        (DType::I64, DType::F64) => converted!(F64, cast_operand::<i64>(input)?, |x| x as f64),
+        (DType::I64, DType::I32) => converted!(I32, cast_operand::<i64>(input)?, |x| x as i32),
+        (DType::I64, DType::I64) => Ok(Tensor::from_typed::<i64>(
+            cast_operand::<i64>(input)?.duplicate()?,
+        )),
+        (DType::I64, DType::Bool) => converted!(Bool, cast_operand::<i64>(input)?, |x| x != 0),
+        (DType::I64, DType::C32) => {
+            converted!(C32, cast_operand::<i64>(input)?, |x| Complex32::new(
+                x as f32, 0.0
+            ))
         }
-        (Tensor::Bool(t), DType::C64) => {
-            converted!(C64, t, |x| Complex64::new(if x { 1.0 } else { 0.0 }, 0.0))
+        (DType::I64, DType::C64) => {
+            converted!(C64, cast_operand::<i64>(input)?, |x| Complex64::new(
+                x as f64, 0.0
+            ))
         }
-        (Tensor::C32(t), DType::F32) => converted!(F32, t, |z| z.re),
-        (Tensor::C32(t), DType::F64) => converted!(F64, t, |z| z.re as f64),
-        (Tensor::C32(t), DType::I32) => {
-            validate_real_values_cast_to_i32(t, |z| z.re as f64)?;
-            converted!(I32, t, |z| z.re as i32)
+        (DType::Bool, DType::F32) => converted!(F32, cast_operand::<bool>(input)?, |x| if x {
+            1.0
+        } else {
+            0.0
+        }),
+        (DType::Bool, DType::F64) => converted!(F64, cast_operand::<bool>(input)?, |x| if x {
+            1.0
+        } else {
+            0.0
+        }),
+        (DType::Bool, DType::I32) => {
+            converted!(I32, cast_operand::<bool>(input)?, |x| if x { 1 } else { 0 })
         }
-        (Tensor::C32(t), DType::I64) => {
-            validate_real_values_cast_to_i64(t, |z| z.re as f64)?;
-            converted!(I64, t, |z| z.re as i64)
+        (DType::Bool, DType::I64) => {
+            converted!(I64, cast_operand::<bool>(input)?, |x| if x { 1 } else { 0 })
         }
-        (Tensor::C32(t), DType::Bool) => converted!(Bool, t, |z| z.re != 0.0 || z.im != 0.0),
-        (Tensor::C32(t), DType::C32) => Ok(Tensor::C32(t.duplicate()?)),
-        (Tensor::C32(t), DType::C64) => {
-            converted!(C64, t, |z| Complex64::new(z.re as f64, z.im as f64))
+        (DType::Bool, DType::Bool) => Ok(Tensor::from_typed::<bool>(
+            cast_operand::<bool>(input)?.duplicate()?,
+        )),
+        (DType::Bool, DType::C32) => {
+            converted!(C32, cast_operand::<bool>(input)?, |x| Complex32::new(
+                if x { 1.0 } else { 0.0 },
+                0.0
+            ))
         }
-        (Tensor::C64(t), DType::F32) => converted!(F32, t, |z| z.re as f32),
-        (Tensor::C64(t), DType::F64) => converted!(F64, t, |z| z.re),
-        (Tensor::C64(t), DType::I32) => {
-            validate_real_values_cast_to_i32(t, |z| z.re)?;
-            converted!(I32, t, |z| z.re as i32)
+        (DType::Bool, DType::C64) => {
+            converted!(C64, cast_operand::<bool>(input)?, |x| Complex64::new(
+                if x { 1.0 } else { 0.0 },
+                0.0
+            ))
         }
-        (Tensor::C64(t), DType::I64) => {
-            validate_real_values_cast_to_i64(t, |z| z.re)?;
-            converted!(I64, t, |z| z.re as i64)
+        (DType::C32, DType::F32) => converted!(F32, cast_operand::<Complex32>(input)?, |z| z.re),
+        (DType::C32, DType::F64) => {
+            converted!(F64, cast_operand::<Complex32>(input)?, |z| z.re as f64)
         }
-        (Tensor::C64(t), DType::Bool) => converted!(Bool, t, |z| z.re != 0.0 || z.im != 0.0),
-        (Tensor::C64(t), DType::C32) => {
-            converted!(C32, t, |z| Complex32::new(z.re as f32, z.im as f32))
+        (DType::C32, DType::I32) => {
+            validate_real_values_cast_to_i32(cast_operand::<Complex32>(input)?, |z| z.re as f64)?;
+            converted!(I32, cast_operand::<Complex32>(input)?, |z| z.re as i32)
         }
-        (Tensor::C64(t), DType::C64) => Ok(Tensor::C64(t.duplicate()?)),
+        (DType::C32, DType::I64) => {
+            validate_real_values_cast_to_i64(cast_operand::<Complex32>(input)?, |z| z.re as f64)?;
+            converted!(I64, cast_operand::<Complex32>(input)?, |z| z.re as i64)
+        }
+        (DType::C32, DType::Bool) => converted!(Bool, cast_operand::<Complex32>(input)?, |z| z.re
+            != 0.0
+            || z.im != 0.0),
+        (DType::C32, DType::C32) => Ok(Tensor::from_typed::<Complex32>(
+            cast_operand::<Complex32>(input)?.duplicate()?,
+        )),
+        (DType::C32, DType::C64) => {
+            converted!(C64, cast_operand::<Complex32>(input)?, |z| Complex64::new(
+                z.re as f64,
+                z.im as f64
+            ))
+        }
+        (DType::C64, DType::F32) => {
+            converted!(F32, cast_operand::<Complex64>(input)?, |z| z.re as f32)
+        }
+        (DType::C64, DType::F64) => converted!(F64, cast_operand::<Complex64>(input)?, |z| z.re),
+        (DType::C64, DType::I32) => {
+            validate_real_values_cast_to_i32(cast_operand::<Complex64>(input)?, |z| z.re)?;
+            converted!(I32, cast_operand::<Complex64>(input)?, |z| z.re as i32)
+        }
+        (DType::C64, DType::I64) => {
+            validate_real_values_cast_to_i64(cast_operand::<Complex64>(input)?, |z| z.re)?;
+            converted!(I64, cast_operand::<Complex64>(input)?, |z| z.re as i64)
+        }
+        (DType::C64, DType::Bool) => converted!(Bool, cast_operand::<Complex64>(input)?, |z| z.re
+            != 0.0
+            || z.im != 0.0),
+        (DType::C64, DType::C32) => {
+            converted!(C32, cast_operand::<Complex64>(input)?, |z| Complex32::new(
+                z.re as f32,
+                z.im as f32
+            ))
+        }
+        (DType::C64, DType::C64) => Ok(Tensor::from_typed::<Complex64>(
+            cast_operand::<Complex64>(input)?.duplicate()?,
+        )),
+        // An externally defined destination has no conversion table here, so the
+        // conversion rejects it explicitly rather than guessing a representation.
+        (_, DType::External(_)) => Err(crate::Error::dtype_mismatch("convert", input.dtype(), to)),
+        // A caller-owned payload has no conversion table here, so the conversion
+        // rejects it instead of guessing a representation.
+        (DType::External(_), _) => Err(crate::Error::dtype_mismatch("convert", input.dtype(), to)),
     }
+}
+/// The typed tensor behind `input`, or the refusal a pair outside this table reports.
+///
+/// Callers reach this from a match on `input.dtype()`, so `None` means the tag and the runtime dtype
+/// disagree rather than a caller mistake.
+fn cast_operand<T: tenferro_tensor::TensorScalar>(
+    input: &Tensor,
+) -> crate::Result<&TypedTensor<T>> {
+    input.as_typed::<T>().ok_or_else(|| {
+        crate::Error::unsupported_dtype(
+            "convert",
+            input.dtype(),
+            "the cast table does not cover this dtype",
+        )
+    })
 }
 
 fn validate_real_values_cast_to_i32<S: Copy + TensorScalar>(

@@ -99,6 +99,7 @@ impl SemanticProgramBuilder {
     /// Returns [`ProgramBuildError::TooManyValues`] if the builder cannot
     /// represent another value slot.
     pub fn input(&mut self, spec: ProgramInputSpec) -> Result<ProgramValue, ProgramBuildError> {
+        require_scalar_identity(spec.metadata(), "a program input")?;
         let slot = self.next_value_slot()?;
         let value = ProgramValue::new(slot, self.owner);
         self.values.push(spec.metadata().clone());
@@ -254,6 +255,7 @@ impl SemanticProgramBuilder {
     ) -> Result<Box<[ProgramValue]>, ProgramBuildError> {
         self.validate_inputs(inputs)?;
         validate_arity(op.input_count(), inputs.len())?;
+        reject_core_external_dtype(&op)?;
         let output_count = op.output_count();
         let metadata = self.infer_core_metadata(&op, inputs)?;
         validate_output_count(output_count, metadata.len())?;
@@ -481,6 +483,22 @@ impl SemanticProgramBuilder {
         aliases: Vec<Alias>,
         shape_guards: Vec<ShapeGuard>,
     ) -> Result<Box<[ProgramValue]>, ProgramBuildError> {
+        // An extension that carries an externally defined scalar declares its
+        // canonical identity, which every external value of this operation carries
+        // so the program can be given a reproducible identity.
+        let identity = match &op {
+            SemanticOp::Core(_) => None,
+            SemanticOp::Extension(extension) => extension.scalar_identity(),
+        };
+        let mut metadata = metadata;
+        for value in &mut metadata {
+            if matches!(value.dtype(), tenferro_tensor::DType::External(_)) {
+                if let Some(identity) = identity {
+                    *value = value.clone().with_scalar_identity(identity);
+                }
+            }
+            require_scalar_identity(value, "an operation output")?;
+        }
         let provenance = match &op {
             SemanticOp::Core(_) => SemanticProvenance::builder(None),
             SemanticOp::Extension(extension) => {
@@ -519,6 +537,67 @@ fn core_output_uses_local_shape_coordinates(op: &CoreSemanticOp) -> bool {
             | CoreSemanticOp::BroadcastInDim { .. }
             | CoreSemanticOp::GatherDynamicSliceSizes { .. }
     )
+}
+
+/// Reject a core operation that names an externally defined scalar.
+///
+/// A core operation has no contribution-owned kernel for a scalar tenferro does not
+/// declare, so no core operation may name one. Carrying an external scalar through a
+/// program is what an extension operation is for.
+pub(super) fn reject_core_external_dtype(op: &CoreSemanticOp) -> Result<(), ProgramBuildError> {
+    let external = match op {
+        CoreSemanticOp::Convert { from, to } => [Some(*from), Some(*to)]
+            .into_iter()
+            .flatten()
+            .find(|dtype| matches!(dtype, tenferro_tensor::DType::External(_))),
+        CoreSemanticOp::Constant { dtype, .. } => {
+            matches!(dtype, tenferro_tensor::DType::External(_)).then_some(*dtype)
+        }
+        _ => None,
+    };
+    match external {
+        Some(dtype) => Err(ProgramBuildError::ExternalScalarWithoutIdentity {
+            dtype,
+            site: "a core operation",
+        }),
+        None => Ok(()),
+    }
+}
+
+/// Reject an external scalar the program cannot give a canonical identity.
+///
+/// A semantic program's identity must be reproducible across processes, and an
+/// externally defined tag is a process-local `TypeId`. A program that carries one
+/// declares the stable name, and a value without one is rejected explicitly instead
+/// of being encoded as an unstable code.
+pub(super) fn require_scalar_identity(
+    metadata: &ProgramValueMetadata,
+    site: &'static str,
+) -> Result<(), ProgramBuildError> {
+    match (metadata.dtype(), metadata.scalar_identity()) {
+        (tenferro_tensor::DType::External(_), None) => {
+            Err(ProgramBuildError::ExternalScalarWithoutIdentity {
+                dtype: metadata.dtype(),
+                site,
+            })
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Keep the canonical identity a source program declared on a rebuilt value.
+///
+/// An imported value's metadata is resolved against the destination program, so it is
+/// rebuilt from a dtype and shape; the declared identity of an externally defined
+/// scalar is not derivable from those and has to be carried across.
+fn keep_scalar_identity(
+    identity: &Option<&'static str>,
+    metadata: ProgramValueMetadata,
+) -> ProgramValueMetadata {
+    match identity {
+        Some(identity) => metadata.with_scalar_identity(identity),
+        None => metadata,
+    }
 }
 
 fn validate_arity(expected: usize, actual: usize) -> Result<(), ProgramBuildError> {
@@ -772,6 +851,7 @@ impl ImportTransaction {
                 continue;
             }
             let metadata = source.values[input.slot as usize].clone();
+            let identity = metadata.scalar_identity();
             let metadata = ProgramValueMetadata::from_extents(
                 metadata.dtype(),
                 metadata
@@ -780,6 +860,7 @@ impl ImportTransaction {
                     .map(&resolve_extent)
                     .collect::<Vec<_>>(),
             );
+            let metadata = keep_scalar_identity(&identity, metadata);
             let imported = transaction.next_value(destination.values.len(), destination.owner)?;
             transaction.inputs.push(imported);
             transaction
@@ -814,11 +895,14 @@ impl ImportTransaction {
                 let imported =
                     transaction.next_value(destination.values.len(), destination.owner)?;
                 let meta = source.values[output.slot as usize].clone();
+                let identity = meta.scalar_identity();
                 let resolved = ProgramValueMetadata::from_extents(
                     meta.dtype(),
                     meta.shape().iter().map(&resolve_extent).collect::<Vec<_>>(),
                 );
-                transaction.values.push(resolved);
+                transaction
+                    .values
+                    .push(keep_scalar_identity(&identity, resolved));
                 remap[output.slot as usize] = Some(imported);
                 outputs.push(imported);
             }

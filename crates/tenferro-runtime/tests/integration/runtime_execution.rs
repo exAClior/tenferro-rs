@@ -37,6 +37,30 @@ use tenferro_tensor::{
     StorageBuffer, Tensor, TensorRead, TensorView, TypedTensor,
 };
 
+/// The Rust scalar type behind a preset variant name a macro received.
+macro_rules! preset_scalar {
+    (F32) => {
+        f32
+    };
+    (F64) => {
+        f64
+    };
+    (I32) => {
+        i32
+    };
+    (I64) => {
+        i64
+    };
+    (Bool) => {
+        bool
+    };
+    (C32) => {
+        num_complex::Complex32
+    };
+    (C64) => {
+        num_complex::Complex64
+    };
+}
 const CPU_ENGINE_ID: &str = "tenferro-cpu.default.v1";
 const CPU_HARDWARE_CLASS_ID: &str = "tenferro-cpu.host.v1";
 const CPU_STORAGE_CLASS_ID: &str = "tenferro-cpu.host.v1";
@@ -376,7 +400,7 @@ fn test_cpu_input_signature(
 }
 
 fn tensor_f64_values(tensor: &Tensor) -> tenferro_tensor::Result<Vec<f64>> {
-    let Tensor::F64(tensor) = tensor else {
+    let Some(tensor) = tensor.as_typed::<f64>() else {
         return Err(tenferro_tensor::Error::dtype_mismatch(
             "tensor_f64_values",
             DType::F64,
@@ -429,7 +453,7 @@ impl SharedTensorAllocationDomain for TestAllocationDomain {
                     StorageBuffer::Backend(Box::new(buffer)),
                     Placement::default(),
                 )
-                .map(Tensor::$variant)
+                .map(Tensor::from_typed::<preset_scalar!($variant)>)
             }};
         }
         match dtype {
@@ -440,6 +464,9 @@ impl SharedTensorAllocationDomain for TestAllocationDomain {
             DType::Bool => allocate!(bool, Bool),
             DType::C32 => allocate!(num_complex::Complex32, C32),
             DType::C64 => allocate!(num_complex::Complex64, C64),
+            // Test fixtures cover the preset dtypes; an externally defined scalar has no
+            // fixture and would change what this test asserts.
+            DType::External(_) => unreachable!("test fixtures cover the preset dtypes"),
         }
     }
 }
@@ -608,7 +635,7 @@ impl TransferProvider for RecordingTransferProvider {
                 let mut output =
                     domain.allocate(request.input().dtype(), request.input().shape())?;
                 let source_values = read_f64_values(request.input().clone())?;
-                let Tensor::F64(destination) = &mut output else {
+                let Some(destination) = output.as_typed_mut::<f64>() else {
                     return Err(Error::Internal(
                         "materializing test transfer currently expects f64 tensors".into(),
                     ));
@@ -690,7 +717,7 @@ impl TransferProvider for FaultyTransferProvider {
             FaultyTransferOutput::Shape => Ok(Tensor::from_vec_col_major(vec![1], vec![1.0_f64])?),
             FaultyTransferOutput::Placement => {
                 let mut tensor = duplicate_f64_read(request.input().clone())?;
-                let Tensor::F64(tensor) = &mut tensor else {
+                let Some(tensor) = tensor.as_typed_mut::<f64>() else {
                     return Err(Error::Internal(
                         "test transfer expected an f64 tensor".into(),
                     ));
@@ -1060,7 +1087,7 @@ impl PreparedOperationExecutor for CountingPreparedOperation {
                 Error::Internal("allocation-domain test executor requires a shared domain".into())
             })?;
             let mut output = domain.allocate(DType::F64, &shape)?;
-            let Tensor::F64(destination) = &mut output else {
+            let Some(destination) = output.as_typed_mut::<f64>() else {
                 return Err(Error::Internal(
                     "allocation-domain test executor produced a non-f64 tensor".into(),
                 ));
@@ -1326,7 +1353,7 @@ fn execute_published_route_with_targets(
     .expect("published route extension has one output");
     let program = GraphCompiler::new().compile_with_input_specs(&y, &[(&x, DType::F64, &[2])])?;
     let mut input = TestAllocationDomain(fixture.source_domain).allocate(DType::F64, &[2])?;
-    if let Tensor::F64(input) = &mut input {
+    if let Some(input) = input.as_typed_mut::<f64>() {
         if input.backend_buffer_mut().is_some() {
             input
                 .backend_buffer_mut()

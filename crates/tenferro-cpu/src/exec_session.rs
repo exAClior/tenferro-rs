@@ -1,5 +1,6 @@
 use crate::buffer_pool::{BufferPool, PoolScalar};
 use crate::{Tensor, TensorRead, TensorValue, TensorWrite};
+use num_complex::{Complex32, Complex64};
 use std::any::TypeId;
 use std::sync::Arc;
 use tenferro_tensor::backend::{BackendSession, ElementwiseFusionPlan, GroupedGemmConfig};
@@ -12,9 +13,7 @@ use tenferro_tensor::{
     TensorDot, TensorElementwise, TensorFusion, TensorIndexing, TensorReduction, TensorStructural,
 };
 
-use super::backend::{
-    elementwise_read_into_fallback_with_pool, reclaim_typed, tag_fresh_output, FreshCpuOutput,
-};
+use super::backend::{elementwise_read_into_fallback_with_pool, tag_fresh_output, FreshCpuOutput};
 use super::indexed_plan_cache::IndexedPlanCache;
 use super::provider::{CpuExecutionContext, CpuOperationEntry, CpuProviderOutcome};
 use super::CpuProviderBundle;
@@ -58,10 +57,14 @@ fn allocate_dot_output(
     shape: Vec<usize>,
 ) -> crate::Result<Tensor> {
     match dtype {
-        DType::F32 => pooled_zero_tensor(buffers, shape).map(Tensor::F32),
-        DType::F64 => pooled_zero_tensor(buffers, shape).map(Tensor::F64),
-        DType::C32 => pooled_zero_tensor(buffers, shape).map(Tensor::C32),
-        DType::C64 => pooled_zero_tensor(buffers, shape).map(Tensor::C64),
+        DType::F32 => pooled_zero_tensor(buffers, shape).map(Tensor::from_typed::<f32>),
+        DType::F64 => pooled_zero_tensor(buffers, shape).map(Tensor::from_typed::<f64>),
+        DType::C32 => {
+            pooled_zero_tensor(buffers, shape).map(Tensor::from_typed::<tenferro_tensor::Complex32>)
+        }
+        DType::C64 => {
+            pooled_zero_tensor(buffers, shape).map(Tensor::from_typed::<tenferro_tensor::Complex64>)
+        }
         dtype => Err(crate::Error::unsupported_dtype(
             "dot_general",
             dtype,
@@ -81,15 +84,69 @@ fn flatten_compact_read(
             )))
         };
     }
+    /// The typed tensor behind a read adapter's tensor, or the refusal this adapter reports.
+    fn read_refusal(tensor: &Tensor) -> crate::Error {
+        crate::Error::unsupported_dtype(
+            "flatten_compact_read",
+            tensor.dtype(),
+            "an externally defined payload is not a compact runtime read",
+        )
+    }
 
     match input {
-        TensorRead::Tensor(Tensor::F32(tensor)) => flatten!(F32, tensor.as_view()),
-        TensorRead::Tensor(Tensor::F64(tensor)) => flatten!(F64, tensor.as_view()),
-        TensorRead::Tensor(Tensor::I32(tensor)) => flatten!(I32, tensor.as_view()),
-        TensorRead::Tensor(Tensor::I64(tensor)) => flatten!(I64, tensor.as_view()),
-        TensorRead::Tensor(Tensor::Bool(tensor)) => flatten!(Bool, tensor.as_view()),
-        TensorRead::Tensor(Tensor::C32(tensor)) => flatten!(C32, tensor.as_view()),
-        TensorRead::Tensor(Tensor::C64(tensor)) => flatten!(C64, tensor.as_view()),
+        TensorRead::Tensor(tensor) => match tensor.dtype() {
+            DType::F32 => flatten!(
+                F32,
+                tensor
+                    .as_typed::<f32>()
+                    .ok_or_else(|| read_refusal(tensor))?
+                    .as_view()
+            ),
+            DType::F64 => flatten!(
+                F64,
+                tensor
+                    .as_typed::<f64>()
+                    .ok_or_else(|| read_refusal(tensor))?
+                    .as_view()
+            ),
+            DType::I32 => flatten!(
+                I32,
+                tensor
+                    .as_typed::<i32>()
+                    .ok_or_else(|| read_refusal(tensor))?
+                    .as_view()
+            ),
+            DType::I64 => flatten!(
+                I64,
+                tensor
+                    .as_typed::<i64>()
+                    .ok_or_else(|| read_refusal(tensor))?
+                    .as_view()
+            ),
+            DType::Bool => flatten!(
+                Bool,
+                tensor
+                    .as_typed::<bool>()
+                    .ok_or_else(|| read_refusal(tensor))?
+                    .as_view()
+            ),
+            DType::C32 => flatten!(
+                C32,
+                tensor
+                    .as_typed::<Complex32>()
+                    .ok_or_else(|| read_refusal(tensor))?
+                    .as_view()
+            ),
+            DType::C64 => flatten!(
+                C64,
+                tensor
+                    .as_typed::<Complex64>()
+                    .ok_or_else(|| read_refusal(tensor))?
+                    .as_view()
+            ),
+            // A caller-owned payload has no compact runtime read.
+            DType::External(_) => Err(read_refusal(tensor)),
+        },
         TensorRead::View(TensorView::F32(view)) => flatten!(F32, view),
         TensorRead::View(TensorView::F64(view)) => flatten!(F64, view),
         TensorRead::View(TensorView::I32(view)) => flatten!(I32, view),
@@ -834,15 +891,7 @@ impl TensorIndexing for CpuExecSession<'_> {
 
 impl TensorBuffer for CpuExecSession<'_> {
     fn reclaim_buffer(&mut self, tensor: Tensor) {
-        match tensor {
-            Tensor::F32(t) => reclaim_typed(self.buffers, t),
-            Tensor::F64(t) => reclaim_typed(self.buffers, t),
-            Tensor::I32(t) => reclaim_typed(self.buffers, t),
-            Tensor::I64(t) => reclaim_typed(self.buffers, t),
-            Tensor::Bool(t) => reclaim_typed(self.buffers, t),
-            Tensor::C32(t) => reclaim_typed(self.buffers, t),
-            Tensor::C64(t) => reclaim_typed(self.buffers, t),
-        }
+        crate::backend::reclaim_tensor(self.buffers, tensor);
     }
 }
 

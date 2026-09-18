@@ -125,7 +125,13 @@ impl TensorElementwise for DefaultReadBackend {
         let direct = out.dtype() == DType::F64
             && out.as_read().backend_family().is_none()
             && inputs.iter().all(|input| {
-                matches!(input, TensorRead::Tensor(Tensor::F64(tensor)) if tensor.backend_buffer().is_none())
+                matches!(input, TensorRead::Tensor(tensor)
+                    if tensor.dtype() == DType::F64
+                        && tensor
+                            .as_typed::<f64>()
+                            .expect("the dtype guard selects f64")
+                            .backend_buffer()
+                            .is_none())
             });
         if !direct {
             return crate::backend::elementwise_read_into_via_allocating_ops(self, op, inputs, out);
@@ -360,8 +366,8 @@ impl TensorStructural for DefaultReadBackend {
             return Err(crate::Error::validation(
                 "copy_read_into",
                 crate::ValidationError::DTypeMismatch {
-                    expected: crate::core_dtype(dst.dtype()),
-                    actual: crate::core_dtype(src.dtype()),
+                    expected: dst.dtype(),
+                    actual: src.dtype(),
                 },
             ));
         }
@@ -377,22 +383,39 @@ impl TensorStructural for DefaultReadBackend {
         }
         let src = self.to_contiguous_read(src)?;
         macro_rules! copy_typed {
-            ($src:expr, $dst:expr, $variant:ident) => {
+            ($src:expr, $dst:expr, $variant:ident, $ty:ty) => {
                 match $dst {
-                    TensorWrite::Tensor(dst) => *dst = Tensor::$variant($src),
+                    TensorWrite::Tensor(dst) => *dst = Tensor::from_typed::<$ty>($src),
                     TensorWrite::View(TensorViewMut::$variant(dst)) => copy_host_view(&$src, dst)?,
                     _ => unreachable!("dtype was validated before copy dispatch"),
                 }
             };
         }
-        match src {
-            Tensor::F32(src) => copy_typed!(src, dst, F32),
-            Tensor::F64(src) => copy_typed!(src, dst, F64),
-            Tensor::I32(src) => copy_typed!(src, dst, I32),
-            Tensor::I64(src) => copy_typed!(src, dst, I64),
-            Tensor::Bool(src) => copy_typed!(src, dst, Bool),
-            Tensor::C32(src) => copy_typed!(src, dst, C32),
-            Tensor::C64(src) => copy_typed!(src, dst, C64),
+        match src.dtype() {
+            crate::DType::F32 => copy_typed!(src.into_typed::<f32>()?, dst, F32, f32),
+            crate::DType::F64 => copy_typed!(src.into_typed::<f64>()?, dst, F64, f64),
+            crate::DType::I32 => copy_typed!(src.into_typed::<i32>()?, dst, I32, i32),
+            crate::DType::I64 => copy_typed!(src.into_typed::<i64>()?, dst, I64, i64),
+            crate::DType::Bool => copy_typed!(src.into_typed::<bool>()?, dst, Bool, bool),
+            crate::DType::C32 => {
+                copy_typed!(
+                    src.into_typed::<num_complex::Complex32>()?,
+                    dst,
+                    C32,
+                    num_complex::Complex32
+                )
+            }
+            crate::DType::C64 => {
+                copy_typed!(
+                    src.into_typed::<num_complex::Complex64>()?,
+                    dst,
+                    C64,
+                    num_complex::Complex64
+                )
+            }
+            // The fixture covers the preset dtypes; an externally defined payload
+            // has no fixture and would change what this test asserts.
+            _ => unreachable!("the fixture covers the preset dtypes"),
         }
         Ok(())
     }
@@ -682,11 +705,12 @@ fn blas1_axpby_rejects_backend_alias_before_execution() {
         device: None,
         cpu_affinity: None,
     };
-    let x = Tensor::F64(
+    let x = Tensor::from_typed::<f64>(
         TypedTensor::from_buffer_col_major(vec![2], storage(), placement.clone()).unwrap(),
     );
-    let mut y =
-        Tensor::F64(TypedTensor::from_buffer_col_major(vec![2], storage(), placement).unwrap());
+    let mut y = Tensor::from_typed::<f64>(
+        TypedTensor::from_buffer_col_major(vec![2], storage(), placement).unwrap(),
+    );
 
     let error = validate_axpby_read_into_accum(
         ContractionScalar::F64(1.0),
@@ -940,7 +964,7 @@ fn elementwise_into_accepts_independent_backend_destinations() {
         }),
         cpu_affinity: None,
     };
-    let lhs = Tensor::F64(
+    let lhs = Tensor::from_typed::<f64>(
         TypedTensor::from_buffer_col_major(
             vec![1],
             crate::StorageBuffer::Backend(Box::new(
@@ -951,7 +975,7 @@ fn elementwise_into_accepts_independent_backend_destinations() {
         .unwrap(),
     );
     let rhs = Tensor::from_vec_col_major(vec![1], vec![2.0_f64]).unwrap();
-    let mut out = Tensor::F64(
+    let mut out = Tensor::from_typed::<f64>(
         TypedTensor::from_buffer_col_major(
             vec![1],
             crate::StorageBuffer::Backend(Box::new(
@@ -1056,8 +1080,8 @@ fn dot_general_read_into_dtype_error_reports_output_as_actual() {
             source: crate::ValidationError::DTypeMismatch { expected, actual },
             ..
         } => {
-            assert_eq!(expected, crate::core_dtype(DType::F32));
-            assert_eq!(actual, crate::core_dtype(DType::F64));
+            assert_eq!(expected, DType::F32);
+            assert_eq!(actual, DType::F64);
         }
         other => panic!("expected dtype mismatch, got {other:?}"),
     }
@@ -1828,7 +1852,7 @@ fn structural_runtime_materialization_rejects_views_by_default() {
 
 #[test]
 fn structural_runtime_materialization_rejects_foreign_backend_storage_by_default() {
-    let input = Tensor::F64(
+    let input = Tensor::from_typed::<f64>(
         TypedTensor::from_buffer_col_major(
             vec![2],
             crate::StorageBuffer::Backend(Box::new(

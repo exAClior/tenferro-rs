@@ -31,7 +31,7 @@ fn canonical_owner_view_and_mutable_view_surface_is_available() {
             &[1.0, 3.0, 1.0, 1.0]
         );
     }
-    let owner = Tensor::F64(
+    let owner = Tensor::from_typed::<f64>(
         TypedTensor::<f64>::from_vec_col_major(vec![2, 2], vec![1.0; 4]).expect("dynamic owner"),
     );
     let read = TensorRead::from_tensor(&owner);
@@ -41,10 +41,12 @@ fn canonical_owner_view_and_mutable_view_surface_is_available() {
 #[test]
 fn dtype_erased_views_have_explicit_duplicate_boundaries() {
     let tensor = Tensor::from_vec_col_major([2], vec![2.0_f64, 4.0]).expect("tensor");
-    let view = match &tensor {
-        Tensor::F64(tensor) => TensorView::F64(tensor.as_view()),
-        _ => unreachable!("constructed an f64 tensor"),
-    };
+    let view = TensorView::F64(
+        tensor
+            .as_typed::<f64>()
+            .expect("constructed an f64 tensor")
+            .as_view(),
+    );
     let duplicate = view.duplicate().expect("duplicate");
     assert_eq!(duplicate.as_slice::<f64>().expect("data"), &[2.0, 4.0]);
 }

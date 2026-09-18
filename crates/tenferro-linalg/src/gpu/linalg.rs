@@ -172,6 +172,19 @@ fn select_svd_driver(m: usize, n: usize) -> SvdDriver {
     }
 }
 
+/// The typed host tensor behind `input`, or this module's standard refusal.
+///
+/// Callers reach this from a match on `input.dtype()`, so `None` here means the tag
+/// table and the runtime dtype disagree rather than a caller mistake.
+fn typed_host<'a, T: TensorScalar>(
+    op: &'static str,
+    input: &'a Tensor,
+) -> Result<&'a TypedTensor<T>> {
+    input
+        .as_typed::<T>()
+        .ok_or_else(|| unsupported_linalg_dtype(op, input))
+}
+
 fn unsupported_linalg_dtype(op: &'static str, input: &Tensor) -> Error {
     crate::error::unsupported_dtype(op, input.dtype())
 }
@@ -180,21 +193,23 @@ fn ensure_supported_linalg_pair(op: &'static str, lhs: &Tensor, rhs: &Tensor) ->
     if lhs.dtype() != rhs.dtype() {
         return Err(Error::dtype_mismatch(op, lhs.dtype(), rhs.dtype()));
     }
-    match lhs {
-        Tensor::F32(_) | Tensor::F64(_) | Tensor::C32(_) | Tensor::C64(_) => Ok(()),
-        Tensor::I32(_) | Tensor::I64(_) | Tensor::Bool(_) => Err(unsupported_linalg_dtype(op, lhs)),
+    match lhs.dtype() {
+        DType::F32 | DType::F64 | DType::C32 | DType::C64 => Ok(()),
+        DType::I32 | DType::I64 | DType::Bool => Err(unsupported_linalg_dtype(op, lhs)),
+        DType::External(_) => Err(unsupported_linalg_dtype(op, lhs)),
     }
 }
 
 fn ensure_cubecl_resident_tensor(op: &'static str, input: &Tensor) -> Result<()> {
-    match input {
-        Tensor::F32(t) => ensure_cubecl_resident_typed(op, t),
-        Tensor::F64(t) => ensure_cubecl_resident_typed(op, t),
-        Tensor::I32(t) => ensure_cubecl_resident_typed(op, t),
-        Tensor::I64(t) => ensure_cubecl_resident_typed(op, t),
-        Tensor::Bool(t) => ensure_cubecl_resident_typed(op, t),
-        Tensor::C32(t) => ensure_cubecl_resident_typed(op, t),
-        Tensor::C64(t) => ensure_cubecl_resident_typed(op, t),
+    match input.dtype() {
+        DType::F32 => ensure_cubecl_resident_typed(op, typed_host::<f32>(op, input)?),
+        DType::F64 => ensure_cubecl_resident_typed(op, typed_host::<f64>(op, input)?),
+        DType::I32 => ensure_cubecl_resident_typed(op, typed_host::<i32>(op, input)?),
+        DType::I64 => ensure_cubecl_resident_typed(op, typed_host::<i64>(op, input)?),
+        DType::Bool => ensure_cubecl_resident_typed(op, typed_host::<bool>(op, input)?),
+        DType::C32 => ensure_cubecl_resident_typed(op, typed_host::<Complex32>(op, input)?),
+        DType::C64 => ensure_cubecl_resident_typed(op, typed_host::<Complex64>(op, input)?),
+        DType::External(_) => Err(unsupported_linalg_dtype(op, input)),
     }
 }
 
@@ -223,14 +238,17 @@ fn ensure_cubecl_resident_typed<T: 'static>(
 }
 
 pub(super) fn cholesky(backend: &mut CudaExecSession<'_>, input: &Tensor) -> Result<Tensor> {
-    match input {
-        Tensor::F32(t) => cholesky_typed(backend, t).map(Tensor::F32),
-        Tensor::F64(t) => cholesky_typed(backend, t).map(Tensor::F64),
-        Tensor::C32(t) => cholesky_typed(backend, t).map(Tensor::C32),
-        Tensor::C64(t) => cholesky_typed(backend, t).map(Tensor::C64),
-        Tensor::I32(_) | Tensor::I64(_) | Tensor::Bool(_) => {
-            Err(unsupported_linalg_dtype("cholesky", input))
-        }
+    match input.dtype() {
+        DType::F32 => cholesky_typed(backend, typed_host::<f32>("cholesky", input)?)
+            .map(Tensor::from_typed::<f32>),
+        DType::F64 => cholesky_typed(backend, typed_host::<f64>("cholesky", input)?)
+            .map(Tensor::from_typed::<f64>),
+        DType::C32 => cholesky_typed(backend, typed_host::<Complex32>("cholesky", input)?)
+            .map(Tensor::from_typed::<num_complex::Complex32>),
+        DType::C64 => cholesky_typed(backend, typed_host::<Complex64>("cholesky", input)?)
+            .map(Tensor::from_typed::<num_complex::Complex64>),
+        DType::I32 | DType::I64 | DType::Bool => Err(unsupported_linalg_dtype("cholesky", input)),
+        DType::External(_) => Err(unsupported_linalg_dtype("cholesky", input)),
     }
 }
 
@@ -243,22 +261,26 @@ pub(super) fn triangular_solve(
     transpose_a: bool,
     unit_diagonal: bool,
 ) -> Result<Tensor> {
-    match (a, b) {
-        (Tensor::F32(a), Tensor::F32(b)) => {
+    match (a.dtype(), b.dtype()) {
+        (DType::F32, DType::F32) => {
+            let (a, b) = triangular_solve_operands::<f32>(a, b)?;
             triangular_solve_typed(backend, a, b, left_side, lower, transpose_a, unit_diagonal)
-                .map(Tensor::F32)
+                .map(Tensor::from_typed::<f32>)
         }
-        (Tensor::F64(a), Tensor::F64(b)) => {
+        (DType::F64, DType::F64) => {
+            let (a, b) = triangular_solve_operands::<f64>(a, b)?;
             triangular_solve_typed(backend, a, b, left_side, lower, transpose_a, unit_diagonal)
-                .map(Tensor::F64)
+                .map(Tensor::from_typed::<f64>)
         }
-        (Tensor::C32(a), Tensor::C32(b)) => {
+        (DType::C32, DType::C32) => {
+            let (a, b) = triangular_solve_operands::<num_complex::Complex32>(a, b)?;
             triangular_solve_typed(backend, a, b, left_side, lower, transpose_a, unit_diagonal)
-                .map(Tensor::C32)
+                .map(Tensor::from_typed::<num_complex::Complex32>)
         }
-        (Tensor::C64(a), Tensor::C64(b)) => {
+        (DType::C64, DType::C64) => {
+            let (a, b) = triangular_solve_operands::<num_complex::Complex64>(a, b)?;
             triangular_solve_typed(backend, a, b, left_side, lower, transpose_a, unit_diagonal)
-                .map(Tensor::C64)
+                .map(Tensor::from_typed::<num_complex::Complex64>)
         }
         _ if a.dtype() != b.dtype() => Err(Error::dtype_mismatch(
             "triangular_solve",
@@ -271,80 +293,110 @@ pub(super) fn triangular_solve(
         )),
     }
 }
+/// The typed operands behind a same-dtype pair, or this module's refusal for one.
+///
+/// Callers reach this from a match on the pair of dtypes, so `None` means the tags and the runtime
+/// dtypes disagree rather than a caller mistake.
+fn triangular_solve_operands<'a, T: TensorScalar>(
+    a: &'a Tensor,
+    b: &'a Tensor,
+) -> Result<(&'a TypedTensor<T>, &'a TypedTensor<T>)> {
+    let a_t = a
+        .as_typed::<T>()
+        .ok_or_else(|| crate::error::unsupported_dtype("triangular_solve", a.dtype()))?;
+    let b_t = b
+        .as_typed::<T>()
+        .ok_or_else(|| crate::error::unsupported_dtype("triangular_solve", b.dtype()))?;
+    Ok((a_t, b_t))
+}
 
 pub(super) fn lu(backend: &mut CudaExecSession<'_>, input: &Tensor) -> Result<Vec<Tensor>> {
-    match input {
-        Tensor::F32(t) => lu_typed(backend, t).map(|(p, l, u, parity)| {
-            vec![
-                Tensor::F32(p),
-                Tensor::F32(l),
-                Tensor::F32(u),
-                Tensor::F32(parity),
-            ]
-        }),
-        Tensor::F64(t) => lu_typed(backend, t).map(|(p, l, u, parity)| {
-            vec![
-                Tensor::F64(p),
-                Tensor::F64(l),
-                Tensor::F64(u),
-                Tensor::F64(parity),
-            ]
-        }),
-        Tensor::C32(t) => lu_typed(backend, t).map(|(p, l, u, parity)| {
-            vec![
-                Tensor::C32(p),
-                Tensor::C32(l),
-                Tensor::C32(u),
-                Tensor::C32(parity),
-            ]
-        }),
-        Tensor::C64(t) => lu_typed(backend, t).map(|(p, l, u, parity)| {
-            vec![
-                Tensor::C64(p),
-                Tensor::C64(l),
-                Tensor::C64(u),
-                Tensor::C64(parity),
-            ]
-        }),
-        Tensor::I32(_) | Tensor::I64(_) | Tensor::Bool(_) => {
-            Err(unsupported_linalg_dtype("lu", input))
+    match input.dtype() {
+        DType::F32 => {
+            lu_typed(backend, typed_host::<f32>("lu", input)?).map(|(p, l, u, parity)| {
+                vec![
+                    Tensor::from_typed::<f32>(p),
+                    Tensor::from_typed::<f32>(l),
+                    Tensor::from_typed::<f32>(u),
+                    Tensor::from_typed::<f32>(parity),
+                ]
+            })
         }
+        DType::F64 => {
+            lu_typed(backend, typed_host::<f64>("lu", input)?).map(|(p, l, u, parity)| {
+                vec![
+                    Tensor::from_typed::<f64>(p),
+                    Tensor::from_typed::<f64>(l),
+                    Tensor::from_typed::<f64>(u),
+                    Tensor::from_typed::<f64>(parity),
+                ]
+            })
+        }
+        DType::C32 => {
+            lu_typed(backend, typed_host::<Complex32>("lu", input)?).map(|(p, l, u, parity)| {
+                vec![
+                    Tensor::from_typed::<Complex32>(p),
+                    Tensor::from_typed::<Complex32>(l),
+                    Tensor::from_typed::<Complex32>(u),
+                    Tensor::from_typed::<Complex32>(parity),
+                ]
+            })
+        }
+        DType::C64 => {
+            lu_typed(backend, typed_host::<Complex64>("lu", input)?).map(|(p, l, u, parity)| {
+                vec![
+                    Tensor::from_typed::<Complex64>(p),
+                    Tensor::from_typed::<Complex64>(l),
+                    Tensor::from_typed::<Complex64>(u),
+                    Tensor::from_typed::<Complex64>(parity),
+                ]
+            })
+        }
+        DType::I32 | DType::I64 | DType::Bool => Err(unsupported_linalg_dtype("lu", input)),
+        DType::External(_) => Err(unsupported_linalg_dtype("lu", input)),
     }
 }
 
 pub(super) fn lu_factor(backend: &mut CudaExecSession<'_>, input: &Tensor) -> Result<Vec<Tensor>> {
-    match input {
-        Tensor::F32(t) => lu_factor_typed(backend, t).map(|(packed_lu, pivots, parity)| {
-            vec![
-                Tensor::F32(packed_lu),
-                Tensor::I32(pivots),
-                Tensor::F32(parity),
-            ]
-        }),
-        Tensor::F64(t) => lu_factor_typed(backend, t).map(|(packed_lu, pivots, parity)| {
-            vec![
-                Tensor::F64(packed_lu),
-                Tensor::I32(pivots),
-                Tensor::F64(parity),
-            ]
-        }),
-        Tensor::C32(t) => lu_factor_typed(backend, t).map(|(packed_lu, pivots, parity)| {
-            vec![
-                Tensor::C32(packed_lu),
-                Tensor::I32(pivots),
-                Tensor::C32(parity),
-            ]
-        }),
-        Tensor::C64(t) => lu_factor_typed(backend, t).map(|(packed_lu, pivots, parity)| {
-            vec![
-                Tensor::C64(packed_lu),
-                Tensor::I32(pivots),
-                Tensor::C64(parity),
-            ]
-        }),
-        Tensor::I32(_) | Tensor::I64(_) | Tensor::Bool(_) => {
-            Err(unsupported_linalg_dtype("lu_factor", input))
-        }
+    match input.dtype() {
+        DType::F32 => lu_factor_typed(backend, typed_host::<f32>("lu_factor", input)?).map(
+            |(packed_lu, pivots, parity)| {
+                vec![
+                    Tensor::from_typed::<f32>(packed_lu),
+                    Tensor::from_typed::<i32>(pivots),
+                    Tensor::from_typed::<f32>(parity),
+                ]
+            },
+        ),
+        DType::F64 => lu_factor_typed(backend, typed_host::<f64>("lu_factor", input)?).map(
+            |(packed_lu, pivots, parity)| {
+                vec![
+                    Tensor::from_typed::<f64>(packed_lu),
+                    Tensor::from_typed::<i32>(pivots),
+                    Tensor::from_typed::<f64>(parity),
+                ]
+            },
+        ),
+        DType::C32 => lu_factor_typed(backend, typed_host::<Complex32>("lu_factor", input)?).map(
+            |(packed_lu, pivots, parity)| {
+                vec![
+                    Tensor::from_typed::<Complex32>(packed_lu),
+                    Tensor::from_typed::<i32>(pivots),
+                    Tensor::from_typed::<Complex32>(parity),
+                ]
+            },
+        ),
+        DType::C64 => lu_factor_typed(backend, typed_host::<Complex64>("lu_factor", input)?).map(
+            |(packed_lu, pivots, parity)| {
+                vec![
+                    Tensor::from_typed::<Complex64>(packed_lu),
+                    Tensor::from_typed::<i32>(pivots),
+                    Tensor::from_typed::<Complex64>(parity),
+                ]
+            },
+        ),
+        DType::I32 | DType::I64 | DType::Bool => Err(unsupported_linalg_dtype("lu_factor", input)),
+        DType::External(_) => Err(unsupported_linalg_dtype("lu_factor", input)),
     }
 }
 
@@ -371,42 +423,79 @@ pub(super) fn full_piv_lu_solve(
 }
 
 pub(super) fn svd(backend: &mut CudaExecSession<'_>, input: &Tensor) -> Result<Vec<Tensor>> {
-    match input {
-        Tensor::F32(t) => svd_typed(backend, t)
-            .map(|(u, s, vt)| vec![Tensor::F32(u), Tensor::F32(s), Tensor::F32(vt)]),
-        Tensor::F64(t) => svd_typed(backend, t)
-            .map(|(u, s, vt)| vec![Tensor::F64(u), Tensor::F64(s), Tensor::F64(vt)]),
-        Tensor::C32(t) => svd_typed(backend, t)
-            .map(|(u, s, vt)| vec![Tensor::C32(u), Tensor::F32(s), Tensor::C32(vt)]),
-        Tensor::C64(t) => svd_typed(backend, t)
-            .map(|(u, s, vt)| vec![Tensor::C64(u), Tensor::F64(s), Tensor::C64(vt)]),
-        Tensor::I32(_) | Tensor::I64(_) | Tensor::Bool(_) => {
-            Err(unsupported_linalg_dtype("svd", input))
+    match input.dtype() {
+        DType::F32 => svd_typed(backend, typed_host::<f32>("svd", input)?).map(|(u, s, vt)| {
+            vec![
+                Tensor::from_typed::<f32>(u),
+                Tensor::from_typed::<f32>(s),
+                Tensor::from_typed::<f32>(vt),
+            ]
+        }),
+        DType::F64 => svd_typed(backend, typed_host::<f64>("svd", input)?).map(|(u, s, vt)| {
+            vec![
+                Tensor::from_typed::<f64>(u),
+                Tensor::from_typed::<f64>(s),
+                Tensor::from_typed::<f64>(vt),
+            ]
+        }),
+        DType::C32 => {
+            svd_typed(backend, typed_host::<Complex32>("svd", input)?).map(|(u, s, vt)| {
+                vec![
+                    Tensor::from_typed::<Complex32>(u),
+                    Tensor::from_typed::<f32>(s),
+                    Tensor::from_typed::<Complex32>(vt),
+                ]
+            })
         }
+        DType::C64 => {
+            svd_typed(backend, typed_host::<Complex64>("svd", input)?).map(|(u, s, vt)| {
+                vec![
+                    Tensor::from_typed::<Complex64>(u),
+                    Tensor::from_typed::<f64>(s),
+                    Tensor::from_typed::<Complex64>(vt),
+                ]
+            })
+        }
+        DType::I32 | DType::I64 | DType::Bool => Err(unsupported_linalg_dtype("svd", input)),
+        DType::External(_) => Err(unsupported_linalg_dtype("svd", input)),
     }
 }
 
 pub(super) fn svd_values(backend: &mut CudaExecSession<'_>, input: &Tensor) -> Result<Tensor> {
-    match input {
-        Tensor::F32(t) => svd_values_typed(backend, t).map(Tensor::F32),
-        Tensor::F64(t) => svd_values_typed(backend, t).map(Tensor::F64),
-        Tensor::C32(t) => svd_values_typed(backend, t).map(Tensor::F32),
-        Tensor::C64(t) => svd_values_typed(backend, t).map(Tensor::F64),
-        Tensor::I32(_) | Tensor::I64(_) | Tensor::Bool(_) => {
-            Err(unsupported_linalg_dtype("svd_values", input))
-        }
+    match input.dtype() {
+        DType::F32 => svd_values_typed(backend, typed_host::<f32>("svd_values", input)?)
+            .map(Tensor::from_typed::<f32>),
+        DType::F64 => svd_values_typed(backend, typed_host::<f64>("svd_values", input)?)
+            .map(Tensor::from_typed::<f64>),
+        DType::C32 => svd_values_typed(backend, typed_host::<Complex32>("svd_values", input)?)
+            .map(Tensor::from_typed::<f32>),
+        DType::C64 => svd_values_typed(backend, typed_host::<Complex64>("svd_values", input)?)
+            .map(Tensor::from_typed::<f64>),
+        DType::I32 | DType::I64 | DType::Bool => Err(unsupported_linalg_dtype("svd_values", input)),
+        DType::External(_) => Err(unsupported_linalg_dtype("svd_values", input)),
     }
 }
 
 pub(super) fn qr(backend: &mut CudaExecSession<'_>, input: &Tensor) -> Result<Vec<Tensor>> {
-    match input {
-        Tensor::F32(t) => qr_typed(backend, t).map(|(q, r)| vec![Tensor::F32(q), Tensor::F32(r)]),
-        Tensor::F64(t) => qr_typed(backend, t).map(|(q, r)| vec![Tensor::F64(q), Tensor::F64(r)]),
-        Tensor::C32(t) => qr_typed(backend, t).map(|(q, r)| vec![Tensor::C32(q), Tensor::C32(r)]),
-        Tensor::C64(t) => qr_typed(backend, t).map(|(q, r)| vec![Tensor::C64(q), Tensor::C64(r)]),
-        Tensor::I32(_) | Tensor::I64(_) | Tensor::Bool(_) => {
-            Err(unsupported_linalg_dtype("qr", input))
-        }
+    match input.dtype() {
+        DType::F32 => qr_typed(backend, typed_host::<f32>("qr", input)?)
+            .map(|(q, r)| vec![Tensor::from_typed::<f32>(q), Tensor::from_typed::<f32>(r)]),
+        DType::F64 => qr_typed(backend, typed_host::<f64>("qr", input)?)
+            .map(|(q, r)| vec![Tensor::from_typed::<f64>(q), Tensor::from_typed::<f64>(r)]),
+        DType::C32 => qr_typed(backend, typed_host::<Complex32>("qr", input)?).map(|(q, r)| {
+            vec![
+                Tensor::from_typed::<Complex32>(q),
+                Tensor::from_typed::<Complex32>(r),
+            ]
+        }),
+        DType::C64 => qr_typed(backend, typed_host::<Complex64>("qr", input)?).map(|(q, r)| {
+            vec![
+                Tensor::from_typed::<Complex64>(q),
+                Tensor::from_typed::<Complex64>(r),
+            ]
+        }),
+        DType::I32 | DType::I64 | DType::Bool => Err(unsupported_linalg_dtype("qr", input)),
+        DType::External(_) => Err(unsupported_linalg_dtype("qr", input)),
     }
 }
 
@@ -422,26 +511,55 @@ pub(super) fn householder_qr(
     backend: &mut CudaExecSession<'_>,
     input: &Tensor,
 ) -> Result<CompactQrResult> {
-    let (packed, coeff) = match input {
-        Tensor::F32(input) => {
-            let (packed, coeff) = compact_qr_typed(backend, input, "householder_qr")?;
-            (Tensor::F32(packed), Tensor::F32(coeff))
+    let (packed, coeff) = match input.dtype() {
+        DType::F32 => {
+            let (packed, coeff) = compact_qr_typed(
+                backend,
+                typed_host::<f32>("householder_qr", input)?,
+                "householder_qr",
+            )?;
+            (
+                Tensor::from_typed::<f32>(packed),
+                Tensor::from_typed::<f32>(coeff),
+            )
         }
-        Tensor::F64(input) => {
-            let (packed, coeff) = compact_qr_typed(backend, input, "householder_qr")?;
-            (Tensor::F64(packed), Tensor::F64(coeff))
+        DType::F64 => {
+            let (packed, coeff) = compact_qr_typed(
+                backend,
+                typed_host::<f64>("householder_qr", input)?,
+                "householder_qr",
+            )?;
+            (
+                Tensor::from_typed::<f64>(packed),
+                Tensor::from_typed::<f64>(coeff),
+            )
         }
-        Tensor::C32(input) => {
-            let (packed, coeff) = compact_qr_typed(backend, input, "householder_qr")?;
-            (Tensor::C32(packed), Tensor::C32(coeff))
+        DType::C32 => {
+            let (packed, coeff) = compact_qr_typed(
+                backend,
+                typed_host::<Complex32>("householder_qr", input)?,
+                "householder_qr",
+            )?;
+            (
+                Tensor::from_typed::<Complex32>(packed),
+                Tensor::from_typed::<Complex32>(coeff),
+            )
         }
-        Tensor::C64(input) => {
-            let (packed, coeff) = compact_qr_typed(backend, input, "householder_qr")?;
-            (Tensor::C64(packed), Tensor::C64(coeff))
+        DType::C64 => {
+            let (packed, coeff) = compact_qr_typed(
+                backend,
+                typed_host::<Complex64>("householder_qr", input)?,
+                "householder_qr",
+            )?;
+            (
+                Tensor::from_typed::<Complex64>(packed),
+                Tensor::from_typed::<Complex64>(coeff),
+            )
         }
-        Tensor::I32(_) | Tensor::I64(_) | Tensor::Bool(_) => {
+        DType::I32 | DType::I64 | DType::Bool => {
             return Err(unsupported_linalg_dtype("householder_qr", input));
         }
+        DType::External(_) => return Err(unsupported_linalg_dtype("householder_qr", input)),
     };
     Ok(CompactQrResult { packed, coeff })
 }
@@ -488,23 +606,28 @@ fn validate_upper_trapezoidal_gpu(
     if r.shape().contains(&0) {
         return Ok(());
     }
-    let flags = match r {
-        Tensor::F32(r) => upper_trapezoidal_violation_typed(backend, r, op)?,
-        Tensor::F64(r) => upper_trapezoidal_violation_typed(backend, r, op)?,
-        Tensor::C32(r) => upper_trapezoidal_violation_typed(backend, r, op)?,
-        Tensor::C64(r) => upper_trapezoidal_violation_typed(backend, r, op)?,
-        Tensor::I32(_) | Tensor::I64(_) | Tensor::Bool(_) => {
+    let flags = match r.dtype() {
+        DType::F32 => upper_trapezoidal_violation_typed(backend, typed_host::<f32>(op, r)?, op)?,
+        DType::F64 => upper_trapezoidal_violation_typed(backend, typed_host::<f64>(op, r)?, op)?,
+        DType::C32 => {
+            upper_trapezoidal_violation_typed(backend, typed_host::<Complex32>(op, r)?, op)?
+        }
+        DType::C64 => {
+            upper_trapezoidal_violation_typed(backend, typed_host::<Complex64>(op, r)?, op)?
+        }
+        DType::I32 | DType::I64 | DType::Bool => {
             return Err(unsupported_linalg_dtype(op, r));
         }
+        DType::External(_) => return Err(unsupported_linalg_dtype(op, r)),
     };
-    let maximum = backend.reduce_max(&Tensor::I32(flags), &[0, 1])?;
+    let maximum = backend.reduce_max(&Tensor::from_typed::<i32>(flags), &[0, 1])?;
     backend.runtime().synchronize()?;
     let host = download_tensor(backend.runtime(), &maximum)?;
-    let Tensor::I32(value) = host else {
-        return Err(Error::Internal(format!(
+    let value = host.into_typed::<i32>().map_err(|_| {
+        Error::Internal(format!(
             "{op}: unexpected upper-trapezoidal validation dtype"
-        )));
-    };
+        ))
+    })?;
     if value.host_data()?[0] == 0 {
         Ok(())
     } else {
@@ -516,6 +639,21 @@ fn validate_upper_trapezoidal_gpu(
     }
 }
 
+/// The typed operands behind a same-dtype pair, or the refusal this entry point reports.
+fn compact_qr_operands<'a, T: TensorScalar>(
+    q: &'a Tensor,
+    r: &'a Tensor,
+    op: &'static str,
+) -> Result<(&'a TypedTensor<T>, &'a TypedTensor<T>)> {
+    let q_t = q
+        .as_typed::<T>()
+        .ok_or_else(|| Error::dtype_mismatch(op, q.dtype(), r.dtype()))?;
+    let r_t = r
+        .as_typed::<T>()
+        .ok_or_else(|| Error::dtype_mismatch(op, q.dtype(), r.dtype()))?;
+    Ok((q_t, r_t))
+}
+
 pub(super) fn householder_qr_from_factors(
     backend: &mut CudaExecSession<'_>,
     q: &Tensor,
@@ -524,26 +662,54 @@ pub(super) fn householder_qr_from_factors(
     const OP: &str = "householder_qr_from_factors";
     ensure_supported_linalg_pair(OP, q, r)?;
     validate_upper_trapezoidal_gpu(backend, r, OP)?;
-    let (packed, coeff) = match (q, r) {
-        (Tensor::F32(q), Tensor::F32(r)) => {
+    let (packed, coeff) = match (q.dtype(), r.dtype()) {
+        (DType::F32, DType::F32) => {
+            let (q, r) = compact_qr_operands::<f32>(q, r, OP)?;
             let (packed, coeff) = compact_qr_from_factors_typed(backend, q, r, OP)?;
-            (Tensor::F32(packed), Tensor::F32(coeff))
+            (
+                Tensor::from_typed::<f32>(packed),
+                Tensor::from_typed::<f32>(coeff),
+            )
         }
-        (Tensor::F64(q), Tensor::F64(r)) => {
+        (DType::F64, DType::F64) => {
+            let (q, r) = compact_qr_operands::<f64>(q, r, OP)?;
             let (packed, coeff) = compact_qr_from_factors_typed(backend, q, r, OP)?;
-            (Tensor::F64(packed), Tensor::F64(coeff))
+            (
+                Tensor::from_typed::<f64>(packed),
+                Tensor::from_typed::<f64>(coeff),
+            )
         }
-        (Tensor::C32(q), Tensor::C32(r)) => {
+        (DType::C32, DType::C32) => {
+            let (q, r) = compact_qr_operands::<Complex32>(q, r, OP)?;
             let (packed, coeff) = compact_qr_from_factors_typed(backend, q, r, OP)?;
-            (Tensor::C32(packed), Tensor::C32(coeff))
+            (
+                Tensor::from_typed::<Complex32>(packed),
+                Tensor::from_typed::<Complex32>(coeff),
+            )
         }
-        (Tensor::C64(q), Tensor::C64(r)) => {
+        (DType::C64, DType::C64) => {
+            let (q, r) = compact_qr_operands::<Complex64>(q, r, OP)?;
             let (packed, coeff) = compact_qr_from_factors_typed(backend, q, r, OP)?;
-            (Tensor::C64(packed), Tensor::C64(coeff))
+            (
+                Tensor::from_typed::<Complex64>(packed),
+                Tensor::from_typed::<Complex64>(coeff),
+            )
         }
         _ => return Err(Error::dtype_mismatch(OP, q.dtype(), r.dtype())),
     };
     Ok(CompactQrResult { packed, coeff })
+}
+/// The typed operands behind a same-dtype triple, or this entry point's refusal for one.
+fn qr_append_operands<'a, T: TensorScalar>(
+    packed: &'a Tensor,
+    coeff: &'a Tensor,
+    block: &'a Tensor,
+) -> Result<(&'a TypedTensor<T>, &'a TypedTensor<T>, &'a TypedTensor<T>)> {
+    let mismatch = || Error::dtype_mismatch("householder_qr_append", packed.dtype(), block.dtype());
+    let packed_t = packed.as_typed::<T>().ok_or_else(mismatch)?;
+    let coeff_t = coeff.as_typed::<T>().ok_or_else(mismatch)?;
+    let block_t = block.as_typed::<T>().ok_or_else(mismatch)?;
+    Ok((packed_t, coeff_t, block_t))
 }
 
 pub(super) fn householder_qr_append(
@@ -554,26 +720,42 @@ pub(super) fn householder_qr_append(
 ) -> Result<CompactQrResult> {
     ensure_supported_linalg_pair("householder_qr_append", packed, coeff)?;
     ensure_supported_linalg_pair("householder_qr_append", packed, block)?;
-    let (packed, coeff) = match (packed, coeff, block) {
-        (Tensor::F32(packed), Tensor::F32(coeff), Tensor::F32(block)) => {
+    let (packed, coeff) = match (packed.dtype(), coeff.dtype(), block.dtype()) {
+        (DType::F32, DType::F32, DType::F32) => {
+            let (packed, coeff, block) = qr_append_operands::<f32>(packed, coeff, block)?;
             let (packed, coeff) =
                 compact_qr_append_typed(backend, packed, coeff, block, "householder_qr_append")?;
-            (Tensor::F32(packed), Tensor::F32(coeff))
+            (
+                Tensor::from_typed::<f32>(packed),
+                Tensor::from_typed::<f32>(coeff),
+            )
         }
-        (Tensor::F64(packed), Tensor::F64(coeff), Tensor::F64(block)) => {
+        (DType::F64, DType::F64, DType::F64) => {
+            let (packed, coeff, block) = qr_append_operands::<f64>(packed, coeff, block)?;
             let (packed, coeff) =
                 compact_qr_append_typed(backend, packed, coeff, block, "householder_qr_append")?;
-            (Tensor::F64(packed), Tensor::F64(coeff))
+            (
+                Tensor::from_typed::<f64>(packed),
+                Tensor::from_typed::<f64>(coeff),
+            )
         }
-        (Tensor::C32(packed), Tensor::C32(coeff), Tensor::C32(block)) => {
+        (DType::C32, DType::C32, DType::C32) => {
+            let (packed, coeff, block) = qr_append_operands::<Complex32>(packed, coeff, block)?;
             let (packed, coeff) =
                 compact_qr_append_typed(backend, packed, coeff, block, "householder_qr_append")?;
-            (Tensor::C32(packed), Tensor::C32(coeff))
+            (
+                Tensor::from_typed::<Complex32>(packed),
+                Tensor::from_typed::<Complex32>(coeff),
+            )
         }
-        (Tensor::C64(packed), Tensor::C64(coeff), Tensor::C64(block)) => {
+        (DType::C64, DType::C64, DType::C64) => {
+            let (packed, coeff, block) = qr_append_operands::<Complex64>(packed, coeff, block)?;
             let (packed, coeff) =
                 compact_qr_append_typed(backend, packed, coeff, block, "householder_qr_append")?;
-            (Tensor::C64(packed), Tensor::C64(coeff))
+            (
+                Tensor::from_typed::<Complex64>(packed),
+                Tensor::from_typed::<Complex64>(coeff),
+            )
         }
         _ => {
             return Err(Error::dtype_mismatch(
@@ -585,6 +767,19 @@ pub(super) fn householder_qr_append(
     };
     Ok(CompactQrResult { packed, coeff })
 }
+/// The typed operands behind a same-dtype pair, or this entry point's refusal for one.
+fn qr_q_columns_operands<'a, T: TensorScalar>(
+    packed: &'a Tensor,
+    coeff: &'a Tensor,
+) -> Result<(&'a TypedTensor<T>, &'a TypedTensor<T>)> {
+    let packed_t = packed.as_typed::<T>().ok_or_else(|| {
+        Error::dtype_mismatch("householder_qr_q_columns", packed.dtype(), coeff.dtype())
+    })?;
+    let coeff_t = coeff.as_typed::<T>().ok_or_else(|| {
+        Error::dtype_mismatch("householder_qr_q_columns", packed.dtype(), coeff.dtype())
+    })?;
+    Ok((packed_t, coeff_t))
+}
 
 pub(super) fn householder_qr_q_columns(
     backend: &mut CudaExecSession<'_>,
@@ -595,53 +790,78 @@ pub(super) fn householder_qr_q_columns(
     options: QrOptions,
 ) -> Result<Tensor> {
     ensure_supported_linalg_pair("householder_qr_q_columns", packed, coeff)?;
-    match (packed, coeff) {
-        (Tensor::F32(packed), Tensor::F32(coeff)) => compact_qr_q_columns_typed(
-            backend,
-            packed,
-            coeff,
-            start,
-            end,
-            options,
-            "householder_qr_q_columns",
-        )
-        .map(Tensor::F32),
-        (Tensor::F64(packed), Tensor::F64(coeff)) => compact_qr_q_columns_typed(
-            backend,
-            packed,
-            coeff,
-            start,
-            end,
-            options,
-            "householder_qr_q_columns",
-        )
-        .map(Tensor::F64),
-        (Tensor::C32(packed), Tensor::C32(coeff)) => compact_qr_q_columns_typed(
-            backend,
-            packed,
-            coeff,
-            start,
-            end,
-            options,
-            "householder_qr_q_columns",
-        )
-        .map(Tensor::C32),
-        (Tensor::C64(packed), Tensor::C64(coeff)) => compact_qr_q_columns_typed(
-            backend,
-            packed,
-            coeff,
-            start,
-            end,
-            options,
-            "householder_qr_q_columns",
-        )
-        .map(Tensor::C64),
+    match (packed.dtype(), coeff.dtype()) {
+        (DType::F32, DType::F32) => {
+            let (packed, coeff) = qr_q_columns_operands::<f32>(packed, coeff)?;
+            compact_qr_q_columns_typed(
+                backend,
+                packed,
+                coeff,
+                start,
+                end,
+                options,
+                "householder_qr_q_columns",
+            )
+            .map(Tensor::from_typed::<f32>)
+        }
+        (DType::F64, DType::F64) => {
+            let (packed, coeff) = qr_q_columns_operands::<f64>(packed, coeff)?;
+            compact_qr_q_columns_typed(
+                backend,
+                packed,
+                coeff,
+                start,
+                end,
+                options,
+                "householder_qr_q_columns",
+            )
+            .map(Tensor::from_typed::<f64>)
+        }
+        (DType::C32, DType::C32) => {
+            let (packed, coeff) = qr_q_columns_operands::<num_complex::Complex32>(packed, coeff)?;
+            compact_qr_q_columns_typed(
+                backend,
+                packed,
+                coeff,
+                start,
+                end,
+                options,
+                "householder_qr_q_columns",
+            )
+            .map(Tensor::from_typed::<num_complex::Complex32>)
+        }
+        (DType::C64, DType::C64) => {
+            let (packed, coeff) = qr_q_columns_operands::<num_complex::Complex64>(packed, coeff)?;
+            compact_qr_q_columns_typed(
+                backend,
+                packed,
+                coeff,
+                start,
+                end,
+                options,
+                "householder_qr_q_columns",
+            )
+            .map(Tensor::from_typed::<num_complex::Complex64>)
+        }
         _ => Err(Error::dtype_mismatch(
             "householder_qr_q_columns",
             packed.dtype(),
             coeff.dtype(),
         )),
     }
+}
+/// The typed operands behind a same-dtype pair, or this entry point's refusal for one.
+fn qr_r_operands<'a, T: TensorScalar>(
+    packed: &'a Tensor,
+    coeff: &'a Tensor,
+) -> Result<(&'a TypedTensor<T>, &'a TypedTensor<T>)> {
+    let packed_t = packed
+        .as_typed::<T>()
+        .ok_or_else(|| Error::dtype_mismatch("householder_qr_r", packed.dtype(), coeff.dtype()))?;
+    let coeff_t = coeff
+        .as_typed::<T>()
+        .ok_or_else(|| Error::dtype_mismatch("householder_qr_r", packed.dtype(), coeff.dtype()))?;
+    Ok((packed_t, coeff_t))
 }
 
 pub(super) fn householder_qr_r(
@@ -651,18 +871,26 @@ pub(super) fn householder_qr_r(
     options: QrOptions,
 ) -> Result<Tensor> {
     ensure_supported_linalg_pair("householder_qr_r", packed, coeff)?;
-    match (packed, coeff) {
-        (Tensor::F32(packed), Tensor::F32(coeff)) => {
-            compact_qr_r_typed(backend, packed, coeff, options, "householder_qr_r").map(Tensor::F32)
+    match (packed.dtype(), coeff.dtype()) {
+        (DType::F32, DType::F32) => {
+            let (packed, coeff) = qr_r_operands::<f32>(packed, coeff)?;
+            compact_qr_r_typed(backend, packed, coeff, options, "householder_qr_r")
+                .map(Tensor::from_typed::<f32>)
         }
-        (Tensor::F64(packed), Tensor::F64(coeff)) => {
-            compact_qr_r_typed(backend, packed, coeff, options, "householder_qr_r").map(Tensor::F64)
+        (DType::F64, DType::F64) => {
+            let (packed, coeff) = qr_r_operands::<f64>(packed, coeff)?;
+            compact_qr_r_typed(backend, packed, coeff, options, "householder_qr_r")
+                .map(Tensor::from_typed::<f64>)
         }
-        (Tensor::C32(packed), Tensor::C32(coeff)) => {
-            compact_qr_r_typed(backend, packed, coeff, options, "householder_qr_r").map(Tensor::C32)
+        (DType::C32, DType::C32) => {
+            let (packed, coeff) = qr_r_operands::<num_complex::Complex32>(packed, coeff)?;
+            compact_qr_r_typed(backend, packed, coeff, options, "householder_qr_r")
+                .map(Tensor::from_typed::<num_complex::Complex32>)
         }
-        (Tensor::C64(packed), Tensor::C64(coeff)) => {
-            compact_qr_r_typed(backend, packed, coeff, options, "householder_qr_r").map(Tensor::C64)
+        (DType::C64, DType::C64) => {
+            let (packed, coeff) = qr_r_operands::<num_complex::Complex64>(packed, coeff)?;
+            compact_qr_r_typed(backend, packed, coeff, options, "householder_qr_r")
+                .map(Tensor::from_typed::<num_complex::Complex64>)
         }
         _ => Err(Error::dtype_mismatch(
             "householder_qr_r",
@@ -697,44 +925,80 @@ fn apply_qr_gauge_device(
         )));
     }
     let (q, r) = outputs.split_at_mut(1);
-    match (&mut q[0], &mut r[0]) {
-        (Tensor::F32(q), Tensor::F32(r)) => {
+    match (q[0].dtype(), r[0].dtype()) {
+        (DType::F32, DType::F32) => {
+            let (q, r) = gauge_pair_mut::<f32>(&mut q[0], &mut r[0], op)?;
             f32::apply_positive_qr_gauge(backend, q, r, q_start, op)
         }
-        (Tensor::F64(q), Tensor::F64(r)) => {
+        (DType::F64, DType::F64) => {
+            let (q, r) = gauge_pair_mut::<f64>(&mut q[0], &mut r[0], op)?;
             f64::apply_positive_qr_gauge(backend, q, r, q_start, op)
         }
-        (Tensor::C32(q), Tensor::C32(r)) => {
+        (DType::C32, DType::C32) => {
+            let (q, r) = gauge_pair_mut::<Complex32>(&mut q[0], &mut r[0], op)?;
             Complex32::apply_positive_qr_gauge(backend, q, r, q_start, op)
         }
-        (Tensor::C64(q), Tensor::C64(r)) => {
+        (DType::C64, DType::C64) => {
+            let (q, r) = gauge_pair_mut::<Complex64>(&mut q[0], &mut r[0], op)?;
             Complex64::apply_positive_qr_gauge(backend, q, r, q_start, op)
         }
-        (q, r) => Err(Error::dtype_mismatch(op, q.dtype(), r.dtype())),
+        _ => Err(Error::dtype_mismatch(op, q[0].dtype(), r[0].dtype())),
     }
 }
 
+/// The typed pair behind a same-dtype pair of mutable tensors, or this module's refusal.
+fn gauge_pair_mut<'a, T: TensorScalar>(
+    q: &'a mut Tensor,
+    r: &'a mut Tensor,
+    op: &'static str,
+) -> Result<(&'a mut TypedTensor<T>, &'a mut TypedTensor<T>)> {
+    let (q_dtype, r_dtype) = (q.dtype(), r.dtype());
+    let q_t = q
+        .as_typed_mut::<T>()
+        .ok_or_else(|| Error::dtype_mismatch(op, q_dtype, r_dtype))?;
+    let r_t = r
+        .as_typed_mut::<T>()
+        .ok_or_else(|| Error::dtype_mismatch(op, q_dtype, r_dtype))?;
+    Ok((q_t, r_t))
+}
+
 pub(super) fn eigh(backend: &mut CudaExecSession<'_>, input: &Tensor) -> Result<Vec<Tensor>> {
-    match input {
-        Tensor::F32(t) => eigh_typed(backend, t).map(|(w, v)| vec![Tensor::F32(w), Tensor::F32(v)]),
-        Tensor::F64(t) => eigh_typed(backend, t).map(|(w, v)| vec![Tensor::F64(w), Tensor::F64(v)]),
-        Tensor::C32(t) => eigh_typed(backend, t).map(|(w, v)| vec![Tensor::F32(w), Tensor::C32(v)]),
-        Tensor::C64(t) => eigh_typed(backend, t).map(|(w, v)| vec![Tensor::F64(w), Tensor::C64(v)]),
-        Tensor::I32(_) | Tensor::I64(_) | Tensor::Bool(_) => {
-            Err(unsupported_linalg_dtype("eigh", input))
-        }
+    match input.dtype() {
+        DType::F32 => eigh_typed(backend, typed_host::<f32>("eigh", input)?)
+            .map(|(w, v)| vec![Tensor::from_typed::<f32>(w), Tensor::from_typed::<f32>(v)]),
+        DType::F64 => eigh_typed(backend, typed_host::<f64>("eigh", input)?)
+            .map(|(w, v)| vec![Tensor::from_typed::<f64>(w), Tensor::from_typed::<f64>(v)]),
+        DType::C32 => eigh_typed(backend, typed_host::<Complex32>("eigh", input)?).map(|(w, v)| {
+            vec![
+                Tensor::from_typed::<f32>(w),
+                Tensor::from_typed::<Complex32>(v),
+            ]
+        }),
+        DType::C64 => eigh_typed(backend, typed_host::<Complex64>("eigh", input)?).map(|(w, v)| {
+            vec![
+                Tensor::from_typed::<f64>(w),
+                Tensor::from_typed::<Complex64>(v),
+            ]
+        }),
+        DType::I32 | DType::I64 | DType::Bool => Err(unsupported_linalg_dtype("eigh", input)),
+        DType::External(_) => Err(unsupported_linalg_dtype("eigh", input)),
     }
 }
 
 pub(super) fn eigh_values(backend: &mut CudaExecSession<'_>, input: &Tensor) -> Result<Tensor> {
-    match input {
-        Tensor::F32(t) => eigh_values_typed(backend, t).map(Tensor::F32),
-        Tensor::F64(t) => eigh_values_typed(backend, t).map(Tensor::F64),
-        Tensor::C32(t) => eigh_values_typed(backend, t).map(Tensor::F32),
-        Tensor::C64(t) => eigh_values_typed(backend, t).map(Tensor::F64),
-        Tensor::I32(_) | Tensor::I64(_) | Tensor::Bool(_) => {
+    match input.dtype() {
+        DType::F32 => eigh_values_typed(backend, typed_host::<f32>("eigh_values", input)?)
+            .map(Tensor::from_typed::<f32>),
+        DType::F64 => eigh_values_typed(backend, typed_host::<f64>("eigh_values", input)?)
+            .map(Tensor::from_typed::<f64>),
+        DType::C32 => eigh_values_typed(backend, typed_host::<Complex32>("eigh_values", input)?)
+            .map(Tensor::from_typed::<f32>),
+        DType::C64 => eigh_values_typed(backend, typed_host::<Complex64>("eigh_values", input)?)
+            .map(Tensor::from_typed::<f64>),
+        DType::I32 | DType::I64 | DType::Bool => {
             Err(unsupported_linalg_dtype("eigh_values", input))
         }
+        DType::External(_) => Err(unsupported_linalg_dtype("eigh_values", input)),
     }
 }
 
@@ -783,6 +1047,22 @@ pub(super) fn solve(backend: &mut CudaExecSession<'_>, a: &Tensor, b: &Tensor) -
         Ok(x)
     }
 }
+/// The typed operands behind a prepared LU solve, or this entry point's refusal for one.
+fn lu_solve_operands<'a, T: TensorScalar>(
+    lu: &'a Tensor,
+    pivots: &'a Tensor,
+    rhs: &'a Tensor,
+) -> Result<(&'a TypedTensor<T>, &'a TypedTensor<i32>, &'a TypedTensor<T>)> {
+    let inconsistent = || {
+        Error::Internal(
+            "lu_solve_prepared: packed LU, pivots, and rhs dtypes are inconsistent".into(),
+        )
+    };
+    let lu_t = lu.as_typed::<T>().ok_or_else(inconsistent)?;
+    let pivots_t = pivots.as_typed::<i32>().ok_or_else(inconsistent)?;
+    let rhs_t = rhs.as_typed::<T>().ok_or_else(inconsistent)?;
+    Ok((lu_t, pivots_t, rhs_t))
+}
 
 pub(super) fn lu_solve_prepared(
     backend: &mut CudaExecSession<'_>,
@@ -801,7 +1081,7 @@ pub(super) fn lu_solve_prepared(
     ensure_cubecl_resident_tensor(OP, b)?;
     ensure_supported_linalg_pair(OP, a, b)?;
     ensure_supported_linalg_pair(OP, a, packed_lu)?;
-    if !matches!(pivots, Tensor::I32(_)) {
+    if !matches!(pivots.dtype(), DType::I32) {
         return Err(Error::dtype_mismatch(OP, DType::I32, pivots.dtype()));
     }
     if has_zero_dim(a.shape()) || has_zero_dim(b.shape()) {
@@ -821,22 +1101,28 @@ pub(super) fn lu_solve_prepared(
     };
 
     validate_nonsingular_gpu(backend, packed_lu)?;
-    let result = match (packed_lu, pivots, &rhs) {
-        (Tensor::F32(lu), Tensor::I32(pivots), Tensor::F32(rhs)) => {
+    let result = match (packed_lu.dtype(), pivots.dtype(), rhs.dtype()) {
+        (DType::F32, DType::I32, DType::F32) => {
+            let (lu, pivots, rhs) = lu_solve_operands::<f32>(packed_lu, pivots, &rhs)?;
             lu_solve_prepared_typed(backend, lu, pivots, rhs, transpose_a, conjugate_a)
-                .map(Tensor::F32)
+                .map(Tensor::from_typed::<f32>)
         }
-        (Tensor::F64(lu), Tensor::I32(pivots), Tensor::F64(rhs)) => {
+        (DType::F64, DType::I32, DType::F64) => {
+            let (lu, pivots, rhs) = lu_solve_operands::<f64>(packed_lu, pivots, &rhs)?;
             lu_solve_prepared_typed(backend, lu, pivots, rhs, transpose_a, conjugate_a)
-                .map(Tensor::F64)
+                .map(Tensor::from_typed::<f64>)
         }
-        (Tensor::C32(lu), Tensor::I32(pivots), Tensor::C32(rhs)) => {
+        (DType::C32, DType::I32, DType::C32) => {
+            let (lu, pivots, rhs) =
+                lu_solve_operands::<num_complex::Complex32>(packed_lu, pivots, &rhs)?;
             lu_solve_prepared_typed(backend, lu, pivots, rhs, transpose_a, conjugate_a)
-                .map(Tensor::C32)
+                .map(Tensor::from_typed::<num_complex::Complex32>)
         }
-        (Tensor::C64(lu), Tensor::I32(pivots), Tensor::C64(rhs)) => {
+        (DType::C64, DType::I32, DType::C64) => {
+            let (lu, pivots, rhs) =
+                lu_solve_operands::<num_complex::Complex64>(packed_lu, pivots, &rhs)?;
             lu_solve_prepared_typed(backend, lu, pivots, rhs, transpose_a, conjugate_a)
-                .map(Tensor::C64)
+                .map(Tensor::from_typed::<num_complex::Complex64>)
         }
         _ => Err(Error::Internal(
             "lu_solve_prepared: packed LU, pivots, and rhs dtypes are inconsistent".into(),
@@ -3242,26 +3528,35 @@ fn zero_like_linalg_device_tensor(
     input: &Tensor,
     op: &'static str,
 ) -> Result<Tensor> {
-    match input {
-        Tensor::F32(t) => {
-            Ok(Tensor::F32(backend.with_cubecl(op, |cubecl| {
-                cubecl.alloc_output::<f32>(t.shape())
-            })?))
-        }
-        Tensor::F64(t) => {
-            Ok(Tensor::F64(backend.with_cubecl(op, |cubecl| {
-                cubecl.alloc_output::<f64>(t.shape())
-            })?))
-        }
-        Tensor::C32(t) => Ok(Tensor::C32(backend.with_cubecl(op, |cubecl| {
-            cubecl.alloc_output::<num_complex::Complex32>(t.shape())
-        })?)),
-        Tensor::C64(t) => Ok(Tensor::C64(backend.with_cubecl(op, |cubecl| {
-            cubecl.alloc_output::<num_complex::Complex64>(t.shape())
-        })?)),
-        Tensor::I32(_) | Tensor::I64(_) | Tensor::Bool(_) => {
-            Err(unsupported_linalg_dtype(op, input))
-        }
+    match input.dtype() {
+        DType::F32 => Ok(Tensor::from_typed::<f32>(
+            backend.with_cubecl(op, |cubecl| {
+                cubecl.alloc_output::<f32>(typed_host::<f32>(op, input)?.shape())
+            })?,
+        )),
+        DType::F64 => Ok(Tensor::from_typed::<f64>(
+            backend.with_cubecl(op, |cubecl| {
+                cubecl.alloc_output::<f64>(typed_host::<f64>(op, input)?.shape())
+            })?,
+        )),
+        DType::C32 => Ok(Tensor::from_typed::<Complex32>(backend.with_cubecl(
+            op,
+            |cubecl| {
+                cubecl.alloc_output::<num_complex::Complex32>(
+                    typed_host::<Complex32>(op, input)?.shape(),
+                )
+            },
+        )?)),
+        DType::C64 => Ok(Tensor::from_typed::<Complex64>(backend.with_cubecl(
+            op,
+            |cubecl| {
+                cubecl.alloc_output::<num_complex::Complex64>(
+                    typed_host::<Complex64>(op, input)?.shape(),
+                )
+            },
+        )?)),
+        DType::I32 | DType::I64 | DType::Bool => Err(unsupported_linalg_dtype(op, input)),
+        DType::External(_) => Err(unsupported_linalg_dtype(op, input)),
     }
 }
 
@@ -3304,7 +3599,7 @@ fn validate_nonsingular_gpu(backend: &mut CudaExecSession<'_>, u: &Tensor) -> Re
     let host_min = download_tensor(backend.runtime(), &min_val)?;
     let host_max = download_tensor(backend.runtime(), &max_val)?;
     let (value, max_magnitude) = host_min_max_magnitudes(&host_min, &host_max)?;
-    let tolerance = singularity_tolerance(abs_diag.dtype(), max_magnitude);
+    let tolerance = singularity_tolerance(abs_diag.dtype(), max_magnitude)?;
     let is_singular = !value.is_finite() || !max_magnitude.is_finite() || value <= tolerance;
 
     if is_singular {
@@ -3318,13 +3613,22 @@ fn validate_nonsingular_gpu(backend: &mut CudaExecSession<'_>, u: &Tensor) -> Re
 }
 
 fn diagonal_magnitude(backend: &mut CudaExecSession<'_>, diag: &Tensor) -> Result<Tensor> {
-    match diag {
-        Tensor::F32(_) | Tensor::F64(_) => backend.abs(diag),
-        Tensor::C32(t) => complex32_magnitude(backend, t).map(Tensor::F32),
-        Tensor::C64(t) => complex64_magnitude(backend, t).map(Tensor::F64),
-        Tensor::I32(_) | Tensor::I64(_) | Tensor::Bool(_) => {
+    match diag.dtype() {
+        DType::F32 | DType::F64 => backend.abs(diag),
+        DType::C32 => complex32_magnitude(
+            backend,
+            typed_host::<Complex32>("validate_nonsingular_gpu", diag)?,
+        )
+        .map(Tensor::from_typed::<f32>),
+        DType::C64 => complex64_magnitude(
+            backend,
+            typed_host::<Complex64>("validate_nonsingular_gpu", diag)?,
+        )
+        .map(Tensor::from_typed::<f64>),
+        DType::I32 | DType::I64 | DType::Bool => {
             Err(unsupported_linalg_dtype("validate_nonsingular_gpu", diag))
         }
+        DType::External(_) => Err(unsupported_linalg_dtype("validate_nonsingular_gpu", diag)),
     }
 }
 
@@ -3383,23 +3687,48 @@ fn complex64_magnitude(
 }
 
 fn host_min_max_magnitudes(host_min: &Tensor, host_max: &Tensor) -> Result<(f64, f64)> {
-    match (host_min, host_max) {
-        (Tensor::F64(min), Tensor::F64(max)) => Ok((min.host_data()?[0], max.host_data()?[0])),
-        (Tensor::F32(min), Tensor::F32(max)) => Ok((
-            f64::from(min.host_data()?[0]),
-            f64::from(max.host_data()?[0]),
-        )),
+    match (host_min.dtype(), host_max.dtype()) {
+        (DType::F64, DType::F64) => {
+            let (min, max) = host_pair::<f64>(host_min, host_max)?;
+            Ok((min.host_data()?[0], max.host_data()?[0]))
+        }
+        (DType::F32, DType::F32) => {
+            let (min, max) = host_pair::<f32>(host_min, host_max)?;
+            Ok((
+                f64::from(min.host_data()?[0]),
+                f64::from(max.host_data()?[0]),
+            ))
+        }
         _ => Err(Error::Internal(
             "solve: unexpected dtype after magnitude reduction".into(),
         )),
     }
 }
 
-fn singularity_tolerance(dtype: DType, max_magnitude: f64) -> f64 {
+/// The typed pair behind a same-dtype pair of host tensors, or this module's refusal.
+fn host_pair<'a, T: TensorScalar>(
+    lhs: &'a Tensor,
+    rhs: &'a Tensor,
+) -> Result<(&'a TypedTensor<T>, &'a TypedTensor<T>)> {
+    let internal = || Error::Internal("solve: unexpected dtype after magnitude reduction".into());
+    let lhs_t = lhs.as_typed::<T>().ok_or_else(internal)?;
+    let rhs_t = rhs.as_typed::<T>().ok_or_else(internal)?;
+    Ok((lhs_t, rhs_t))
+}
+
+fn singularity_tolerance(dtype: DType, max_magnitude: f64) -> Result<f64> {
     let eps = match dtype {
         DType::F32 | DType::C32 => f32::EPSILON as f64,
         DType::F64 | DType::C64 => f64::EPSILON,
         DType::I32 | DType::I64 | DType::Bool => f64::EPSILON,
+        // The solve path validates the dtype before it reaches here, and a scalar tenferro does
+        // not declare has no tolerance this kernel could pick.
+        DType::External(_) => {
+            return Err(crate::error::unsupported_dtype(
+                "singularity_tolerance",
+                dtype,
+            ));
+        }
     };
-    eps * max_magnitude.max(1.0)
+    Ok(eps * max_magnitude.max(1.0))
 }

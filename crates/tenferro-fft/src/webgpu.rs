@@ -17,14 +17,26 @@ impl FftBackend for WebGpuExecSession<'_> {
         // CubeK plan to duplicate in tenferro's extension cache.
         validate_spec_input(input, spec)?;
         let plan = MetalFftPlan::new(self, spec)?;
-        match (spec.operation(), input) {
-            (FftOperation::C2cForward | FftOperation::C2cInverse, Tensor::C32(input)) => {
-                execute_cfft(self, input, spec, &plan)
+        let c32 = || {
+            input
+                .as_typed::<tenferro_tensor::Complex32>()
+                .expect("Metal FFT reads a c32 operand")
+        };
+        match (spec.operation(), input.dtype()) {
+            (FftOperation::C2cForward | FftOperation::C2cInverse, tenferro_tensor::DType::C32) => {
+                execute_cfft(self, c32(), spec, &plan)
             }
-            (FftOperation::R2cOnesided, Tensor::F32(input)) => {
-                execute_rfft(self, input, spec, &plan)
+            (FftOperation::R2cOnesided, tenferro_tensor::DType::F32) => execute_rfft(
+                self,
+                input
+                    .as_typed::<f32>()
+                    .expect("Metal FFT reads an f32 operand"),
+                spec,
+                &plan,
+            ),
+            (FftOperation::C2r, tenferro_tensor::DType::C32) => {
+                execute_irfft(self, c32(), spec, &plan)
             }
-            (FftOperation::C2r, Tensor::C32(input)) => execute_irfft(self, input, spec, &plan),
             _ => Err(unsupported(
                 spec,
                 "Metal FFT supports C32 CFFT, F32 one-sided RFFT, and C32-to-F32 IRFFT",
@@ -179,7 +191,7 @@ fn execute_cfft(
         plan.normalization,
         op,
     )
-    .map(Tensor::C32)
+    .map(Tensor::from_typed::<tenferro_tensor::Complex32>)
 }
 
 fn execute_rfft(
@@ -199,7 +211,7 @@ fn execute_rfft(
         plan.normalization,
         op,
     )
-    .map(Tensor::C32)
+    .map(Tensor::from_typed::<tenferro_tensor::Complex32>)
 }
 
 fn execute_irfft(
@@ -219,7 +231,7 @@ fn execute_irfft(
         plan.normalization,
         op,
     )
-    .map(Tensor::F32)
+    .map(Tensor::from_typed::<f32>)
 }
 
 fn validate_spec_input(input: &Tensor, spec: &FftPlanSpec) -> tenferro_tensor::Result<()> {

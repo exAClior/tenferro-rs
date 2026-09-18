@@ -1166,21 +1166,21 @@ fn test_full_pipeline_multi_free_dim_decomp_runs_correctly() {
     //                       RHS = sequential 0..20, reshaped as [4, 5].
     let lhs_data: Vec<f64> = (0..24).map(|x| x as f64).collect();
     let rhs_data: Vec<f64> = (0..20).map(|x| x as f64).collect();
-    let lhs = Tensor::F64(
+    let lhs = Tensor::from_typed::<f64>(
         TypedTensor::<f64>::from_vec_col_major(vec![2, 3, 4], lhs_data.clone()).unwrap(),
     );
-    let rhs =
-        Tensor::F64(TypedTensor::<f64>::from_vec_col_major(vec![4, 5], rhs_data.clone()).unwrap());
+    let rhs = Tensor::from_typed::<f64>(
+        TypedTensor::<f64>::from_vec_col_major(vec![4, 5], rhs_data.clone()).unwrap(),
+    );
 
     let mut backend = CpuBackend::default();
     let mut outputs =
         exec::eval_exec_ir_unsegmented_with_cache(&mut backend, &exec_program, vec![lhs, rhs])
             .expect("executing decomposed program must not fail");
     let out = outputs.remove(0);
-    let typed = match &out {
-        Tensor::F64(inner) => inner,
-        other => panic!("expected F64 tensor, got {other:?}"),
-    };
+    let typed = &out
+        .as_typed::<f64>()
+        .expect("the dtype guard selects this arm");
     assert_eq!(typed.shape(), &[2, 3, 5]);
 
     // Reference: column-major (tenferro storage convention) matmul.

@@ -57,10 +57,8 @@ macro_rules! impl_tensor_as_typed {
         $(
             impl TensorAsTyped<$ty> for Tensor {
                 fn as_typed(&self) -> Option<&TypedTensor<$ty>> {
-                    match self {
-                        Tensor::$variant(tensor) => Some(tensor),
-                        _ => None,
-                    }
+                    let tensor = tenferro_tensor::Tensor::as_typed::<$ty>(self);
+                    tensor
                 }
             }
         )+
@@ -86,6 +84,10 @@ fn kernel_dtype(dtype: DType) -> KernelDType {
         DType::Bool => KernelDType::Bool,
         DType::C32 => KernelDType::C32,
         DType::C64 => KernelDType::C64,
+        // INVARIANT: `KernelDType` is the fixed compiled-kernel vocabulary, and
+        // callers reach this after rejecting unsupported dtypes. An externally
+        // defined scalar has no entry in it.
+        DType::External(_) => unreachable!("KernelDType covers the preset scalars"),
     }
 }
 
@@ -126,57 +128,150 @@ fn indexed_plan_key(
 }
 
 macro_rules! dispatch_tensor_unary_result {
-    ($input:expr, |$tensor:ident| $body:expr) => {
-        match $input {
-            Tensor::F32($tensor) => Ok(Tensor::F32($body?)),
-            Tensor::F64($tensor) => Ok(Tensor::F64($body?)),
-            Tensor::I32($tensor) => Ok(Tensor::I32($body?)),
-            Tensor::I64($tensor) => Ok(Tensor::I64($body?)),
-            Tensor::Bool($tensor) => Ok(Tensor::Bool($body?)),
-            Tensor::C32($tensor) => Ok(Tensor::C32($body?)),
-            Tensor::C64($tensor) => Ok(Tensor::C64($body?)),
+    ($input:expr, |$tensor:ident| $body:expr) => {{
+        let input = $input;
+        match input.dtype() {
+            DType::F32 => {
+                let $tensor = unary_operand::<f32>(input)?;
+                Ok(Tensor::from_typed::<f32>($body?))
+            }
+            DType::F64 => {
+                let $tensor = unary_operand::<f64>(input)?;
+                Ok(Tensor::from_typed::<f64>($body?))
+            }
+            DType::I32 => {
+                let $tensor = unary_operand::<i32>(input)?;
+                Ok(Tensor::from_typed::<i32>($body?))
+            }
+            DType::I64 => {
+                let $tensor = unary_operand::<i64>(input)?;
+                Ok(Tensor::from_typed::<i64>($body?))
+            }
+            DType::Bool => {
+                let $tensor = unary_operand::<bool>(input)?;
+                Ok(Tensor::from_typed::<bool>($body?))
+            }
+            DType::C32 => {
+                let $tensor = unary_operand::<num_complex::Complex32>(input)?;
+                Ok(Tensor::from_typed::<num_complex::Complex32>($body?))
+            }
+            DType::C64 => {
+                let $tensor = unary_operand::<num_complex::Complex64>(input)?;
+                Ok(Tensor::from_typed::<num_complex::Complex64>($body?))
+            }
+            // A caller-owned payload has no CPU operation implementation.
+            DType::External(type_id) => Err(crate::Error::unsupported_dtype(
+                "cpu",
+                tenferro_tensor::DType::External(type_id),
+                "an externally defined payload is not supported by this CPU operation",
+            )),
         }
-    };
+    }};
+}
+
+/// The typed tensor behind `input`, or the refusal a tag the dispatch cannot resolve reports.
+fn unary_operand<T: tenferro_tensor::TensorScalar>(
+    input: &Tensor,
+) -> crate::Result<&TypedTensor<T>> {
+    input.as_typed::<T>().ok_or_else(|| {
+        crate::Error::unsupported_dtype(
+            "cpu",
+            input.dtype(),
+            "an externally defined payload is not supported by this CPU operation",
+        )
+    })
 }
 
 macro_rules! dispatch_same_dtype_result {
-    ($op:literal, $lhs:expr, $rhs:expr, |$lhs_t:ident, $rhs_t:ident| $body:expr) => {
-        match ($lhs, $rhs) {
-            (Tensor::F32($lhs_t), Tensor::F32($rhs_t)) => Ok(Tensor::F32($body?)),
-            (Tensor::F64($lhs_t), Tensor::F64($rhs_t)) => Ok(Tensor::F64($body?)),
-            (Tensor::I32($lhs_t), Tensor::I32($rhs_t)) => Ok(Tensor::I32($body?)),
-            (Tensor::I64($lhs_t), Tensor::I64($rhs_t)) => Ok(Tensor::I64($body?)),
-            (Tensor::Bool($lhs_t), Tensor::Bool($rhs_t)) => Ok(Tensor::Bool($body?)),
-            (Tensor::C32($lhs_t), Tensor::C32($rhs_t)) => Ok(Tensor::C32($body?)),
-            (Tensor::C64($lhs_t), Tensor::C64($rhs_t)) => Ok(Tensor::C64($body?)),
-            _ => Err(crate::Error::dtype_mismatch(
-                $op,
-                $lhs.dtype(),
-                $rhs.dtype(),
-            )),
+    ($op:literal, $lhs:expr, $rhs:expr, |$lhs_t:ident, $rhs_t:ident| $body:expr) => {{
+        let lhs = $lhs;
+        let rhs = $rhs;
+        match (lhs.dtype(), rhs.dtype()) {
+            (DType::F32, DType::F32) => {
+                let ($lhs_t, $rhs_t) = pair_operands::<f32>($op, lhs, rhs)?;
+                Ok(Tensor::from_typed::<f32>($body?))
+            }
+            (DType::F64, DType::F64) => {
+                let ($lhs_t, $rhs_t) = pair_operands::<f64>($op, lhs, rhs)?;
+                Ok(Tensor::from_typed::<f64>($body?))
+            }
+            (DType::I32, DType::I32) => {
+                let ($lhs_t, $rhs_t) = pair_operands::<i32>($op, lhs, rhs)?;
+                Ok(Tensor::from_typed::<i32>($body?))
+            }
+            (DType::I64, DType::I64) => {
+                let ($lhs_t, $rhs_t) = pair_operands::<i64>($op, lhs, rhs)?;
+                Ok(Tensor::from_typed::<i64>($body?))
+            }
+            (DType::Bool, DType::Bool) => {
+                let ($lhs_t, $rhs_t) = pair_operands::<bool>($op, lhs, rhs)?;
+                Ok(Tensor::from_typed::<bool>($body?))
+            }
+            (DType::C32, DType::C32) => {
+                let ($lhs_t, $rhs_t) = pair_operands::<num_complex::Complex32>($op, lhs, rhs)?;
+                Ok(Tensor::from_typed::<num_complex::Complex32>($body?))
+            }
+            (DType::C64, DType::C64) => {
+                let ($lhs_t, $rhs_t) = pair_operands::<num_complex::Complex64>($op, lhs, rhs)?;
+                Ok(Tensor::from_typed::<num_complex::Complex64>($body?))
+            }
+            _ => Err(crate::Error::dtype_mismatch($op, lhs.dtype(), rhs.dtype())),
         }
-    };
+    }};
 }
 
 macro_rules! dispatch_same_dtype_without_bool_result {
-    ($op:literal, $lhs:expr, $rhs:expr, $bool_message:literal, |$lhs_t:ident, $rhs_t:ident| $body:expr) => {
-        match ($lhs, $rhs) {
-            (Tensor::F32($lhs_t), Tensor::F32($rhs_t)) => Ok(Tensor::F32($body?)),
-            (Tensor::F64($lhs_t), Tensor::F64($rhs_t)) => Ok(Tensor::F64($body?)),
-            (Tensor::I32($lhs_t), Tensor::I32($rhs_t)) => Ok(Tensor::I32($body?)),
-            (Tensor::I64($lhs_t), Tensor::I64($rhs_t)) => Ok(Tensor::I64($body?)),
-            (Tensor::C32($lhs_t), Tensor::C32($rhs_t)) => Ok(Tensor::C32($body?)),
-            (Tensor::C64($lhs_t), Tensor::C64($rhs_t)) => Ok(Tensor::C64($body?)),
-            (Tensor::Bool(_), Tensor::Bool(_)) => {
-                Err(crate::Error::unsupported($op, $bool_message))
+    ($op:literal, $lhs:expr, $rhs:expr, $bool_message:literal, |$lhs_t:ident, $rhs_t:ident| $body:expr) => {{
+        let lhs = $lhs;
+        let rhs = $rhs;
+        match (lhs.dtype(), rhs.dtype()) {
+            (DType::F32, DType::F32) => {
+                let ($lhs_t, $rhs_t) = pair_operands::<f32>($op, lhs, rhs)?;
+                Ok(Tensor::from_typed::<f32>($body?))
             }
-            _ => Err(crate::Error::dtype_mismatch(
-                $op,
-                $lhs.dtype(),
-                $rhs.dtype(),
-            )),
+            (DType::F64, DType::F64) => {
+                let ($lhs_t, $rhs_t) = pair_operands::<f64>($op, lhs, rhs)?;
+                Ok(Tensor::from_typed::<f64>($body?))
+            }
+            (DType::I32, DType::I32) => {
+                let ($lhs_t, $rhs_t) = pair_operands::<i32>($op, lhs, rhs)?;
+                Ok(Tensor::from_typed::<i32>($body?))
+            }
+            (DType::I64, DType::I64) => {
+                let ($lhs_t, $rhs_t) = pair_operands::<i64>($op, lhs, rhs)?;
+                Ok(Tensor::from_typed::<i64>($body?))
+            }
+            (DType::C32, DType::C32) => {
+                let ($lhs_t, $rhs_t) = pair_operands::<num_complex::Complex32>($op, lhs, rhs)?;
+                Ok(Tensor::from_typed::<num_complex::Complex32>($body?))
+            }
+            (DType::C64, DType::C64) => {
+                let ($lhs_t, $rhs_t) = pair_operands::<num_complex::Complex64>($op, lhs, rhs)?;
+                Ok(Tensor::from_typed::<num_complex::Complex64>($body?))
+            }
+            (DType::Bool, DType::Bool) => Err(crate::Error::unsupported($op, $bool_message)),
+
+            _ => Err(crate::Error::dtype_mismatch($op, lhs.dtype(), rhs.dtype())),
         }
-    };
+    }};
+}
+
+/// The typed operands behind a same-dtype pair, or the refusal a mismatched pair reports.
+///
+/// Callers reach this from a match on the pair of dtypes, so `None` means the tags and the runtime
+/// dtypes disagree rather than a caller mistake.
+fn pair_operands<'a, T: tenferro_tensor::TensorScalar>(
+    op: &'static str,
+    lhs: &'a Tensor,
+    rhs: &'a Tensor,
+) -> crate::Result<(&'a TypedTensor<T>, &'a TypedTensor<T>)> {
+    let lhs_t = lhs
+        .as_typed::<T>()
+        .ok_or_else(|| crate::Error::dtype_mismatch(op, lhs.dtype(), rhs.dtype()))?;
+    let rhs_t = rhs
+        .as_typed::<T>()
+        .ok_or_else(|| crate::Error::dtype_mismatch(op, lhs.dtype(), rhs.dtype()))?;
+    Ok((lhs_t, rhs_t))
 }
 
 #[cfg(test)]
@@ -329,9 +424,9 @@ pub(crate) fn dynamic_slice_with_pool(
 /// use tenferro_cpu as cpu;
 /// use tenferro_tensor::{Tensor, TypedTensor};
 ///
-/// let operand = Tensor::F64(TypedTensor::from_vec_col_major(vec![5], vec![0.0; 5])?);
-/// let update = Tensor::F64(TypedTensor::from_vec_col_major(vec![2], vec![3.0, 4.0])?);
-/// let starts = Tensor::I64(TypedTensor::from_vec_col_major(vec![1], vec![4])?);
+/// let operand = Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(vec![5], vec![0.0; 5])?);
+/// let update = Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(vec![2], vec![3.0, 4.0])?);
+/// let starts = Tensor::from_typed::<i64>(TypedTensor::from_vec_col_major(vec![1], vec![4])?);
 ///
 /// let out = cpu::dynamic_update_slice(&operand, &update, &starts).unwrap();
 /// assert_eq!(out.as_slice::<f64>().unwrap(), &[0.0, 0.0, 0.0, 3.0, 4.0]);
@@ -792,20 +887,50 @@ fn f64_index_to_i64(value: f64) -> crate::Result<i64> {
     Ok(value as i64)
 }
 
+/// The refusal this module produces for a dtype it cannot read as an index tensor.
+///
+/// The accessor returns it when the tag table and the runtime dtype disagree, which
+/// is unreachable in practice; the tags that are genuinely rejected keep their own
+/// arms and the same expression.
+fn unsupported_index_dtype(complex: bool) -> crate::Error {
+    crate::Error::invalid_argument(
+        "index_tensor",
+        "configuration",
+        if complex {
+            "complex index tensors are not supported; supported index dtypes: I32/I64/F32/F64"
+        } else {
+            "bool index tensors are not supported; supported index dtypes: I32/I64/F32/F64"
+        },
+    )
+}
+
 fn try_index_tensor(tensor: &Tensor) -> crate::Result<IndexTensor> {
-    match tensor {
-        Tensor::I32(t) => Ok(IndexTensor {
-            shape: t.shape().to_vec(),
-            values: typed_host_data("index_tensor", t)?
-                .iter()
-                .map(|&value| value as i64)
-                .collect(),
-        }),
-        Tensor::I64(t) => Ok(IndexTensor {
-            shape: t.shape().to_vec(),
-            values: typed_host_data("index_tensor", t)?.to_vec(),
-        }),
-        Tensor::F32(t) => {
+    match tensor.dtype() {
+        DType::I32 => {
+            let t = tensor
+                .as_typed::<i32>()
+                .ok_or_else(|| unsupported_index_dtype(false))?;
+            Ok(IndexTensor {
+                shape: t.shape().to_vec(),
+                values: typed_host_data("index_tensor", t)?
+                    .iter()
+                    .map(|&value| value as i64)
+                    .collect(),
+            })
+        }
+        DType::I64 => {
+            let t = tensor
+                .as_typed::<i64>()
+                .ok_or_else(|| unsupported_index_dtype(false))?;
+            Ok(IndexTensor {
+                shape: t.shape().to_vec(),
+                values: typed_host_data("index_tensor", t)?.to_vec(),
+            })
+        }
+        DType::F32 => {
+            let t = tensor
+                .as_typed::<f32>()
+                .ok_or_else(|| unsupported_index_dtype(false))?;
             let values: crate::Result<Vec<i64>> = typed_host_data("index_tensor", t)?
                 .iter()
                 .map(|&value| f32_index_to_i64(value))
@@ -815,7 +940,10 @@ fn try_index_tensor(tensor: &Tensor) -> crate::Result<IndexTensor> {
                 values: values?,
             })
         }
-        Tensor::F64(t) => {
+        DType::F64 => {
+            let t = tensor
+                .as_typed::<f64>()
+                .ok_or_else(|| unsupported_index_dtype(false))?;
             let values: crate::Result<Vec<i64>> = typed_host_data("index_tensor", t)?
                 .iter()
                 .map(|&value| f64_index_to_i64(value))
@@ -825,16 +953,8 @@ fn try_index_tensor(tensor: &Tensor) -> crate::Result<IndexTensor> {
                 values: values?,
             })
         }
-        Tensor::Bool(_) => Err(crate::Error::invalid_argument(
-            "index_tensor",
-            "configuration",
-            "bool index tensors are not supported; supported index dtypes: I32/I64/F32/F64",
-        )),
-        Tensor::C32(_) | Tensor::C64(_) => Err(crate::Error::invalid_argument(
-            "index_tensor",
-            "configuration",
-            "complex index tensors are not supported; supported index dtypes: I32/I64/F32/F64",
-        )),
+        DType::Bool => Err(unsupported_index_dtype(false)),
+        DType::C32 | DType::C64 | DType::External(_) => Err(unsupported_index_dtype(true)),
     }
 }
 

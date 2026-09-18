@@ -7,25 +7,25 @@ use tenferro_tensor::{
 };
 
 fn f64_tensor(shape: Vec<usize>, data: Vec<f64>) -> Tensor {
-    Tensor::F64(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<f64>(TypedTensor::from_vec_col_major(shape, data).unwrap())
 }
 
 fn i64_tensor(shape: Vec<usize>, data: Vec<i64>) -> Tensor {
-    Tensor::I64(TypedTensor::from_vec_col_major(shape, data).unwrap())
+    Tensor::from_typed::<i64>(TypedTensor::from_vec_col_major(shape, data).unwrap())
 }
 
 fn get_f64_data(t: &Tensor) -> &[f64] {
-    match t {
-        Tensor::F64(inner) => inner.host_data().unwrap(),
-        _ => panic!("expected F64"),
-    }
+    t.as_typed::<f64>()
+        .expect("expected F64")
+        .host_data()
+        .unwrap()
 }
 
 fn get_i64_data(t: &Tensor) -> &[i64] {
-    match t {
-        Tensor::I64(inner) => inner.host_data().unwrap(),
-        _ => panic!("expected I64"),
-    }
+    t.as_typed::<i64>()
+        .expect("expected I64")
+        .host_data()
+        .unwrap()
 }
 
 #[test]

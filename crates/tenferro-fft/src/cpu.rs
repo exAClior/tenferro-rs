@@ -1,3 +1,27 @@
+/// The Rust scalar type behind a preset variant name a macro received.
+macro_rules! preset_scalar {
+    (F32) => {
+        f32
+    };
+    (F64) => {
+        f64
+    };
+    (I32) => {
+        i32
+    };
+    (I64) => {
+        i64
+    };
+    (Bool) => {
+        bool
+    };
+    (C32) => {
+        num_complex::Complex32
+    };
+    (C64) => {
+        num_complex::Complex64
+    };
+}
 mod lanes;
 
 use crate::backend::FftExecutionCache;
@@ -59,7 +83,7 @@ impl FftBackend for CpuExecSession<'_> {
                         context.native_thread_count(),
                         $project,
                     )
-                    .map(Tensor::$variant)
+                    .map(Tensor::from_typed::<preset_scalar!($variant)>)
                 };
             }
             match (spec.operation(), view) {
@@ -119,6 +143,18 @@ impl FftBackend for CpuExecSession<'_> {
         })
     }
 }
+/// The typed tensor behind an FFT operand.
+///
+/// The tables that call this match on the payload's dtype first, so the refusal is unreachable; it
+/// names the operation rather than a dtype description, which the wildcard arms still report.
+fn fft_operand<'a, T: tenferro_tensor::TensorScalar>(
+    input: &'a Tensor,
+    op: &'static str,
+) -> tenferro_tensor::Result<&'a tenferro_tensor::TypedTensor<T>> {
+    input
+        .as_typed::<T>()
+        .ok_or_else(|| crate::tensor_unsupported_dtype(op, input.dtype(), "a supported dtype"))
+}
 
 #[cfg(feature = "autodiff")]
 pub(crate) fn execute_in_place(
@@ -142,15 +178,42 @@ pub(crate) fn execute_in_place(
         ));
     }
     let mut plans = ExtensionFftPlanCache::new(cache.store_mut());
-    session.with_linalg_pool(|context, _| match input {
-        Tensor::C64(x) => in_place_typed(x, spec, &mut plans, context.native_thread_count()),
-        Tensor::C32(x) => in_place_typed(x, spec, &mut plans, context.native_thread_count()),
+    session.with_linalg_pool(|context, _| match input.dtype() {
+        tenferro_tensor::DType::C64 => in_place_typed(
+            in_place_operand::<f64>(&mut *input)?,
+            spec,
+            &mut plans,
+            context.native_thread_count(),
+        ),
+        tenferro_tensor::DType::C32 => in_place_typed(
+            in_place_operand::<f32>(&mut *input)?,
+            spec,
+            &mut plans,
+            context.native_thread_count(),
+        ),
         other => Err(crate::tensor_unsupported_dtype(
             "fft_in_place",
-            other.dtype(),
+            other,
             "C32 or C64",
         )),
     })
+}
+
+/// The typed tensor behind an in-place FFT operand, which the plan writes through.
+///
+/// The arms that call this match on the payload's dtype first, so the refusal reports a dtype the plan
+/// cannot write rather than a caller mistake.
+#[cfg(feature = "autodiff")]
+fn in_place_operand<T: tenferro_tensor::TensorScalar>(
+    input: &mut Tensor,
+) -> tenferro_tensor::Result<&mut TypedTensor<Complex<T>>>
+where
+    Complex<T>: tenferro_tensor::TensorScalar,
+{
+    let dtype = input.dtype();
+    input
+        .as_typed_mut::<Complex<T>>()
+        .ok_or_else(|| crate::tensor_unsupported_dtype("fft_in_place", dtype, "C32 or C64"))
 }
 
 #[cfg(feature = "autodiff")]
@@ -250,27 +313,37 @@ fn execute_fft_with_plans(
                 |values| lanes::Input::$kind(values),
                 $project,
             )
-            .map(Tensor::$variant)
+            .map(Tensor::from_typed::<preset_scalar!($variant)>)
         };
     }
-    match (spec.operation(), input) {
-        (FftOperation::C2cForward | FftOperation::C2cInverse, Tensor::C64(x)) => {
+    match (spec.operation(), input.dtype()) {
+        (FftOperation::C2cForward | FftOperation::C2cInverse, tenferro_tensor::DType::C64) => {
+            let x = fft_operand::<Complex<f64>>(input, fft_op_name(spec.operation()))?;
             transform!(x, Complex, C64, |v| v)
         }
-        (FftOperation::C2cForward | FftOperation::C2cInverse, Tensor::C32(x)) => {
+        (FftOperation::C2cForward | FftOperation::C2cInverse, tenferro_tensor::DType::C32) => {
+            let x = fft_operand::<Complex<f32>>(input, fft_op_name(spec.operation()))?;
             transform!(x, Complex, C32, |v| v)
         }
-        (FftOperation::R2cFull | FftOperation::R2cOnesided, Tensor::F64(x)) => {
+        (FftOperation::R2cFull | FftOperation::R2cOnesided, tenferro_tensor::DType::F64) => {
+            let x = fft_operand::<f64>(input, fft_op_name(spec.operation()))?;
             transform!(x, Real, C64, |v| v)
         }
-        (FftOperation::R2cFull | FftOperation::R2cOnesided, Tensor::F32(x)) => {
+        (FftOperation::R2cFull | FftOperation::R2cOnesided, tenferro_tensor::DType::F32) => {
+            let x = fft_operand::<f32>(input, fft_op_name(spec.operation()))?;
             transform!(x, Real, C32, |v| v)
         }
-        (FftOperation::C2r, Tensor::C64(x)) => transform!(x, Complex, F64, |v: Complex<f64>| v.re),
-        (FftOperation::C2r, Tensor::C32(x)) => transform!(x, Complex, F32, |v: Complex<f32>| v.re),
+        (FftOperation::C2r, tenferro_tensor::DType::C64) => {
+            let x = fft_operand::<Complex<f64>>(input, fft_op_name(spec.operation()))?;
+            transform!(x, Complex, F64, |v: Complex<f64>| v.re)
+        }
+        (FftOperation::C2r, tenferro_tensor::DType::C32) => {
+            let x = fft_operand::<Complex<f32>>(input, fft_op_name(spec.operation()))?;
+            transform!(x, Complex, F32, |v: Complex<f32>| v.re)
+        }
         (operation, other) => Err(crate::tensor_unsupported_dtype(
             fft_op_name(operation),
-            other.dtype(),
+            other,
             expected_dtype_description(operation),
         )),
     }

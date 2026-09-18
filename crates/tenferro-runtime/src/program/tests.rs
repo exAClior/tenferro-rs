@@ -399,7 +399,7 @@ fn extension_operations_require_explicit_effect_and_alias_declarations() {
 
 #[test]
 fn bindings_freeze_separately_and_reject_foreign_or_duplicate_inputs() {
-    let tensor = Arc::new(Tensor::F64(
+    let tensor = Arc::new(Tensor::from_typed::<f64>(
         TypedTensor::from_vec_col_major(vec![2], vec![1.0, 2.0]).unwrap(),
     ));
     let spec = ProgramInputSpec::new(DType::F64, [DimExpr::Const(2)]);
@@ -492,7 +492,7 @@ fn finish_reports_binding_finalization_without_publishing_structure() {
     let input = builder
         .input(ProgramInputSpec::new(DType::F64, [DimExpr::Const(2)]))
         .unwrap();
-    let wrong_dtype = Arc::new(Tensor::F32(
+    let wrong_dtype = Arc::new(Tensor::from_typed::<f32>(
         TypedTensor::from_vec_col_major(vec![2], vec![1.0_f32, 2.0]).unwrap(),
     ));
     builder
@@ -516,7 +516,7 @@ fn inputs_may_be_declared_between_operations_without_confusing_bindings() {
     let second = builder
         .input(ProgramInputSpec::new(DType::F64, [DimExpr::Const(2)]))
         .unwrap();
-    let tensor = Arc::new(Tensor::F64(
+    let tensor = Arc::new(Tensor::from_typed::<f64>(
         TypedTensor::from_vec_col_major(vec![2], vec![3.0, 4.0]).unwrap(),
     ));
     let key = builder
@@ -541,7 +541,7 @@ fn inputs_may_be_declared_between_operations_without_confusing_bindings() {
 
 #[test]
 fn import_preserves_ordered_duplicate_roots_structure_binding_and_provenance() {
-    let tensor = Arc::new(Tensor::F64(
+    let tensor = Arc::new(Tensor::from_typed::<f64>(
         TypedTensor::from_vec_col_major(vec![2], vec![5.0, 6.0]).unwrap(),
     ));
     let mut source = SemanticProgramBuilder::new();
@@ -709,7 +709,7 @@ fn semantic_identity_is_normalized_cached_and_excludes_bindings() {
             .input(ProgramInputSpec::new(DType::F64, [DimExpr::Const(2)]))
             .unwrap();
         if with_binding {
-            let tensor = Arc::new(Tensor::F64(
+            let tensor = Arc::new(Tensor::from_typed::<f64>(
                 TypedTensor::from_vec_col_major(vec![2], vec![1.0, 2.0]).unwrap(),
             ));
             builder
@@ -988,7 +988,7 @@ fn semantic_transform_is_object_safe_and_identity_preserves_unused_bindings() {
     let unused_bound = builder
         .input(ProgramInputSpec::new(DType::F64, [DimExpr::Const(2)]))
         .unwrap();
-    let tensor = Arc::new(Tensor::F64(
+    let tensor = Arc::new(Tensor::from_typed::<f64>(
         TypedTensor::from_vec_col_major(vec![2], vec![7.0, 8.0]).unwrap(),
     ));
     builder
@@ -1105,4 +1105,68 @@ fn semantic_identity_ordinals_report_exact_retained_bytes() {
         frozen.program.identity.ordinals_retained_bytes(),
         Some(expected)
     );
+}
+
+#[test]
+fn an_external_scalar_needs_a_declared_identity() {
+    let external = DType::External(core::any::TypeId::of::<f64>());
+
+    // A tag without a declared name cannot be encoded, so it is rejected.
+    assert!(matches!(
+        super::builder::require_scalar_identity(&ProgramValueMetadata::new(external, [DimExpr::Const(2)]), "a program input"),
+        Err(ProgramBuildError::ExternalScalarWithoutIdentity { dtype, .. }) if dtype == external
+    ));
+
+    // The declared name is what the program identity carries.
+    let declared =
+        ProgramValueMetadata::new(external, [DimExpr::Const(2)]).with_scalar_identity("example.v1");
+    assert!(super::builder::require_scalar_identity(&declared, "a program input").is_ok());
+    assert_eq!(declared.scalar_identity(), Some("example.v1"));
+
+    for dtype in [
+        DType::F32,
+        DType::F64,
+        DType::I32,
+        DType::I64,
+        DType::Bool,
+        DType::C32,
+        DType::C64,
+    ] {
+        assert!(
+            super::builder::require_scalar_identity(
+                &ProgramValueMetadata::new(dtype, [DimExpr::Const(2)]),
+                "a program input"
+            )
+            .is_ok(),
+            "{dtype:?}"
+        );
+    }
+}
+
+#[test]
+fn a_core_operation_may_not_name_an_external_scalar() {
+    let external = DType::External(core::any::TypeId::of::<f64>());
+
+    assert!(matches!(
+        super::builder::reject_core_external_dtype(&CoreSemanticOp::Convert {
+            from: external,
+            to: DType::F64,
+        }),
+        Err(ProgramBuildError::ExternalScalarWithoutIdentity { .. })
+    ));
+    assert!(matches!(
+        super::builder::reject_core_external_dtype(&CoreSemanticOp::Constant {
+            dtype: external,
+            bytes: Vec::new(),
+        }),
+        Err(ProgramBuildError::ExternalScalarWithoutIdentity { .. })
+    ));
+    assert!(
+        super::builder::reject_core_external_dtype(&CoreSemanticOp::Convert {
+            from: DType::F32,
+            to: DType::F64,
+        })
+        .is_ok()
+    );
+    assert!(super::builder::reject_core_external_dtype(&CoreSemanticOp::Neg).is_ok());
 }

@@ -18,6 +18,31 @@ use crate::arbiter::{with_execution_owner, ResourcePermit};
 use crate::backend::CpuBackendKind;
 use crate::buffer_pool::BufferPool;
 use crate::domain_executor::{indexed_jobs, install_scoped};
+/// The Rust scalar type behind a preset variant name a macro received.
+macro_rules! preset_scalar {
+    (F32) => {
+        f32
+    };
+    (F64) => {
+        f64
+    };
+    (I32) => {
+        i32
+    };
+    (I64) => {
+        i64
+    };
+    (Bool) => {
+        bool
+    };
+    (C32) => {
+        num_complex::Complex32
+    };
+    (C64) => {
+        num_complex::Complex64
+    };
+}
+
 #[cfg(feature = "cpu-blas")]
 use crate::provider_capability::builtin_blas_execution_capabilities;
 #[cfg(not(feature = "cpu-blas"))]
@@ -314,7 +339,7 @@ impl<'a> CpuExecutionContext<'a> {
                     crate::materialize_tensor_read(buffers, op, TensorRead::View(view))
                 })?;
                 let result = operation(&materialized, buffers);
-                reclaim_tensor(buffers, materialized);
+                crate::backend::reclaim_tensor(buffers, materialized);
                 result
             }
         }
@@ -438,18 +463,6 @@ impl<'a> CpuExecutionContext<'a> {
             _ => strided_kernel::ExecutionPolicy::Sequential,
         };
         strided_kernel::with_execution_policy(policy, operation)
-    }
-}
-
-fn reclaim_tensor(buffers: &mut BufferPool, tensor: Tensor) {
-    match tensor {
-        Tensor::F32(tensor) => crate::backend::reclaim_typed(buffers, tensor),
-        Tensor::F64(tensor) => crate::backend::reclaim_typed(buffers, tensor),
-        Tensor::I32(tensor) => crate::backend::reclaim_typed(buffers, tensor),
-        Tensor::I64(tensor) => crate::backend::reclaim_typed(buffers, tensor),
-        Tensor::Bool(tensor) => crate::backend::reclaim_typed(buffers, tensor),
-        Tensor::C32(tensor) => crate::backend::reclaim_typed(buffers, tensor),
-        Tensor::C64(tensor) => crate::backend::reclaim_typed(buffers, tensor),
     }
 }
 
@@ -2047,9 +2060,15 @@ fn materialize_strided_layout(
             ($owned:ident, $view:ident) => {
                 match (input, &mut *output) {
                     (
-                        TensorRead::Tensor(Tensor::$owned(input)),
-                        TensorWrite::Tensor(Tensor::$owned(output)),
-                    ) => {
+                        TensorRead::Tensor(input),
+                        TensorWrite::Tensor(output),
+                    ) if input.dtype() == <preset_scalar!($owned) as tenferro_tensor::TensorScalar>::dtype()
+                        && output.dtype() == <preset_scalar!($owned) as tenferro_tensor::TensorScalar>::dtype() =>
+                    {
+                        let input = input.as_typed::<preset_scalar!($owned)>()
+                            .expect("the dtype guard selects this arm");
+                        let output = output.as_typed_mut::<preset_scalar!($owned)>()
+                            .expect("the dtype guard selects this arm");
                         let input = input.as_view();
                         let mut output = output.as_view_mut();
                         crate::structural::typed_conjugate_view_into(
@@ -2061,8 +2080,10 @@ fn materialize_strided_layout(
                     }
                     (
                         TensorRead::View(TensorView::$view(input)),
-                        TensorWrite::Tensor(Tensor::$owned(output)),
-                    ) => {
+                        TensorWrite::Tensor(output),
+                    ) if output.dtype() == <preset_scalar!($owned) as tenferro_tensor::TensorScalar>::dtype() => {
+                        let output = output.as_typed_mut::<preset_scalar!($owned)>()
+                            .expect("the dtype guard selects this arm");
                         let mut output = output.as_view_mut();
                         crate::structural::typed_conjugate_view_into(
                             input,
@@ -2072,9 +2093,11 @@ fn materialize_strided_layout(
                         return Ok(CpuProviderOutcome::Executed);
                     }
                     (
-                        TensorRead::Tensor(Tensor::$owned(input)),
+                        TensorRead::Tensor(input),
                         TensorWrite::View(TensorViewMut::$view(output)),
-                    ) => {
+                    ) if input.dtype() == <preset_scalar!($owned) as tenferro_tensor::TensorScalar>::dtype() => {
+                        let input = input.as_typed::<preset_scalar!($owned)>()
+                            .expect("the dtype guard selects this arm");
                         let input = input.as_view();
                         crate::structural::typed_conjugate_view_into(
                             &input,
@@ -2109,10 +2132,19 @@ fn materialize_strided_layout(
     macro_rules! dispatch {
         ($owned:ident, $view:ident) => {
             match (input, &mut *output) {
-                (
-                    TensorRead::Tensor(Tensor::$owned(input)),
-                    TensorWrite::Tensor(Tensor::$owned(output)),
-                ) => {
+                (TensorRead::Tensor(input), TensorWrite::Tensor(output))
+                    if input.dtype()
+                        == <preset_scalar!($owned) as tenferro_tensor::TensorScalar>::dtype()
+                        && output.dtype()
+                            == <preset_scalar!($owned) as tenferro_tensor::TensorScalar>::dtype(
+                            ) =>
+                {
+                    let input = input
+                        .as_typed::<preset_scalar!($owned)>()
+                        .expect("the dtype guard selects this arm");
+                    let output = output
+                        .as_typed_mut::<preset_scalar!($owned)>()
+                        .expect("the dtype guard selects this arm");
                     let input = input.as_view();
                     let mut output = output.as_view_mut();
                     crate::structural::typed_copy_view_into(
@@ -2122,10 +2154,13 @@ fn materialize_strided_layout(
                     )?;
                     return Ok(CpuProviderOutcome::Executed);
                 }
-                (
-                    TensorRead::View(TensorView::$view(input)),
-                    TensorWrite::Tensor(Tensor::$owned(output)),
-                ) => {
+                (TensorRead::View(TensorView::$view(input)), TensorWrite::Tensor(output))
+                    if output.dtype()
+                        == <preset_scalar!($owned) as tenferro_tensor::TensorScalar>::dtype() =>
+                {
+                    let output = output
+                        .as_typed_mut::<preset_scalar!($owned)>()
+                        .expect("the dtype guard selects this arm");
                     let mut output = output.as_view_mut();
                     crate::structural::typed_copy_view_into(
                         input,
@@ -2134,10 +2169,13 @@ fn materialize_strided_layout(
                     )?;
                     return Ok(CpuProviderOutcome::Executed);
                 }
-                (
-                    TensorRead::Tensor(Tensor::$owned(input)),
-                    TensorWrite::View(TensorViewMut::$view(output)),
-                ) => {
+                (TensorRead::Tensor(input), TensorWrite::View(TensorViewMut::$view(output)))
+                    if input.dtype()
+                        == <preset_scalar!($owned) as tenferro_tensor::TensorScalar>::dtype() =>
+                {
+                    let input = input
+                        .as_typed::<preset_scalar!($owned)>()
+                        .expect("the dtype guard selects this arm");
                     let input = input.as_view();
                     crate::structural::typed_copy_view_into(
                         &input,
@@ -2191,7 +2229,13 @@ fn materialize_strided_layout_into_uninit(
     macro_rules! dispatch {
         ($owned:ident, $view:ident) => {
             match input {
-                TensorRead::Tensor(Tensor::$owned(input)) => {
+                TensorRead::Tensor(input)
+                    if input.dtype()
+                        == <preset_scalar!($owned) as tenferro_tensor::TensorScalar>::dtype() =>
+                {
+                    let input = input
+                        .as_typed::<preset_scalar!($owned)>()
+                        .expect("the dtype guard selects this arm");
                     let input = input.as_view();
                     crate::structural::typed_copy_into_uninit(
                         &input,

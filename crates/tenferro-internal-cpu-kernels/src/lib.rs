@@ -5,6 +5,31 @@
 //! Shared resource ownership is implemented by `tenferro-cpu-basic`; this crate
 //! owns the ordinary dtype-dispatch kernel family.
 
+/// The Rust scalar type behind a preset variant name a macro received.
+#[allow(unused_macros)]
+macro_rules! preset_scalar {
+    (F32) => {
+        f32
+    };
+    (F64) => {
+        f64
+    };
+    (I32) => {
+        i32
+    };
+    (I64) => {
+        i64
+    };
+    (Bool) => {
+        bool
+    };
+    (C32) => {
+        num_complex::Complex32
+    };
+    (C64) => {
+        num_complex::Complex64
+    };
+}
 pub type Result<T> = tenferro_tensor::Result<T>;
 pub use tenferro_cpu_basic::{
     cpu_backend_buffer_error, cpu_division_by_zero, typed_host_data, typed_view,
@@ -12,10 +37,14 @@ pub use tenferro_cpu_basic::{
 };
 pub use tenferro_tensor::{CacheStats, DType, Error, ErrorKind};
 
+pub mod dispatch;
 pub mod elementwise;
 pub mod read_into;
+pub mod scalar_ops;
 pub use read_into::elementwise_read_into_with_context;
 
+// Re-exported so the exported dispatch macros can name them with `$crate` paths.
+pub use num_complex::{Complex32, Complex64};
 #[cfg(test)]
 use std::mem::MaybeUninit;
 #[cfg(test)]
@@ -42,18 +71,67 @@ fn clone_host_tensor_read(op: &'static str, tensor: &Tensor) -> Result<Tensor> {
     macro_rules! clone_host {
         ($variant:ident, $tensor:expr) => {{
             typed_host_data(op, $tensor)?;
-            Ok(Tensor::$variant($tensor.duplicate()?))
+            Ok(Tensor::from_typed::<preset_scalar!($variant)>(
+                $tensor.duplicate()?,
+            ))
         }};
     }
-    match tensor {
-        Tensor::F32(tensor) => clone_host!(F32, tensor),
-        Tensor::F64(tensor) => clone_host!(F64, tensor),
-        Tensor::I32(tensor) => clone_host!(I32, tensor),
-        Tensor::I64(tensor) => clone_host!(I64, tensor),
-        Tensor::Bool(tensor) => clone_host!(Bool, tensor),
-        Tensor::C32(tensor) => clone_host!(C32, tensor),
-        Tensor::C64(tensor) => clone_host!(C64, tensor),
+    match tensor.dtype() {
+        DType::F32 => {
+            let tensor = host_typed::<f32>(op, tensor)?;
+            clone_host!(F32, tensor)
+        }
+        DType::F64 => {
+            let tensor = host_typed::<f64>(op, tensor)?;
+            clone_host!(F64, tensor)
+        }
+        DType::I32 => {
+            let tensor = host_typed::<i32>(op, tensor)?;
+            clone_host!(I32, tensor)
+        }
+        DType::I64 => {
+            let tensor = host_typed::<i64>(op, tensor)?;
+            clone_host!(I64, tensor)
+        }
+        DType::Bool => {
+            let tensor = host_typed::<bool>(op, tensor)?;
+            clone_host!(Bool, tensor)
+        }
+        DType::C32 => {
+            let tensor = host_typed::<Complex32>(op, tensor)?;
+            clone_host!(C32, tensor)
+        }
+        DType::C64 => {
+            let tensor = host_typed::<Complex64>(op, tensor)?;
+            clone_host!(C64, tensor)
+        }
+        // A caller-owned payload must be duplicated by its owner, because this
+        // crate cannot clone an erased element type.
+        DType::External(type_id) => Err(crate::Error::unsupported_dtype(
+            op,
+            tenferro_tensor::DType::External(type_id),
+            "an externally defined payload must be duplicated by its owner",
+        )),
     }
+}
+
+#[cfg(test)]
+/// The typed tensor behind `tensor`, or this module's refusal for a dtype it cannot clone.
+///
+/// Callers reach this from a match on `tensor.dtype()`, so `None` means the tag table and the
+/// runtime dtype disagree rather than a caller mistake; the refusal carries the same text the
+/// externally defined arm uses.
+fn host_typed<'a, T: tenferro_tensor::TensorScalar>(
+    op: &'static str,
+    tensor: &'a Tensor,
+) -> Result<&'a TypedTensor<T>> {
+    tensor.as_typed::<T>().ok_or_else(|| {
+        crate::Error::unsupported_dtype(
+            op,
+            tensor.dtype(),
+            "an externally defined payload must be duplicated by its owner",
+        )
+    })
 }
 
 #[cfg(test)]
@@ -64,9 +142,9 @@ fn materialize_tensor_view(
 ) -> Result<Tensor> {
     macro_rules! materialize {
         ($variant:ident, $view:expr) => {{
-            Ok(Tensor::$variant(typed_materialize_view_for_tests(
-                buffers, &$view, op,
-            )?))
+            Ok(Tensor::from_typed::<preset_scalar!($variant)>(
+                typed_materialize_view_for_tests(buffers, &$view, op)?,
+            ))
         }};
     }
     match view {
@@ -113,3 +191,6 @@ where
     tensor.set_placement(view.placement().clone());
     Ok(tensor)
 }
+
+#[cfg(test)]
+mod tests;

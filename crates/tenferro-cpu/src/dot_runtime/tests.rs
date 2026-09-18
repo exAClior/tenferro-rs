@@ -681,7 +681,12 @@ impl CanonicalFallbackSpy {
                 assert!(!parts.accumulation.lhs_conj);
                 assert!(!parts.accumulation.rhs_conj);
                 match &mut *parts.output {
-                    TensorWrite::Tensor(Tensor::F64(output)) => {
+                    TensorWrite::Tensor(output)
+                        if output.dtype() == tenferro_tensor::DType::F64 =>
+                    {
+                        let output = output
+                            .as_typed_mut::<f64>()
+                            .expect("the dtype guard selects this arm");
                         assert_eq!(output.host_data()?, &[41.0; 4]);
                         output
                             .host_data_mut()?
@@ -702,19 +707,30 @@ impl CanonicalFallbackSpy {
                     ContractionScalar::C64(Complex64::new(3.0, 0.0)),
                 );
                 match parts.lhs {
-                    TensorRead::Tensor(Tensor::C64(lhs)) => {
+                    TensorRead::Tensor(lhs) if lhs.dtype() == tenferro_tensor::DType::C64 => {
+                        let lhs = lhs
+                            .as_typed::<Complex64>()
+                            .expect("the dtype guard selects this arm");
                         assert_eq!(lhs.host_data()?, &[Complex64::new(1.0, -2.0)]);
                     }
                     other => panic!("conjugated lhs was not materialized: {other:?}"),
                 }
                 match parts.rhs {
-                    TensorRead::Tensor(Tensor::C64(rhs)) => {
+                    TensorRead::Tensor(rhs) if rhs.dtype() == tenferro_tensor::DType::C64 => {
+                        let rhs = rhs
+                            .as_typed::<Complex64>()
+                            .expect("the dtype guard selects this arm");
                         assert_eq!(rhs.host_data()?, &[Complex64::new(3.0, 4.0)]);
                     }
                     other => panic!("rhs was not materialized: {other:?}"),
                 }
                 match &mut *parts.output {
-                    TensorWrite::Tensor(Tensor::C64(output)) => {
+                    TensorWrite::Tensor(output)
+                        if output.dtype() == tenferro_tensor::DType::C64 =>
+                    {
+                        let output = output
+                            .as_typed_mut::<Complex64>()
+                            .expect("the dtype guard selects this arm");
                         assert_eq!(output.host_data()?, &[Complex64::new(5.0, 1.0)]);
                         output.host_data_mut()?[0] = Complex64::new(37.0, -1.0);
                     }
@@ -2305,4 +2321,112 @@ fn opted_in_layout_provider_unsupported_falls_back_to_zeroed_materialization() {
     // Both canonical operands (lhs and rhs) attempted the uninit path before
     // falling back to the zeroed materialization.
     assert_eq!(*uninit_calls.lock().unwrap(), 2);
+}
+
+/// The outer-scheduled grouped table carries an arm per floating and complex preset scalar. The existing
+/// test drives f64, so this drives f32 and c32, whose arms the other grouped tests never take, through the
+/// spy gemm provider that reports execution without doing the arithmetic.
+#[test]
+fn engine_outer_grouped_execution_covers_float_and_complex_arms() {
+    macro_rules! run {
+        ($scalar:ty, $values:expr, $dtype:expr) => {{
+            let values: Vec<$scalar> = $values;
+            let job_count = values.len();
+            let gemm = Arc::new(GemmSpy::new(CpuProviderOutcome::Executed));
+            let bundle = route_bundle(gemm.clone(), None);
+            let lhs = Tensor::from_vec_col_major(vec![job_count], values.clone()).unwrap();
+            let rhs = Tensor::from_vec_col_major(vec![job_count], values.clone()).unwrap();
+            let mut output = Tensor::from_vec_col_major(vec![job_count], values).unwrap();
+            let jobs = (0..job_count)
+                .map(|index| GroupedGemmJob::new(index, index, index, 1, 1, 1))
+                .collect::<Vec<_>>();
+            let fixture = external_execution_context_fixture(
+                Arc::new(CountingExecutor {
+                    submits: Arc::new(AtomicUsize::new(0)),
+                    installs: Arc::new(AtomicUsize::new(0)),
+                }),
+                NonZeroUsize::new(4).unwrap(),
+            );
+            bundle
+                .execute_grouped_gemm(
+                    &fixture.entry(),
+                    TensorRead::from_tensor(&lhs),
+                    TensorRead::from_tensor(&rhs),
+                    &GroupedGemmConfig::new(
+                        &jobs,
+                        DotGeneralAccumulation::overwrite($dtype).unwrap(),
+                    ),
+                    TensorWrite::from_tensor(&mut output),
+                )
+                .expect("the spy gemm provider executes without arithmetic");
+            // The spy only records execution, so the call count is the evidence that the
+            // outer-scheduled dispatch reached this scalar's arm rather than falling back.
+            assert_eq!(*gemm.grouped_calls.lock().unwrap(), job_count);
+            assert_eq!(
+                gemm.grouped_job_counts.lock().unwrap().clone(),
+                vec![1; job_count]
+            );
+            assert_eq!(
+                gemm.parallelism.lock().unwrap().clone(),
+                vec![ParallelMode::Sequential; job_count]
+            );
+        }};
+    }
+
+    run!(f32, vec![2.0_f32; 2], DType::F32);
+    run!(
+        num_complex::Complex32,
+        vec![num_complex::Complex32::new(2.0, 0.0); 2],
+        DType::C32
+    );
+}
+
+/// The outer-scheduled grouped table carries a complex64 arm beside the floating ones. The other grouped
+/// tests drive f64, f32 and c32, so this drives complex64 through the same spy provider, which reports
+/// execution without doing the arithmetic.
+#[test]
+fn engine_outer_grouped_execution_covers_the_complex64_arm() {
+    let values = vec![num_complex::Complex64::new(2.0, 0.0); 2];
+    let job_count = values.len();
+    let gemm = Arc::new(GemmSpy::new(CpuProviderOutcome::Executed));
+    let bundle = route_bundle(gemm.clone(), None);
+    let lhs = Tensor::from_vec_col_major(vec![job_count], values.clone()).unwrap();
+    let rhs = Tensor::from_vec_col_major(vec![job_count], values.clone()).unwrap();
+    let mut output = Tensor::from_vec_col_major(vec![job_count], values).unwrap();
+    let jobs = (0..job_count)
+        .map(|index| GroupedGemmJob::new(index, index, index, 1, 1, 1))
+        .collect::<Vec<_>>();
+    let fixture = external_execution_context_fixture(
+        Arc::new(CountingExecutor {
+            submits: Arc::new(AtomicUsize::new(0)),
+            installs: Arc::new(AtomicUsize::new(0)),
+        }),
+        NonZeroUsize::new(4).unwrap(),
+    );
+
+    bundle
+        .execute_grouped_gemm(
+            &fixture.entry(),
+            TensorRead::from_tensor(&lhs),
+            TensorRead::from_tensor(&rhs),
+            &GroupedGemmConfig::new(
+                &jobs,
+                DotGeneralAccumulation::overwrite(DType::C64).unwrap(),
+            ),
+            TensorWrite::from_tensor(&mut output),
+        )
+        .expect("the spy gemm provider executes without arithmetic");
+    assert_eq!(*gemm.grouped_calls.lock().unwrap(), job_count);
+    assert_eq!(
+        gemm.grouped_job_counts.lock().unwrap().clone(),
+        vec![1; job_count]
+    );
+    assert_eq!(
+        gemm.parallelism.lock().unwrap().clone(),
+        vec![ParallelMode::Sequential; job_count]
+    );
+
+    // An integer contraction has no scalar identity, so its operand-layout arms in the validators are
+    // reachable only through a gate that refuses first; this records that rather than leaving it implied.
+    assert!(DotGeneralAccumulation::overwrite(DType::I32).is_err());
 }

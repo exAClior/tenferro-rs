@@ -13,6 +13,30 @@ use super::{
 };
 use crate::native_permutation::compact_col_major_strides;
 
+/// The Rust scalar type behind a preset variant name a macro received.
+macro_rules! preset_scalar {
+    (F32) => {
+        f32
+    };
+    (F64) => {
+        f64
+    };
+    (I32) => {
+        i32
+    };
+    (I64) => {
+        i64
+    };
+    (Bool) => {
+        bool
+    };
+    (C32) => {
+        num_complex::Complex32
+    };
+    (C64) => {
+        num_complex::Complex64
+    };
+}
 const TRANSPOSE_OP: &str = "webgpu_transpose";
 const MATERIALIZE_OP: &str = "WebGpuBackend::to_contiguous_read";
 
@@ -276,13 +300,33 @@ pub(super) fn transpose(
     input: &Tensor,
     perm: &[usize],
 ) -> crate::Result<Tensor> {
-    match input {
-        Tensor::F32(input) => transpose_typed(backend, input, perm).map(Tensor::F32),
-        Tensor::I32(input) => transpose_typed(backend, input, perm).map(Tensor::I32),
+    match input.dtype() {
+        crate::DType::F32 => transpose_typed(
+            backend,
+            webgpu_transpose_operand::<f32>(input, TRANSPOSE_OP)?,
+            perm,
+        )
+        .map(Tensor::from_typed::<f32>),
+        crate::DType::I32 => transpose_typed(
+            backend,
+            webgpu_transpose_operand::<i32>(input, TRANSPOSE_OP)?,
+            perm,
+        )
+        .map(Tensor::from_typed::<i32>),
         // CubeK has a dedicated complex WebGPU representation, but CubeCL's
         // generic WGSL compiler cannot lower CubePrimitive Complex32.
-        other => Err(unsupported_dtype(TRANSPOSE_OP, other.dtype())),
+        other => Err(unsupported_dtype(TRANSPOSE_OP, other)),
     }
+}
+
+/// The typed tensor behind a transpose operand, or this module's refusal for one.
+fn webgpu_transpose_operand<'a, T: crate::TensorScalar>(
+    input: &'a Tensor,
+    op: &'static str,
+) -> crate::Result<&'a TypedTensor<T>> {
+    input
+        .as_typed::<T>()
+        .ok_or_else(|| unsupported_dtype(op, input.dtype()))
 }
 
 pub(super) fn to_contiguous_read(
@@ -291,16 +335,36 @@ pub(super) fn to_contiguous_read(
 ) -> crate::Result<Tensor> {
     macro_rules! materialize {
         ($variant:ident, $view:expr) => {
-            materialize_typed(backend, &$view).map(Tensor::$variant)
+            materialize_typed(backend, &$view).map(Tensor::from_typed::<preset_scalar!($variant)>)
         };
     }
 
     match input {
-        TensorRead::Tensor(Tensor::F32(input)) => materialize!(F32, input.as_view()),
-        TensorRead::Tensor(Tensor::I32(input)) => materialize!(I32, input.as_view()),
+        TensorRead::Tensor(tensor) => match tensor.dtype() {
+            crate::DType::F32 => materialize!(
+                F32,
+                webgpu_read_operand::<f32>(tensor, MATERIALIZE_OP)?.as_view()
+            ),
+            crate::DType::I32 => materialize!(
+                I32,
+                webgpu_read_operand::<i32>(tensor, MATERIALIZE_OP)?.as_view()
+            ),
+            // Reject unsupported WGSL element types before asynchronous codegen.
+            other => Err(unsupported_dtype(MATERIALIZE_OP, other)),
+        },
         TensorRead::View(TensorView::F32(input)) => materialize!(F32, input),
         TensorRead::View(TensorView::I32(input)) => materialize!(I32, input),
         // Reject unsupported WGSL element types before asynchronous codegen.
         other => Err(unsupported_dtype(MATERIALIZE_OP, other.dtype())),
     }
+}
+
+/// The typed tensor behind a read adapter's tensor, or the refusal this op reports for one.
+fn webgpu_read_operand<'a, T: crate::TensorScalar>(
+    tensor: &'a Tensor,
+    op: &'static str,
+) -> crate::Result<&'a TypedTensor<T>> {
+    tensor
+        .as_typed::<T>()
+        .ok_or_else(|| unsupported_dtype(op, tensor.dtype()))
 }

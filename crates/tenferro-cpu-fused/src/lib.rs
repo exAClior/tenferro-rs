@@ -14,6 +14,7 @@
 pub type Result<T> = tenferro_tensor::Result<T>;
 pub use tenferro_tensor::{DType, Error, Tensor, TypedTensor};
 
+use num_complex::{Complex32, Complex64};
 use std::mem::size_of_val;
 use strided_basic::{ErasedRawStridedPtr, ErasedRawStridedRef, ExecContext, KernelDType};
 use strided_fused::{ErasedFusedPlan, FusedInst, FusedOp, FusedPlan};
@@ -146,6 +147,10 @@ fn kernel_dtype(dtype: DType) -> KernelDType {
         DType::Bool => KernelDType::Bool,
         DType::C32 => KernelDType::C32,
         DType::C64 => KernelDType::C64,
+        // INVARIANT: `KernelDType` is the fixed compiled-kernel vocabulary used by
+        // the fused path; an externally defined scalar has no entry in it and is
+        // rejected by `dtype_supports_erased_fusion` before this point.
+        DType::External(_) => unreachable!("KernelDType covers the preset scalars"),
     }
 }
 
@@ -168,15 +173,38 @@ fn tensor_host_bytes<'a>(op: &'static str, input: &'a Tensor) -> crate::Result<&
         };
     }
 
-    match input {
-        Tensor::F32(tensor) => bytes!(tensor),
-        Tensor::F64(tensor) => bytes!(tensor),
-        Tensor::I32(tensor) => bytes!(tensor),
-        Tensor::I64(tensor) => bytes!(tensor),
-        Tensor::Bool(tensor) => bytes!(tensor),
-        Tensor::C32(tensor) => bytes!(tensor),
-        Tensor::C64(tensor) => bytes!(tensor),
+    match input.dtype() {
+        DType::F32 => bytes!(fused_host::<f32>(op, input)?),
+        DType::F64 => bytes!(fused_host::<f64>(op, input)?),
+        DType::I32 => bytes!(fused_host::<i32>(op, input)?),
+        DType::I64 => bytes!(fused_host::<i64>(op, input)?),
+        DType::Bool => bytes!(fused_host::<bool>(op, input)?),
+        DType::C32 => bytes!(fused_host::<Complex32>(op, input)?),
+        DType::C64 => bytes!(fused_host::<Complex64>(op, input)?),
+        // A caller-owned payload is opaque here, so the fused path rejects it
+        // instead of reading bytes it cannot interpret.
+        DType::External(_) => Err(crate::Error::unsupported_dtype(
+            op,
+            input.dtype(),
+            "an externally defined payload is not a fused input",
+        )),
     }
+}
+/// The typed tensor behind `input`, or the refusal this path produces for one.
+///
+/// Callers reach this from a match on `input.dtype()`, so `None` means the tag table
+/// and the runtime dtype disagree rather than a caller mistake.
+fn fused_host<'a, T: tenferro_tensor::TensorScalar>(
+    op: &'static str,
+    input: &'a Tensor,
+) -> crate::Result<&'a TypedTensor<T>> {
+    input.as_typed::<T>().ok_or_else(|| {
+        crate::Error::unsupported_dtype(
+            op,
+            input.dtype(),
+            "an externally defined payload is not a fused input",
+        )
+    })
 }
 
 fn erased_fusion_input<'a>(
@@ -323,6 +351,9 @@ fn dtype_supports_erased_fusion(dtype: DType, plan: &ElementwiseFusionPlan) -> b
             .ops()
             .iter()
             .all(|inst| inst.op() == ElementwiseFusionOp::Conj),
+        // An externally defined scalar has no fused kernel, so the fixed-dtype
+        // fused path rejects it rather than guessing a representation.
+        DType::External(_) => false,
     }
 }
 
@@ -351,7 +382,7 @@ fn execute_erased_fused_outputs(
                     shape,
                     plan,
                     output,
-                    Tensor::F32,
+                    Tensor::from_typed::<f32>,
                 )
             })
             .collect(),
@@ -367,7 +398,7 @@ fn execute_erased_fused_outputs(
                     shape,
                     plan,
                     output,
-                    Tensor::F64,
+                    Tensor::from_typed::<f64>,
                 )
             })
             .collect(),
@@ -383,7 +414,7 @@ fn execute_erased_fused_outputs(
                     shape,
                     plan,
                     output,
-                    Tensor::I32,
+                    Tensor::from_typed::<i32>,
                 )
             })
             .collect(),
@@ -399,7 +430,7 @@ fn execute_erased_fused_outputs(
                     shape,
                     plan,
                     output,
-                    Tensor::I64,
+                    Tensor::from_typed::<i64>,
                 )
             })
             .collect(),
@@ -415,7 +446,7 @@ fn execute_erased_fused_outputs(
                     shape,
                     plan,
                     output,
-                    Tensor::Bool,
+                    Tensor::from_typed::<bool>,
                 )
             })
             .collect(),
@@ -431,7 +462,7 @@ fn execute_erased_fused_outputs(
                     shape,
                     plan,
                     output,
-                    Tensor::C32,
+                    Tensor::from_typed::<tenferro_tensor::Complex32>,
                 )
             })
             .collect(),
@@ -447,7 +478,7 @@ fn execute_erased_fused_outputs(
                     shape,
                     plan,
                     output,
-                    Tensor::C64,
+                    Tensor::from_typed::<tenferro_tensor::Complex64>,
                 )
             })
             .collect(),
