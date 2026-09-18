@@ -360,6 +360,23 @@ impl<'a, T: TensorScalar, R: TensorRank> GroupReadView<'a, T, R> {
         &self,
         layout: &TensorLayout<R>,
     ) -> Result<Box<dyn crate::PreparedDeviceAccess + 'a>, AccessError> {
+        self.prepare_read_for_layout(layout, AccessTarget::Device)?
+            .into_device_state()
+    }
+
+    pub(crate) fn prepare_host_read_for_layout(
+        &self,
+        layout: &TensorLayout<R>,
+    ) -> Result<PreparedRead<'a, T, R>, AccessError> {
+        self.prepare_read_for_layout(layout, AccessTarget::Host)
+    }
+
+    fn prepare_read_for_layout(
+        &self,
+        layout: &TensorLayout<R>,
+        target: AccessTarget,
+    ) -> Result<PreparedRead<'a, T, R>, AccessError> {
+        // SAFETY: the group borrow carried by this view retains the owner.
         let owner: crate::storage::root::StorageRef<'a> = unsafe { self.owner.as_ref().as_ref() };
         let checked: CheckedRead<'a, R> = CheckedRead::new::<T>(
             // SAFETY: `owner` is bounded by the group's shared borrow.
@@ -377,9 +394,7 @@ impl<'a, T: TensorScalar, R: TensorRank> GroupReadView<'a, T, R> {
             })?,
             layout.offset(),
         )?;
-        prepare_read::<T, R>(checked, AccessTarget::Device)
-            .map_err(|failure| failure.1)?
-            .into_device_state()
+        prepare_read::<T, R>(checked, target).map_err(|failure| failure.1)
     }
 
     pub(crate) fn prepare_host_read(&self) -> Result<PreparedRead<'_, T, DynRank>, AccessError> {

@@ -1971,6 +1971,45 @@ impl<'a, T: 'static, R: TensorRank> TypedTensorView<'a, T, R> {
         contiguous_layout_slice(self.layout(), data, "TypedTensorView::as_slice")
     }
 
+    /// Borrow the compact logical region through a scoped host mapping.
+    ///
+    /// Backend integrations must validate placement and allocation-domain ownership
+    /// before mapping. The guard cannot escape the callback; no transfer is performed.
+    ///
+    /// # Errors
+    ///
+    /// Returns a host-access or provider-preparation error when mapping fails,
+    /// or a validation/unsupported error for a non-contiguous or invalid layout.
+    #[doc(hidden)]
+    pub fn with_host_read<U>(&self, f: impl FnOnce(&[T]) -> U) -> crate::Result<U>
+    where
+        T: TensorScalar + 'static,
+    {
+        const OP: &str = "TypedTensorView::with_host_read";
+        if !self.is_col_major_contiguous()? {
+            return Err(crate::Error::unsupported(
+                OP,
+                "host guard access requires a compact descriptor",
+            ));
+        }
+        if let Some(buffer) = self.backend_buffer() {
+            let guard = buffer
+                .map_read()
+                .map_err(|error| crate::Error::host_access(OP, error))?;
+            return Ok(f(contiguous_layout_slice(self.layout(), &guard, OP)?));
+        }
+        if let Some(root) = &self.root {
+            let prepared = root
+                .prepare_host_read_for_layout(self.layout())
+                .map_err(|error| crate::Error::runtime_state_source(OP, error))?;
+            let slice = prepared.as_slice().ok_or_else(|| {
+                crate::Error::unsupported(OP, "host guard access requires a compact descriptor")
+            })?;
+            return Ok(f(slice));
+        }
+        Ok(f(self.as_slice()?))
+    }
+
     /// Explicitly duplicate a compact host view into a new owner.
     ///
     /// Backend views require an explicit provider canonicalization or download
@@ -7623,22 +7662,7 @@ impl<T: TensorScalar, R: TensorRank> TypedTensor<T, R> {
     where
         T: TensorScalar + 'static,
     {
-        let view = self
-            .core
-            .group
-            .group
-            .view::<T, R>(self.core.group.slot)
-            .map_err(|error| group_error("TypedTensor::with_host_read", error))?;
-        let prepared = view.prepare_host_read().map_err(|error| {
-            crate::Error::runtime_state("TypedTensor::with_host_read", error.to_string())
-        })?;
-        let slice = prepared.as_slice().ok_or_else(|| {
-            crate::Error::unsupported(
-                "TypedTensor::with_host_read",
-                "host guard access requires a compact descriptor",
-            )
-        })?;
-        Ok(f(slice))
+        self.as_view().with_host_read(f)
     }
 
     /// Borrow compact host-visible storage through one exclusive write guard.

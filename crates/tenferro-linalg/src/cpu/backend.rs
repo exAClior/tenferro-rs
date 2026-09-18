@@ -113,7 +113,13 @@ impl LinalgBackend for CpuExecSession<'_> {
             if tensor_uses_backend_storage(input)
                 && let Some(domain) = domain.as_deref()
             {
-                return managed_cholesky(context, buffers, input, domain, provider);
+                return managed_cholesky(
+                    context,
+                    buffers,
+                    TensorRead::from_tensor(input),
+                    domain,
+                    provider,
+                );
             }
             ensure_host_tensor("cholesky", input)?;
             cholesky_entered(provider, context, buffers, input)
@@ -667,10 +673,10 @@ impl LinalgBackend for CpuExecSession<'_> {
         let kind = self.kind();
         self.with_linalg_pool_fresh(move |context, buffers| {
             let provider = linalg_provider_kind(kind, "cholesky")?;
-            if let (Some(domain), Some(tensor)) = (domain.as_deref(), input.as_tensor())
-                && tensor_uses_backend_storage(tensor)
+            if let Some(domain) = domain.as_deref()
+                && input.backend_family().is_some()
             {
-                return managed_cholesky(context, buffers, tensor, domain, provider);
+                return managed_cholesky(context, buffers, input, domain, provider);
             }
             ensure_host_tensor_read("cholesky", &input)?;
             ensure_supported_linalg_dtype("cholesky", input.dtype())?;
@@ -947,48 +953,18 @@ fn tensor_uses_backend_storage(input: &Tensor) -> bool {
 fn managed_cholesky(
     context: &CpuExecutionContext<'_>,
     buffers: &mut BufferPool,
-    input: &Tensor,
+    input: TensorRead<'_>,
     domain: &dyn SharedTensorAllocationDomain,
     provider: CpuLinalgProvider,
 ) -> tenferro_tensor::Result<Tensor> {
-    match input.dtype() {
-        DType::F32 => managed_cholesky_typed(
-            context,
-            buffers,
-            input
-                .as_typed::<f32>()
-                .ok_or_else(|| unsupported_dtype("cholesky", input.dtype()))?,
-            domain,
-            provider,
-        ),
-        DType::F64 => managed_cholesky_typed(
-            context,
-            buffers,
-            input
-                .as_typed::<f64>()
-                .ok_or_else(|| unsupported_dtype("cholesky", input.dtype()))?,
-            domain,
-            provider,
-        ),
-        DType::C32 => managed_cholesky_typed(
-            context,
-            buffers,
-            input
-                .as_typed::<Complex32>()
-                .ok_or_else(|| unsupported_dtype("cholesky", input.dtype()))?,
-            domain,
-            provider,
-        ),
-        DType::C64 => managed_cholesky_typed(
-            context,
-            buffers,
-            input
-                .as_typed::<Complex64>()
-                .ok_or_else(|| unsupported_dtype("cholesky", input.dtype()))?,
-            domain,
-            provider,
-        ),
-        _ => Err(unsupported_dtype("cholesky", input.dtype())),
+    let dtype = input.dtype();
+    ensure_supported_linalg_dtype("cholesky", dtype)?;
+    match input.tensor_view() {
+        TensorView::F32(view) => managed_cholesky_typed(context, buffers, &view, domain, provider),
+        TensorView::F64(view) => managed_cholesky_typed(context, buffers, &view, domain, provider),
+        TensorView::C32(view) => managed_cholesky_typed(context, buffers, &view, domain, provider),
+        TensorView::C64(view) => managed_cholesky_typed(context, buffers, &view, domain, provider),
+        _ => Err(unsupported_dtype("cholesky", dtype)),
     }
 }
 
@@ -1075,7 +1051,7 @@ impl_managed_cholesky_scalar!(Complex64, C64, C64);
 fn managed_cholesky_typed<T>(
     context: &CpuExecutionContext<'_>,
     buffers: &mut BufferPool,
-    input: &TypedTensor<T>,
+    input: &tenferro_tensor::TypedTensorView<'_, T>,
     domain: &dyn SharedTensorAllocationDomain,
     provider: CpuLinalgProvider,
 ) -> tenferro_tensor::Result<Tensor>
@@ -1085,11 +1061,6 @@ where
     let n = validate_managed_cholesky_input(input, domain.id())?;
     let values = if n == 0 {
         Vec::new()
-    } else if let Some(buffer) = input.backend_buffer() {
-        let read = buffer
-            .map_read()
-            .map_err(|source| tenferro_tensor::Error::host_access("cholesky", source))?;
-        T::factor(context, buffers, &read, n, provider)?
     } else {
         input.with_host_read(|read| T::factor(context, buffers, read, n, provider))??
     };
@@ -1099,7 +1070,7 @@ where
 }
 
 fn validate_managed_cholesky_input<T: Copy + Send + Sync + TensorScalar + 'static>(
-    input: &TypedTensor<T>,
+    input: &tenferro_tensor::TypedTensorView<'_, T>,
     expected_domain: AllocationDomainId,
 ) -> tenferro_tensor::Result<usize> {
     if input.rank() != 2 {
@@ -1118,11 +1089,11 @@ fn validate_managed_cholesky_input<T: Copy + Send + Sync + TensorScalar + 'stati
             vec![cols],
         ));
     }
-    if input.layout().offset() != 0 || !input.is_col_major_contiguous()? {
+    if !input.is_col_major_contiguous()? {
         return Err(tenferro_tensor::Error::invalid_argument(
             "cholesky",
             "input layout",
-            "managed rank-2 Cholesky requires compact column-major full-allocation storage",
+            "managed rank-2 Cholesky requires a compact column-major descriptor",
         ));
     }
     rows.checked_mul(cols).ok_or_else(|| {

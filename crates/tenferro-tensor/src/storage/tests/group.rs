@@ -529,3 +529,42 @@ fn host_group_constructor_retains_typed_layout_and_prepared_access() {
         &[1, 2, 3, 4]
     );
 }
+
+#[test]
+fn provider_view_host_mapping_uses_derived_layout_and_releases_guard() {
+    let (allocation, reads, _) = ByteAllocation::build(901, 16);
+    let mut tensor = crate::TypedTensor::<i32>::from_backend_allocation(
+        [2, 2],
+        allocation,
+        crate::Placement {
+            memory_kind: crate::MemoryKind::Managed,
+            device: None,
+            cpu_affinity: None,
+        },
+    )
+    .unwrap();
+    tensor
+        .with_host_write(|data| data.copy_from_slice(&[1, 2, 3, 4]))
+        .unwrap();
+    let view = tensor
+        .as_view()
+        .try_slice_axis(1, crate::StridedSliceSpec::new(1, Some(2), 1))
+        .unwrap();
+    assert_eq!(
+        view.with_host_read(|data| data.to_vec()).unwrap(),
+        vec![3, 4]
+    );
+    assert_eq!(reads.load(Ordering::Relaxed), 1);
+    let transposed = tensor.as_view().transpose_view([1, 0]).unwrap();
+    assert!(transposed.with_host_read(|_| ()).is_err());
+    assert_eq!(
+        reads.load(Ordering::Relaxed),
+        1,
+        "reject unsupported layout before mapping"
+    );
+    drop((view, transposed));
+    tensor.with_host_write(|data| data[0] = 9).unwrap();
+    tensor
+        .with_host_read(|data| assert_eq!(data, &[9, 2, 3, 4]))
+        .unwrap();
+}

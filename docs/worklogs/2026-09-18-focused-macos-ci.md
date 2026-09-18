@@ -129,3 +129,31 @@ pending. Past nextest PASS lines alone are not proof that optional-device tests
 executed. No silent hardware skip or threshold reduction is allowed. Local kache
 verification still reports one blob-index drift after repair; Rust checks bypass
 that wrapper rather than changing the shared cache service.
+
+## Managed-storage repair (#1817)
+
+The native runner did execute Metal: 11/12 tests passed. Eager leaf creation
+failed when its semantic snapshot reached host-only CPU materialization, and
+traced input admission independently excluded Managed placement. The repair
+keeps semantic snapshots as independent allocations, not aliases: compact
+managed materialization validates the CPU domain and copies under scoped
+provider mappings into the same domain. Noncompact managed views remain an
+explicit unsupported case; no GPU download or generic CPU fallback is added.
+
+Owned and borrowed Cholesky now share the same guarded managed-view path.
+Runtime signature and resident-value admission require an actual backend-owned
+value from the registered allocation domain, not just a Managed placement tag.
+The existing storage owner supplies mapping lifetime and synchronization; no
+AD rule or retention-ownership model is changed. Separate eager/traced native
+tests prevent one failure from hiding the other. A dedicated Accelerate cache
+key avoids stale full-workspace/trybuild cache contents.
+
+Local repair verification passed: the fast gate (formatting, documentation
+snippets, workspace/extension clippy and 2,255 focused-package nextest tests),
+10 managed-storage tests with autodiff explicitly enabled, 212 CI-helper tests,
+actionlint and documentation consistency. Regression cases cover independent
+snapshot ownership, foreign/unregistered domains, busy/device-only storage,
+compact descriptor offsets, strided rejection and mapping release. Earlier
+nextest invocation errors (`-j` already selects test threads) and the updated
+source-contract selector were corrected before this successful gate. Native
+macOS confirmation and a successful cache-restored timing are still pending.

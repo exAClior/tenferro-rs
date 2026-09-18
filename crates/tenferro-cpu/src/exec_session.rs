@@ -18,8 +18,8 @@ use super::indexed_plan_cache::IndexedPlanCache;
 use super::provider::{CpuExecutionContext, CpuOperationEntry, CpuProviderOutcome};
 use super::CpuProviderBundle;
 use super::{
-    analytic, copy_tensor_read_into, elementwise, gemm, indexing, materialize_tensor_read,
-    reduction, structural,
+    analytic, copy_tensor_read_into, elementwise, gemm, indexing,
+    materialize_tensor_read_in_domain, reduction, structural,
 };
 
 /// Marker for the concrete erased CPU execution-session target.
@@ -425,15 +425,25 @@ impl TensorAnalytic for CpuExecSession<'_> {
 impl TensorStructural for CpuExecSession<'_> {
     // Structural
     fn to_contiguous_read(&mut self, input: TensorRead<'_>) -> crate::Result<Tensor> {
-        // INVARIANT: compact tensors need no kernel and no engine entry; the
-        // Arc clone is the only work, so it must not pay the multi-thread pool
-        // entry cost (O(us) on a 4-thread pool). Views still go through the
-        // entry path because they may materialize via strided kernels.
-        if matches!(input, TensorRead::Tensor(_)) {
-            return materialize_tensor_read(self.buffers, "CpuBackend::to_contiguous_read", input);
+        // Preserve the host-compact entry policy. Managed copies must enter
+        // the configured execution scope for provider mapping and allocation,
+        // just as views enter it for strided materialization.
+        let domain = self.shared_allocation_domain();
+        if matches!(input, TensorRead::Tensor(_)) && input.backend_family().is_none() {
+            return materialize_tensor_read_in_domain(
+                self.buffers,
+                "CpuBackend::to_contiguous_read",
+                input,
+                domain.as_deref(),
+            );
         }
         self.run_native_fresh(|buffers| {
-            materialize_tensor_read(buffers, "CpuBackend::to_contiguous_read", input)
+            materialize_tensor_read_in_domain(
+                buffers,
+                "CpuBackend::to_contiguous_read",
+                input,
+                domain.as_deref(),
+            )
         })
     }
 

@@ -418,3 +418,142 @@ fn fake_managed_cholesky_rejects_foreign_device_local_and_busy_buffers() {
         assert_eq!(domain.counts.writes.load(Ordering::Relaxed), 0);
     });
 }
+
+#[test]
+fn managed_snapshot_is_independent_and_rejects_foreign_storage() {
+    use tenferro_tensor::{TensorStructural, TensorView};
+    let domain = FakeDomain::new();
+    let mut cpu = backend(&domain);
+    let mut input = domain.tensor(&[2, 2], vec![4.0_f64, 2.0, 2.0, 3.0]);
+    let snapshot = with_cpu_linalg(&mut cpu, |session| {
+        session.to_contiguous_read(TensorRead::from_view(TensorView::F64(input.as_view())))
+    })
+    .unwrap();
+    let snapshot = snapshot.as_typed::<f64>().unwrap();
+    assert_eq!(snapshot.allocation_domain(), Some(domain.id()));
+    assert_ne!(snapshot.allocation_id(), input.allocation_id());
+    input
+        .backend_buffer_mut()
+        .unwrap()
+        .map_write()
+        .unwrap()
+        .copy_from_slice(&[99.0; 4])
+        .unwrap();
+    assert_eq!(
+        snapshot.with_host_read(|data| data.to_vec()).unwrap(),
+        vec![4.0, 2.0, 2.0, 3.0]
+    );
+
+    let other = FakeDomain::new();
+    let foreign = Tensor::from_typed(other.tensor(&[1], vec![2.0_f64]));
+    let before = domain.counts.allocations.load(Ordering::Relaxed);
+    let error = cpu
+        .to_contiguous_read(TensorRead::from_tensor(&foreign))
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        tenferro_tensor::Error::HostAccess {
+            source: HostAccessError::ForeignDomain { .. },
+            ..
+        }
+    ));
+    assert_eq!(other.counts.reads.load(Ordering::Relaxed), 0);
+    assert_eq!(domain.counts.allocations.load(Ordering::Relaxed), before);
+    for (memory_kind, busy) in [(MemoryKind::Device, false), (MemoryKind::Managed, true)] {
+        let invalid = Tensor::from_typed(domain.tensor_with_domain(
+            &[1],
+            vec![1.0_f64],
+            Some(domain.id()),
+            busy,
+            memory_kind,
+        ));
+        assert!(matches!(
+            cpu.to_contiguous_read(TensorRead::from_tensor(&invalid)),
+            Err(tenferro_tensor::Error::HostAccess { .. })
+        ));
+        assert_eq!(domain.counts.allocations.load(Ordering::Relaxed), before);
+    }
+    let transposed = input.as_view().transpose_view([1, 0]).unwrap();
+    assert!(cpu
+        .to_contiguous_read(TensorRead::from_view(TensorView::F64(transposed)))
+        .is_err());
+    assert_eq!(domain.counts.allocations.load(Ordering::Relaxed), before);
+}
+
+#[test]
+fn managed_borrowed_cholesky_respects_offset_and_rejects_strides() {
+    let domain = FakeDomain::new();
+    let input = domain.tensor(&[2, 3], vec![-99.0_f64, -99.0, 4.0, 2.0, 2.0, 3.0]);
+    let view = input
+        .as_view()
+        .try_slice_axis(1, tenferro_tensor::StridedSliceSpec::new(1, Some(3), 1))
+        .unwrap();
+    with_cpu_linalg(&mut backend(&domain), |session| {
+        let output = session
+            .cholesky_read(TensorRead::from_view(tenferro_tensor::TensorView::F64(
+                view.clone(),
+            )))
+            .unwrap();
+        output
+            .as_typed::<f64>()
+            .unwrap()
+            .with_host_read(assert_real_factor)
+            .unwrap();
+        let strided = view.transpose_view([1, 0]).unwrap();
+        assert!(session
+            .cholesky_read(TensorRead::from_view(tenferro_tensor::TensorView::F64(
+                strided
+            )))
+            .is_err());
+    });
+}
+
+#[cfg(feature = "autodiff")]
+#[test]
+fn managed_eager_cholesky_preserves_domain_and_values() {
+    use crate::EagerTensorLinalgExt;
+    use tenferro_ad::{EagerRuntime, EagerTensor};
+    let domain = FakeDomain::new();
+    let input = domain.tensor(&[2, 2], vec![4.0_f64, 2.0, 2.0, 3.0]);
+    let input_id = input.allocation_id();
+    let runtime = EagerRuntime::with_cpu_backend(backend(&domain)).unwrap();
+    let eager = EagerTensor::from_tensor_in(Tensor::from_typed(input), runtime).unwrap();
+    let output = eager.cholesky().unwrap().to_tensor().unwrap();
+    let output = output.as_typed::<f64>().unwrap();
+    assert_eq!(output.allocation_domain(), Some(domain.id()));
+    assert_ne!(output.allocation_id(), input_id);
+    output.with_host_read(assert_real_factor).unwrap();
+}
+
+#[test]
+fn managed_traced_cholesky_preserves_domain_and_values() {
+    use crate::TracedTensorLinalgExt;
+    use tenferro_runtime::{GraphCompiler, Runtime, TracedTensor};
+    let domain = FakeDomain::new();
+    let input = domain.tensor(&[2, 2], vec![4.0_f64, 2.0, 2.0, 3.0]);
+    let input_id = input.allocation_id();
+    let traced = TracedTensor::from_tensor_concrete_shape(Tensor::from_typed(input)).unwrap();
+    let program = GraphCompiler::new()
+        .compile(&traced.cholesky().unwrap())
+        .unwrap();
+    let mut builder = Runtime::builder();
+    builder
+        .register_engine(tenferro_cpu::runtime_engine_registration(&backend(&domain)).unwrap())
+        .unwrap();
+    builder
+        .install_extension_module(
+            crate::extension_module::<CpuBackend>(tenferro_cpu::runtime_engine_id().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+    let output = builder
+        .build()
+        .unwrap()
+        .run_compiled(&program, &[])
+        .unwrap()
+        .remove(0);
+    let output = output.as_typed::<f64>().unwrap();
+    assert_eq!(output.allocation_domain(), Some(domain.id()));
+    assert_ne!(output.allocation_id(), input_id);
+    output.with_host_read(assert_real_factor).unwrap();
+}

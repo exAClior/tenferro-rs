@@ -149,8 +149,15 @@ domain ID, and physical allocation ID. Guarded CPU reads/writes and Metal
 launches operate on that allocation without an implicit upload or download.
 
 Backend choice is still explicit. The CPU backend currently maps managed
-tensors only for RustFFT and rank-2 Cholesky. Other CPU tensor and linalg
-operations do not become general shared-memory fallbacks. The Metal FFT path is
+tensors for RustFFT, rank-2 Cholesky, and explicit compact materialization used
+by eager semantic snapshots and result exports. Materialization allocates an
+independent tensor in the same domain and holds scoped read/write mappings; it
+never aliases a writable owner or copies through host placement. Borrowed
+Cholesky descriptors follow the same domain/layout checks as owned operands.
+Runtime ingress accepts managed records only when their allocation domain
+matches the registered CPU backend. Strided managed materialization remains
+unsupported. Other CPU tensor and linalg operations do not become general
+shared-memory fallbacks. The Metal FFT path is
 owned by `tenferro-fft`, uses CubeK's configured-client launch APIs, and supports
 only its documented F32/C32 power-of-two matrix. Foreign-domain and ordinary
 device-local WebGPU buffers are rejected at the boundary.

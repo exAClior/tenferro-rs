@@ -391,6 +391,20 @@ pub(crate) fn cpu_negative_integer_exponent(op: &'static str, dtype: DType) -> c
 pub(crate) use tenferro_cpu_basic::{
     cpu_backend_buffer_error, typed_host_data, typed_view, typed_view_from_view, ConjElem,
 };
+pub(crate) fn materialize_tensor_read_in_domain(
+    buffers: &mut BufferPool,
+    op: &'static str,
+    input: TensorRead<'_>,
+    domain: Option<&dyn SharedTensorAllocationDomain>,
+) -> crate::Result<Tensor> {
+    if let Some(domain) = domain {
+        if input.backend_family().is_some() {
+            return materialize_managed_read(op, input, domain);
+        }
+    }
+    materialize_tensor_read(buffers, op, input)
+}
+
 pub(crate) fn materialize_tensor_read(
     buffers: &mut BufferPool,
     op: &'static str,
@@ -399,6 +413,81 @@ pub(crate) fn materialize_tensor_read(
     match input {
         TensorRead::Tensor(tensor) => clone_host_tensor_read(op, tensor),
         TensorRead::View(view) => materialize_tensor_view(buffers, op, view),
+    }
+}
+
+fn materialize_managed_read(
+    op: &'static str,
+    input: TensorRead<'_>,
+    domain: &dyn SharedTensorAllocationDomain,
+) -> crate::Result<Tensor> {
+    if input.placement().memory_kind != MemoryKind::Managed {
+        return Err(Error::host_access(
+            op,
+            HostAccessError::Unsupported { backend: "backend" },
+        ));
+    }
+    match input.allocation_domain() {
+        Some(actual) if actual == domain.id() => {}
+        Some(actual) => {
+            return Err(Error::host_access(
+                op,
+                HostAccessError::ForeignDomain {
+                    expected: domain.id(),
+                    actual,
+                },
+            ))
+        }
+        None => {
+            return Err(Error::host_access(
+                op,
+                HostAccessError::Unsupported { backend: "backend" },
+            ))
+        }
+    }
+    fn copy<T: TensorScalar>(
+        op: &'static str,
+        input: TypedTensorView<'_, T>,
+        domain: &dyn SharedTensorAllocationDomain,
+    ) -> crate::Result<Tensor> {
+        // INVARIANT: semantic snapshots require independent storage, not a new
+        // writable alias. Both mappings remain scoped to this same-domain copy.
+        input.with_host_read(|source| {
+            let mut output = domain.allocate(T::dtype(), input.shape())?;
+            if output.shape() != input.shape()
+                || output.placement().memory_kind != MemoryKind::Managed
+                || TensorRead::from_tensor(&output).allocation_domain() != Some(domain.id())
+            {
+                return Err(Error::runtime_state(
+                    op,
+                    "shared allocator returned incompatible output",
+                ));
+            }
+            let typed = output.as_typed_mut::<T>().ok_or_else(|| {
+                Error::runtime_state(op, "shared allocator returned the wrong dtype")
+            })?;
+            if let Some(buffer) = typed.backend_buffer_mut() {
+                buffer
+                    .map_write()
+                    .map_err(|error| Error::host_access(op, error))?
+                    .copy_from_slice(source)
+                    .map_err(|error| Error::host_access(op, error))?;
+            } else {
+                typed.with_host_write(|target| target.copy_from_slice(source))?;
+            }
+            Ok(output)
+        })?
+    }
+    // Compact managed descriptors cover retained eager/traced values. Strided
+    // managed canonicalization remains an explicit unsupported boundary.
+    match input.tensor_view() {
+        TensorView::F32(view) => copy(op, view, domain),
+        TensorView::F64(view) => copy(op, view, domain),
+        TensorView::I32(view) => copy(op, view, domain),
+        TensorView::I64(view) => copy(op, view, domain),
+        TensorView::Bool(view) => copy(op, view, domain),
+        TensorView::C32(view) => copy(op, view, domain),
+        TensorView::C64(view) => copy(op, view, domain),
     }
 }
 

@@ -225,6 +225,8 @@ jobs:
         if: needs.changes.result == 'success' && needs.changes.outputs.run_macos == 'true'
       - uses: Swatinem/rust-cache@v2
         if: needs.changes.result == 'success' && needs.changes.outputs.run_macos == 'true'
+        with:
+          shared-key: macos-accelerate-v1
       - uses: taiki-e/install-action@nextest
         if: needs.changes.result == 'success' && needs.changes.outputs.run_macos == 'true'
       - name: Run macOS Accelerate and Apple-specific tests

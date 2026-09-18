@@ -90,6 +90,7 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertIn("run_macos: ${{ steps.policy.outputs.run_macos }}", text)
         self.assertIn("'macos-15' || 'ubuntu-latest'", block)
         self.assertIn("python3 scripts/ci/run_profile.py macos-accelerate", block)
+        self.assertIn("shared-key: macos-accelerate-v1", block)
         self.assertNotIn("run_profile.py workspace-faer", block)
         self.assertIn("needs.changes.result == 'success'", block)
         self.assertIn("Change classification failed", block)

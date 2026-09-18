@@ -161,7 +161,7 @@ fn managed_cpu_cholesky_supports_all_cpu_float_and_complex_dtypes() {
 }
 
 #[test]
-fn public_concrete_eager_and_traced_cholesky_preserve_apple_domain_without_transfers() {
+fn concrete_cholesky_preserves_apple_domain_without_transfers() {
     let Some(context) = apple_context() else {
         return;
     };
@@ -170,7 +170,13 @@ fn public_concrete_eager_and_traced_cholesky_preserve_apple_domain_without_trans
     let before = context.transfer_stats();
     let direct = cpu_cholesky(&context, &input).unwrap();
     assert_cholesky_result(f32_ids(&input).1, &direct, &context, before);
+}
 
+#[test]
+fn eager_cholesky_preserves_apple_domain_without_transfers() {
+    let Some(context) = apple_context() else {
+        return;
+    };
     let input = managed_spd(&context);
     let before = context.transfer_stats();
     let runtime = EagerRuntime::with_cpu_backend(context.cpu_backend().clone()).unwrap();
@@ -178,7 +184,13 @@ fn public_concrete_eager_and_traced_cholesky_preserve_apple_domain_without_trans
     let eager_input = EagerTensor::from_tensor_in(input, runtime).unwrap();
     let eager = eager_input.cholesky().unwrap().to_tensor().unwrap();
     assert_cholesky_result(input_id, &eager, &context, before);
+}
 
+#[test]
+fn traced_cholesky_preserves_apple_domain_without_transfers() {
+    let Some(context) = apple_context() else {
+        return;
+    };
     let input = managed_spd(&context);
     let before = context.transfer_stats();
     let input_id = f32_ids(&input).1;
