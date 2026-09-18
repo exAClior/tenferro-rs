@@ -30,6 +30,10 @@ class WorkflowContractTests(unittest.TestCase):
     def test_paid_lifecycle_alone_holds_global_queue(self) -> None:
         parent = (ROOT / ".github/workflows/runpod-gpu-test.yml").read_text()
         child = (ROOT / ".github/workflows/runpod-gpu-execute.yml").read_text()
+        self.assertEqual(
+            parent.split("\nenv:\n", 1)[1].split("\njobs:\n", 1)[0],
+            child.split("\nenv:\n", 1)[1].split("\njobs:\n", 1)[0],
+        )
         self.assertNotIn("\nconcurrency:", parent)
         self.assertIn("group: runpod-tenferro-gpu-refs/heads/main", child)
         self.assertIn("cancel-in-progress: false\n  queue: max", child)

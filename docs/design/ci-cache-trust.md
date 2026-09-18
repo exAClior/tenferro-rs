@@ -32,7 +32,7 @@ main-scope runs, and their workflow definitions never receive RunPod secrets.
 |---|---|---|
 | `ci-cache-publish.yml` (push to main, schedule, dispatch from main) | **Only shared-cache writer** | Definition and built code are both default-branch content |
 | `runpod-gpu-test.yml` `cuda-archive` | Reader only | Builds PR-controlled code in the main-scoped context |
-| `runpod-gpu-test.yml` `run-gpu-tests` | Reader only | Runs on the self-hosted pod |
+| `runpod-gpu-execute.yml` `run-gpu-tests` | Reader only | Trusted reusable lifecycle; runs on the self-hosted pod |
 | `ci.yml` / `ci-pr-workspace-tests.yml` PR jobs | Platform-isolated writers | Saves go to the PR merge-ref scope, never to main scope |
 | `ci.yml` / `ci-pr-workspace-tests.yml` push-to-main jobs | Trusted writers (CPU lanes) | Push runs build default-branch code |
 
@@ -77,6 +77,16 @@ The pod-side cuTENSOR and CUDA-runtime-tree caches key on OS, architecture,
 component version, and a manual `vN`. Their paths live under the fixed root
 `/opt/tenferro-ci` so absolute paths restored from hosted-runner saves line
 up on the pod.
+
+The hosted toolkit cache contains the relocatable nvcc/include/library tree for
+the exact requested CUDA major.minor version. Its key includes Ubuntu version,
+architecture, toolkit version, installer hash and a manual version. The same
+absolute `/opt/tenferro-ci/cuda-toolkit-<version>` path is used by publisher and
+reader. Only `ci-cache-publish.yml` saves it. Restore uses no prefix fallback;
+a miss installs normally. Both restored and newly installed trees must compile
+a small PTX kernel before use/publication, rather than trusting a hit message.
+The cache is bounded by Actions eviction/quota and can be deleted through the
+Actions cache UI/API; neither correctness nor GPU authorization depends on it.
 
 Every cache namespace was rotated (`vN` bumps across the archive, Rust
 build, runtime-tree, and cuTENSOR keys) when the trusted publisher took

@@ -43,6 +43,49 @@ because the delayed GPU gate dominates. A normally overlapping warm run should
 therefore be budgeted around 13–16 minutes, not the sum of all lane durations;
 the existing delayed/recovery GPU path can still take around 29 minutes.
 
+## Follow-up: remove repeated compilation and preparation serialization
+
+The approved follow-up combines four changes in this branch: edition 2024 for
+`tenferro-ad`, `tenferro-linalg`, `tenferro-runtime` and `tenferro-tensor`; `ci`
+profile assembly inspection; independent hosted GPU preparation plus one queued
+paid lifecycle; and a trusted-writer, restore-only hosted CUDA toolkit cache.
+The edition migration keeps Rust 2021 formatting to avoid unrelated churn.
+Compatibility changes make an existing temporary borrow outlive its block and
+mark existing exported symbols/LAPACK declarations explicitly unsafe; no numerical
+algorithm is changed.
+
+The paid concurrency group retains the old main workflow's identity, so deployment
+does not overlap an old running pod with a new lifecycle. Pending requests use
+GitHub's `queue: max`, with PR state/head/base revalidation after waiting. Latest
+actionlint 1.7.12 does not recognize that supported GitHub key; a one-file,
+one-diagnostic exception is paired with explicit queue/lifecycle contract tests.
+Cache restores compile PTX with the restored nvcc and headers before use.
+
+### Local paired measurements
+
+Baseline `cf971d0f18d0357133da97dae66802e26bd56e2f`; measured candidate
+`4e8e705ff72b991f4ff9a597aa99331bb5104c26`. The later BLAS-only extern declaration
+fix is not compiled by the measured faer configuration. This is CI compiler/test
+latency, measured in the actual `ci` profile, not a kernel throughput benchmark.
+EPYC 7713P, rustc 1.97.1, four-CPU affinity (0–3), Cargo jobs 16, four doctest
+workers, default CPU backend and OpenBLAS/OpenMP explicitly 1T. A compiled probe
+confirmed `CpuBackend::num_threads() == 1`; examples deliberately demonstrating
+other thread counts are unchanged. Compiler wrapping is disabled for both sides.
+Dependencies are warm; one warmup precedes three retained samples per variant.
+
+| Selected faer doctests | Sample 1 | Sample 2 | Sample 3 | Median |
+| --- | --- | --- | --- | --- |
+| Edition 2021 | 190.56 s | 189.90 s | 191.79 s | 190.56 s |
+| Edition 2024 | 12.54 s | 12.59 s | 12.30 s | 12.54 s |
+
+All **1125 doctests** passed in every sample, including standalone compile-fail
+examples: **93.4% less time (15.2×)** for these four crates. The predeclared >=20%
+median improvement gate passed. Max/min was <1.03 on both sides (limit 1.30),
+and sampled load1 remained below the 64-CPU noise threshold. This is not a
+measurement of the full hosted workspace or whole-PR speedup. The same selected
+BLAS doctests also pass. Full protocol, run scripts, raw logs and per-sample load/
+CPU-pressure observations are retained under `/tmp/tenferro-ci-bench/`.
+
 ## Verification and limitations
 
 The selected Apple feature graph contains accelerate-src and no faer. All 206
