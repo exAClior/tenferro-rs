@@ -524,3 +524,57 @@ fn runtime_prepared_matches_compiled_for_elementwise_chain() {
         );
     }
 }
+
+/// Execution-path parity matrix (Stage 0, characterization).
+///
+/// The prepared executor dispatches one command per scheduled operation; the
+/// segmented executor fuses a pure elementwise chain into one command. Stage 1
+/// must turn the first case into `1 == 1`. The second case shows the fusion
+/// eligibility boundary: a run containing a reduction is rejected by
+/// `build_elementwise_fusion_plan` in both paths, so both submit one command per
+/// instruction and already agree.
+#[test]
+fn execution_path_command_counts_matrix() {
+    let runtime = cpu_runtime();
+    let n = 4usize;
+
+    let x = TracedTensor::input_concrete_shape(DType::F64, &[n]).unwrap();
+    let doubled = (&x + &x).unwrap();
+    let chain = doubled
+        .mul(&doubled)
+        .unwrap()
+        .exp()
+        .unwrap()
+        .tanh()
+        .unwrap();
+    let mut compiler = GraphCompiler::new();
+    let program = compiler
+        .compile_with_input_specs(&chain, &[(&x, DType::F64, &[n])])
+        .unwrap();
+    let input = Tensor::from_vec_col_major(vec![n], vec![1.0_f64, 2.0, 3.0, 4.0]).unwrap();
+    let prepared = runtime.prepare_compiled(&program, &[&input]).unwrap();
+    assert_eq!(
+        prepared.execution_command_counts(),
+        (4, 1),
+        "pure elementwise chain: prepared dispatches per instruction, segmented fuses (Stage 1 target: (1, 1))"
+    );
+
+    let x2 = TracedTensor::input_concrete_shape(DType::F64, &[n]).unwrap();
+    let with_reduce = (&x2 + &x2)
+        .unwrap()
+        .exp()
+        .unwrap()
+        .reduce_sum(None)
+        .unwrap();
+    let mut compiler2 = GraphCompiler::new();
+    let program2 = compiler2
+        .compile_with_input_specs(&with_reduce, &[(&x2, DType::F64, &[n])])
+        .unwrap();
+    let input2 = Tensor::from_vec_col_major(vec![n], vec![1.0_f64, 2.0, 3.0, 4.0]).unwrap();
+    let prepared2 = runtime.prepare_compiled(&program2, &[&input2]).unwrap();
+    assert_eq!(
+        prepared2.execution_command_counts(),
+        (3, 3),
+        "a run containing a reduction is fusion-ineligible, so both paths dispatch per instruction"
+    );
+}

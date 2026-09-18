@@ -59,6 +59,57 @@ pub struct PreparedCompiledGraph {
     prepared: Arc<super::preparation::PreparedProgram>,
 }
 
+impl PreparedCompiledGraph {
+    /// Plan-derived command counts for the two execution paths, for
+    /// execution-path parity tests.
+    ///
+    /// The first value is the number of scheduled operations the prepared
+    /// executor dispatches: one command per operation. The second is the number
+    /// of commands the segmented executor submits for the same program, counted
+    /// as one command for a host/FFI segment and for a segment whose
+    /// elementwise fusion plan is accepted, and one command per instruction for
+    /// a segment that fusion rejects.
+    ///
+    /// This is a plan census, not a runtime submission count. The
+    /// broadcast-multiply triplet/pair fast paths of the segmented executor are
+    /// not modeled, so a segment that only those paths fuse is counted as a
+    /// fallback here.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn execution_command_counts(&self) -> (usize, usize) {
+        use crate::segment::{build_elementwise_fusion_plan, segment_exec_program, Segment};
+
+        let root = self.prepared.root();
+        let prepared = root
+            .schedule()
+            .nodes()
+            .iter()
+            .filter(|node| matches!(node, super::schedule::ScheduledNode::Operation(_)))
+            .count();
+        let unprepared = segment_exec_program(root.staging())
+            .into_iter()
+            .map(|segment| match segment {
+                Segment::Fused {
+                    instructions,
+                    input_slots,
+                    output_slots,
+                    ..
+                } => {
+                    if build_elementwise_fusion_plan(&instructions, &input_slots, &output_slots)
+                        .is_some()
+                    {
+                        1
+                    } else {
+                        instructions.len()
+                    }
+                }
+                _ => 1,
+            })
+            .sum();
+        (prepared, unprepared)
+    }
+}
+
 /// Asynchronous runtime execution handle returned by [`Runtime::submit`].
 pub struct ExecutionHandle {
     submission: Arc<InFlightSubmission>,

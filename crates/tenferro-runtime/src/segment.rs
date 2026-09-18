@@ -1414,7 +1414,7 @@ fn reclaim_segment_inputs_exec(
     }
 }
 
-fn build_elementwise_fusion_plan(
+pub(crate) fn build_elementwise_fusion_plan(
     instructions: &[ExecInstruction],
     input_slots: &[usize],
     output_slots: &[usize],
