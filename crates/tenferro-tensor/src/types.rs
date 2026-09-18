@@ -6762,9 +6762,12 @@ fn typed_tensor_from_backend_allocation<T: TensorScalar + Send + Sync + 'static,
     let layout = try_compact_layout(shape, "from_backend_allocation")?;
     let group_shape = R::shape_from_vec(shape_vec(layout.shape()))
         .map_err(|err| tensor_layout_error("from_backend_allocation", err))?;
-    let (group, slot) =
+    let (mut group, slot) =
         AllocationGroup::from_backend_allocation::<T, R>(group_shape, allocation)
             .map_err(|error| group_error("TypedTensor::from_backend_allocation", error))?;
+    group
+        .set_descriptor_placement(slot, placement.clone())
+        .map_err(|error| group_error("TypedTensor::from_backend_allocation", error))?;
     let allocation_index = group
         .allocation_index(slot)
         .map_err(|error| group_error("TypedTensor::from_backend_allocation", error))?;

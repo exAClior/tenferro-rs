@@ -567,4 +567,9 @@ fn provider_view_host_mapping_uses_derived_layout_and_releases_guard() {
     tensor
         .with_host_read(|data| assert_eq!(data, &[9, 2, 3, 4]))
         .unwrap();
+    let placement = tensor.placement().clone();
+    let (group, slots) =
+        AllocationGroup::from_tensors(vec![crate::Tensor::from_typed(tensor)]).unwrap();
+    assert_eq!(group.read_view(slots[0]).unwrap().placement(), &placement);
+    assert_eq!(group.into_tensor(slots[0]).unwrap().placement(), &placement);
 }

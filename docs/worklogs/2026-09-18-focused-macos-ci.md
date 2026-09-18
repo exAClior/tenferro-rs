@@ -157,3 +157,15 @@ compact descriptor offsets, strided rejection and mapping release. Earlier
 nextest invocation errors (`-j` already selects test threads) and the updated
 source-contract selector were corrected before this successful gate. Native
 macOS confirmation and a successful cache-restored timing are still pending.
+
+The first repair run (`35406470102`, macOS job `105797184381`) passed 12/14
+native tests but exposed a second ownership-boundary defect: the provider-root
+tensor constructor set the owner's placement but left its retained descriptor
+at the default Host placement. Eager and traced Cholesky correctly rejected
+that inconsistent metadata. A local retained-group round-trip reproduced the
+Managed-to-Host loss before the correction. The constructor now records the
+supplied placement in both representations, matching the existing legacy-buffer
+constructor; domain guards are not relaxed. The failed 1m53s run is not a
+successful timing measurement. The corrected fast gate passed 2,382 nextest
+tests with linalg autodiff explicitly enabled, including the formerly failing
+retained-group placement regression.
