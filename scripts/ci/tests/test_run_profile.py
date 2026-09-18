@@ -108,14 +108,61 @@ class RunProfileTests(unittest.TestCase):
     def test_coverage_excludes_tutorial_package(self) -> None:
         self.assertEqual(
             commands_for("coverage")[0],
-            "cargo llvm-cov --workspace --exclude tenferro-tutorial-code "
-            "--profile ci --no-clean --json --output-path coverage.json",
+            "cargo llvm-cov nextest --workspace --exclude tenferro-tutorial-code "
+            "--cargo-profile ci --no-clean --json --output-path coverage.json",
         )
+
+    def test_macos_compiles_only_apple_targets_with_accelerate(self) -> None:
+        commands = commands_for("macos-accelerate")
+        self.assertEqual(len(commands), 1)
+        args = shlex.split(commands[0])
+        self.assertIn("--no-default-features", args)
+        self.assertEqual(
+            args[args.index("--features") + 1],
+            "blas-accelerate,webgpu,tenferro-linalg/autodiff",
+        )
+        targets = [args[i + 1] for i, arg in enumerate(args) if arg == "--test"]
+        self.assertEqual(targets, ["apple_context", "apple_cpu", "webgpu_metal_fft", "apple_accelerate"])
+        self.assertNotIn("--workspace", args)
+        self.assertNotIn("--doc", args)
+        self.assertNotIn("cpu-faer", commands[0])
+        with patch.dict("os.environ", {}, clear=True), patch(
+            "scripts.ci.run_profile.subprocess.run"
+        ) as run:
+            run_profiles(["macos-accelerate"], dry_run=False, output=io.StringIO())
+        self.assertEqual(run.call_args.kwargs["env"]["TENFERRO_REQUIRE_METAL"], "1")
+
+    def test_hosted_parallelism_uses_cpu_count_with_build_cap(self) -> None:
+        for cpus, builds in ((3, "3"), (4, "4"), (32, "16")):
+            with self.subTest(cpus=cpus), patch.dict(
+                "os.environ", {"GITHUB_ACTIONS": "true"}, clear=True
+            ), patch("scripts.ci.run_profile.os.cpu_count", return_value=cpus), patch(
+                "scripts.ci.run_profile.subprocess.run"
+            ) as run:
+                output = io.StringIO()
+                run_profiles(["coverage"], dry_run=False, output=output)
+                for call in run.call_args_list:
+                    env = call.kwargs["env"]
+                    self.assertEqual(env["CARGO_BUILD_JOBS"], builds)
+                    self.assertEqual(env["NEXTEST_TEST_THREADS"], str(cpus))
+                    self.assertEqual(env["RUST_TEST_THREADS"], str(cpus))
+                self.assertIn(f"Runner CPUs={cpus}; CARGO_BUILD_JOBS={builds}", output.getvalue())
+
+    def test_parallelism_preserves_overrides_and_local_defaults(self) -> None:
+        for env in ({}, {"GITHUB_ACTIONS": "true", "CARGO_BUILD_JOBS": "2", "NEXTEST_TEST_THREADS": "1", "RUST_TEST_THREADS": "1"}):
+            with self.subTest(env=env), patch.dict("os.environ", env, clear=True), patch(
+                "scripts.ci.run_profile.subprocess.run"
+            ) as run:
+                run_profiles(["coverage"], dry_run=False, output=io.StringIO())
+                actual = run.call_args.kwargs["env"]
+                for key in ("CARGO_BUILD_JOBS", "NEXTEST_TEST_THREADS", "RUST_TEST_THREADS"):
+                    self.assertEqual(actual.get(key), env.get(key))
 
     def test_hosted_profiles_use_cargo_ci_profile_not_release(self) -> None:
         for name in (
             "workspace-faer",
             "workspace-blas",
+            "macos-accelerate",
             "blas-inject",
             "extensions",
             "coverage",

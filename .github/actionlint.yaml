@@ -1,3 +1,11 @@
 self-hosted-runner:
   labels:
     - ubuntu-gpu
+
+paths:
+  .github/workflows/runpod-gpu-execute.yml:
+    ignore:
+      # INVARIANT: GitHub supports queue:max; actionlint <=1.7.12 lacks its schema.
+      # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
+      # The workflow contract test separately requires max + cancel-in-progress:false.
+      - '^unexpected key "queue" for "concurrency" section\.'

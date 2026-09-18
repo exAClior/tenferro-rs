@@ -89,6 +89,11 @@ name = "integration"
 path = "tests/integration.rs"
 
 [[test]]
+name = "apple_context"
+path = "tests/integration/apple_context.rs"
+required-features = ["webgpu"]
+
+[[test]]
 name = "blas1_cuda"
 path = "tests/blas1_cuda.rs"
 

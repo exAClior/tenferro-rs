@@ -260,6 +260,11 @@ diff-scoped review bot.
   hosted archive build overlaps those independent required checks. Those
   checks remain merge-blocking; this is a deliberate latency trade-off, not a
   reduction in validation.
+- The macOS lane compiles and runs Apple-specific targets with Accelerate and
+  default features disabled, not a duplicate faer workspace/doctest suite.
+  Keep numerical Accelerate and Apple/Metal shared-storage checks, and never
+  count unavailable Metal hardware as successful execution in that lane.
+  General workspace tests and doctests remain Linux obligations.
 
 ## Publication Order And Publish-Safety
 

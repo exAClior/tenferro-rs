@@ -74,10 +74,11 @@ def references(assembly: str, symbol: str) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--report", type=Path, required=True)
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="inspect the debug profile, which is what a test lane has already built",
+    profiles = parser.add_mutually_exclusive_group()
+    profiles.add_argument("--profile", choices=("dev", "ci", "release"), default="release")
+    profiles.add_argument(
+        "--debug", dest="profile", action="store_const", const="dev",
+        help="inspect the dev profile (alias for --profile dev)",
     )
     parser.add_argument(
         "--package",
@@ -139,7 +140,7 @@ def main() -> int:
         package,
         "--test",
         test_target,
-        *([] if args.debug else ["--release"]),
+        "--profile", args.profile,
         "--",
         "--emit=asm",
     ]
@@ -152,7 +153,7 @@ def main() -> int:
         "command": " ".join(command),
         "rustc": run("rustc", "-Vv").splitlines()[0],
         "target": run("rustc", "-Vv").split("host: ", 1)[-1].splitlines()[0],
-        "profile": "debug" if args.debug else "release",
+        "profile": args.profile,
         "status": "inconclusive",
         "observations": [],
     }
@@ -163,7 +164,7 @@ def main() -> int:
         write_report(args.report, record)
         return 1
 
-    profile_dir = "debug" if args.debug else "release"
+    profile_dir = "debug" if args.profile == "dev" else args.profile
     assemblies = sorted(
         (target_root() / profile_dir / "deps").glob(f"{test_target}-*.s"),
         key=lambda path: path.stat().st_mtime,
@@ -283,7 +284,7 @@ def compare_with(
         args.against_package,
         "--test",
         args.against_target,
-        *([] if args.debug else ["--release"]),
+        "--profile", args.profile,
         "--",
         "--emit=asm",
     ]
@@ -303,7 +304,7 @@ def compare_with(
         comparison["status"] = "inconclusive"
         return comparison
 
-    profile_dir = "debug" if args.debug else "release"
+    profile_dir = "debug" if args.profile == "dev" else args.profile
     assemblies = sorted(
         (target_root() / profile_dir / "deps").glob(f"{args.against_target}-*.s"),
         key=lambda path: path.stat().st_mtime,

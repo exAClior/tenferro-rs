@@ -182,8 +182,10 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
         if: needs.policy.result == 'success' && needs.policy.outputs.run_rust == 'true'
-      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: taiki-e/install-action@v2
         if: needs.policy.result == 'success' && needs.policy.outputs.run_rust == 'true'
+        with:
+          tool: cargo-llvm-cov,nextest
       - name: Run external extension authoring fixture
         if: needs.policy.result == 'success' && needs.policy.outputs.run_rust == 'true'
         run: bash tests/run-extension-authoring-fixture.sh

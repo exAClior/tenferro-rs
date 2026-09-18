@@ -1,7 +1,7 @@
 [package]
 name = "tenferro-tensor"
 version.workspace = true
-edition.workspace = true
+edition = "2024"
 license.workspace = true
 authors.workspace = true
 publish.workspace = true

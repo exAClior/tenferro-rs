@@ -344,7 +344,7 @@ impl<T: TensorScalar> std::fmt::Debug for HostAllocation<T> {
                 "element_count",
                 // SAFETY: debug inspection is read-only and the allocation's
                 // length is immutable after import.
-                unsafe { &(*self.data.get()).len() },
+                &unsafe { (*self.data.get()).len() },
             )
             .finish()
     }

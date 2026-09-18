@@ -7,6 +7,10 @@ fn apple_context() -> Option<AppleContext> {
     match AppleContext::new() {
         Ok(context) => Some(context),
         Err(error) => {
+            assert!(
+                std::env::var_os("TENFERRO_REQUIRE_METAL").is_none(),
+                "Apple CI requires Metal: {error}"
+            );
             eprintln!("skipping Apple context test: {error}");
             None
         }

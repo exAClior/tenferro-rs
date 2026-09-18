@@ -47,10 +47,9 @@ PROFILE_COMMANDS: dict[str, tuple[str, ...]] = {
         # Issue #1790 asks for proportionate CI for the external scalar work. The object-level
         # evidence behind #1785's compilation boundary is otherwise only ever produced by hand,
         # and the claim it makes is checked nowhere else: no ScalarSet type may appear in the
-        # parameters of a contribution kernel instantiation. The debug profile is used because
-        # this lane has already built it.
+        # parameters of a contribution kernel instantiation. Reuse the lane's ci dependencies.
         "python3 scripts/check-scalar-composition-kernel-sharing.py "
-        "--report target/scalar-composition-kernel-sharing.md --debug "
+        "--report target/scalar-composition-kernel-sharing.md --profile ci "
         "--against-package tenferro-scalar-consumer-application "
         "--against-target contribution_reuse --against-sets 2 "
         "--set-type-names ExtendedSet,ExtendedTag,ApplicationSet,ApplicationTag",
@@ -66,6 +65,14 @@ PROFILE_COMMANDS: dict[str, tuple[str, ...]] = {
         # linkage is verified, not just compilation.
         f"cargo run -p tenferro-tutorial-code {_CARGO_TEST_PROFILE} --no-default-features "
         "--features cpu-blas --bin blas_interop",
+    ),
+    "macos-accelerate": (
+        # Select targets, not just test-name filters: do not compile the full workspace.
+        "cargo nextest run -p tenferro-gpu -p tenferro-fft -p tenferro-linalg "
+        f"{_NEXTEST_PROFILE} --no-default-features "
+        "--features blas-accelerate,webgpu,tenferro-linalg/autodiff "
+        "--test apple_context --test apple_cpu --test webgpu_metal_fft "
+        "--test apple_accelerate --no-fail-fast",
     ),
     "blas-inject": (
         f"cargo test -p tenferro-cpu {_CARGO_TEST_PROFILE} --no-default-features "
@@ -106,8 +113,8 @@ PROFILE_COMMANDS: dict[str, tuple[str, ...]] = {
         "bash scripts/build_docs_site.sh",
     ),
     "coverage": (
-        f"cargo llvm-cov --workspace --exclude tenferro-tutorial-code "
-        f"{_CARGO_TEST_PROFILE} --no-clean --json --output-path coverage.json",
+        f"cargo llvm-cov nextest --workspace --exclude tenferro-tutorial-code "
+        f"{_NEXTEST_PROFILE} --no-clean --json --output-path coverage.json",
         "python3 scripts/check-coverage.py coverage.json",
     ),
     "ci-config": (
@@ -182,6 +189,25 @@ def run_profiles(
             "storage ownership base requires the ci-config profile"
         )
 
+    environment_base = os.environ.copy()
+    if environment_base.get("GITHUB_ACTIONS") == "true":
+        cpus = os.cpu_count() or 1
+        for variable, default in (
+            ("CARGO_BUILD_JOBS", min(cpus, 16)),
+            ("NEXTEST_TEST_THREADS", cpus),
+            ("RUST_TEST_THREADS", cpus),
+        ):
+            environment_base.setdefault(variable, str(default))
+        print(
+            f"Runner CPUs={cpus}; "
+            + "; ".join(
+                f"{key}={environment_base[key]}"
+                for key in ("CARGO_BUILD_JOBS", "NEXTEST_TEST_THREADS", "RUST_TEST_THREADS")
+            ),
+            file=output,
+            flush=True,
+        )
+
     for profile in expanded_profiles:
         for command in commands_for(profile):
             if (
@@ -195,8 +221,10 @@ def run_profiles(
             print(f"+ {command}", file=output, flush=True)
             if dry_run:
                 continue
-            environment = os.environ.copy()
+            environment = environment_base.copy()
             environment["PYTHON"] = sys.executable
+            if profile == "macos-accelerate":
+                environment["TENFERRO_REQUIRE_METAL"] = "1"
             if profile == "workspace-blas":
                 rustflags = "-l dylib=openblas -l dylib=lapack"
                 environment["RUSTFLAGS"] = rustflags
