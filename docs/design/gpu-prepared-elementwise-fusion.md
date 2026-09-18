@@ -138,9 +138,14 @@ benchmark alone cannot show which path submitted what.
    `None` without partially writing outputs; the CUDA and CPU implementations
    must be checked for that, and the prepared region executor must not reuse the
    segmented `last_use` reclamation, which the design already forbids.
-2. Open. On a partial submit or an event-record failure, who owns the inputs and
-   intermediate allocations until completion? Read the CUDA
-   `SubmissionCleanupGuard` and the segmented executor's error paths.
+2. **Answered (code reading).** The CUDA event domain arms a
+   `SubmissionCleanupGuard` before running the launch closure. On a launch
+   failure or an event-record failure it synchronizes the stream
+   (`finish_with_error` -> `synchronize_stream`) before returning the error, and
+   on unwind its `Drop` retires the stream best-effort. So the rule already is:
+   nothing is released without a completion witness, and on failure the stream
+   barrier is the witness of last resort. Stage 1 must keep that contract for a
+   region (fused or fallback), and must not re-execute after a partial submit.
 3. **Answered (code reading).** The unprepared path has no event domains at all
    (`segment.rs` has no reference to them), so "one region completion covers
    every submission" is a prepared-path property: the prepared executor records
