@@ -68,6 +68,44 @@ fn compile_broadcast_mul_add(rows: usize, cols: usize) -> CompiledGraph {
         .expect("compiled broadcast-multiply-add graph")
 }
 
+/// Benchmark one graph through both runtime paths.
+///
+/// `prepared_graph` is `prepare_compiled` + `run_prepared`, which dispatches one
+/// command per instruction. `unprepared_graph` is `run_compiled`, whose
+/// segmented executor fuses a pure elementwise chain into one command. Running
+/// both in one group is what makes that divergence visible: earlier revisions of
+/// this benchmark only measured the prepared path under a `segmented_graph`
+/// label, which hid it.
+fn bench_both_paths(
+    group: &mut criterion::BenchmarkGroup<'_, criterion::measurement::WallTime>,
+    program: &CompiledGraph,
+    inputs: &[&Tensor],
+    case: String,
+) {
+    group.bench_function(BenchmarkId::new("prepared_graph", case.clone()), |bench| {
+        let runtime = cpu_runtime();
+        let prepared = runtime
+            .prepare_compiled(program, inputs)
+            .expect("graph should prepare");
+        bench.iter(|| {
+            let out = runtime
+                .run_prepared(black_box(&prepared), inputs)
+                .expect("graph run");
+            black_box(out);
+        });
+    });
+
+    group.bench_function(BenchmarkId::new("unprepared_graph", case), |bench| {
+        let runtime = cpu_runtime();
+        bench.iter(|| {
+            let out = runtime
+                .run_compiled(black_box(program), inputs)
+                .expect("graph run");
+            black_box(out);
+        });
+    });
+}
+
 fn bench_runtime_add_mul(c: &mut Criterion) {
     let mut group = c.benchmark_group("runtime_elementwise_chain/f64/add_mul");
     for &n in &[4_096_usize, 65_536, 1_048_576] {
@@ -75,18 +113,7 @@ fn bench_runtime_add_mul(c: &mut Criterion) {
         let a = input_tensor(n, 0.5);
         let b = input_tensor(n, 1.25);
         group.throughput(criterion::Throughput::Elements(n as u64));
-        group.bench_function(BenchmarkId::new("segmented_graph", n), |bench| {
-            let runtime = cpu_runtime();
-            let prepared = runtime
-                .prepare_compiled(&program, &[&a, &b])
-                .expect("graph should prepare");
-            bench.iter(|| {
-                let out = runtime
-                    .run_prepared(black_box(&prepared), &[black_box(&a), black_box(&b)])
-                    .expect("graph run");
-                black_box(out);
-            });
-        });
+        bench_both_paths(&mut group, &program, &[&a, &b], n.to_string());
     }
     group.finish();
 }
@@ -99,21 +126,7 @@ fn bench_runtime_broadcast_mul(c: &mut Criterion) {
         let b = input_tensor(cols, 1.25);
         let elements = rows * cols;
         group.throughput(criterion::Throughput::Elements(elements as u64));
-        group.bench_function(
-            BenchmarkId::new("segmented_graph", format!("{rows}x{cols}")),
-            |bench| {
-                let runtime = cpu_runtime();
-                let prepared = runtime
-                    .prepare_compiled(&program, &[&a, &b])
-                    .expect("graph should prepare");
-                bench.iter(|| {
-                    let out = runtime
-                        .run_prepared(black_box(&prepared), &[black_box(&a), black_box(&b)])
-                        .expect("graph run");
-                    black_box(out);
-                });
-            },
-        );
+        bench_both_paths(&mut group, &program, &[&a, &b], format!("{rows}x{cols}"));
     }
     group.finish();
 }
@@ -126,21 +139,7 @@ fn bench_runtime_broadcast_mul_add(c: &mut Criterion) {
         let b = input_tensor(cols, 1.25);
         let elements = rows * cols;
         group.throughput(criterion::Throughput::Elements(elements as u64));
-        group.bench_function(
-            BenchmarkId::new("segmented_graph", format!("{rows}x{cols}")),
-            |bench| {
-                let runtime = cpu_runtime();
-                let prepared = runtime
-                    .prepare_compiled(&program, &[&a, &b])
-                    .expect("graph should prepare");
-                bench.iter(|| {
-                    let out = runtime
-                        .run_prepared(black_box(&prepared), &[black_box(&a), black_box(&b)])
-                        .expect("graph run");
-                    black_box(out);
-                });
-            },
-        );
+        bench_both_paths(&mut group, &program, &[&a, &b], format!("{rows}x{cols}"));
     }
     group.finish();
 }
