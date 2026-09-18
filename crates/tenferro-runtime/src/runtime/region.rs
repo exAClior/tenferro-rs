@@ -197,50 +197,25 @@ impl RegionExecutionCounters {
     }
 }
 
-/// Plan-derived command counts for the two execution paths.
+/// Plan-derived command count for the production execution path.
 ///
-/// The first value is the number of commands the prepared path submits:
-/// scheduled operations that no region covers, plus one command per region. The
-/// second is the number of commands the segmented executor submits for the same
-/// program, counted as one command for a host/FFI segment and for a segment
-/// whose elementwise fusion plan is accepted, and one command per instruction
-/// for a segment that fusion rejects. The broadcast-multiply triplet/pair fast
-/// paths are not modeled.
-pub(crate) fn command_counts(
-    staging: &ExecProgram,
-    schedule: &ScheduledGraph,
-    regions: &[ElementwiseRegion],
-) -> (usize, usize) {
+/// The scheduled executor is the only production executor (`run_compiled`,
+/// `run_compiled_values`, `run_prepared`, and scoped/admitted execution all
+/// reach `execute_scheduled_slots`). It submits one command per scheduled
+/// operation, except that a planned region replaces its covered operations with
+/// one fused command. The legacy segmented executor in `segment.rs` is
+/// exercised only by tests, so its segment count is not a production command
+/// count and is not compared here.
+pub(crate) fn command_count(schedule: &ScheduledGraph, regions: &[ElementwiseRegion]) -> usize {
     let operations = schedule
         .nodes()
         .iter()
         .filter(|node| matches!(node, ScheduledNode::Operation(_)))
         .count();
     let covered: usize = regions.iter().map(|region| region.node_indices.len()).sum();
-    let prepared = operations
+    operations
         .saturating_sub(covered)
-        .saturating_add(regions.len());
-    let unprepared = segment_exec_program(staging)
-        .into_iter()
-        .map(|segment| match segment {
-            Segment::Fused {
-                instructions,
-                input_slots,
-                output_slots,
-                ..
-            } => {
-                if build_elementwise_fusion_plan(&instructions, &input_slots, &output_slots)
-                    .is_some()
-                {
-                    1
-                } else {
-                    instructions.len()
-                }
-            }
-            _ => 1,
-        })
-        .sum();
-    (prepared, unprepared)
+        .saturating_add(regions.len())
 }
 
 /// Number of regions and the instructions they cover, for parity tests.

@@ -7,13 +7,19 @@ now, dependency handling is not a union, multi-output regions stay supported).
 
 ## Problem and evidence
 
-The two execution paths diverge in how they submit elementwise work.
+The production executor had no elementwise fusion.
 
-- Unprepared (`run_compiled*`) segments the `ExecProgram`
-  (`segment_exec_program`) and executes a fusable elementwise run as one command
-  (`build_elementwise_fusion_plan` -> `BackendSession::execute_elementwise_fusion`).
-- Prepared (`prepare_compiled` + `run_prepared`) walks the schedule and
-  dispatches one command per instruction; `runtime/execution.rs` has no fusion.
+- The scheduled executor (`execute_scheduled_reads` -> `execute_scheduled_slots`)
+  is the only production executor: `run_compiled`, `run_compiled_values`,
+  `run_prepared`, and scoped/admitted execution all reach it. It dispatched one
+  command per scheduled instruction.
+- The legacy segmented executor (`segment.rs`, reached through the erased
+  executor's whole-program `execute*` entry points) does fuse, but a caller scan
+  shows every one of those entry points is invoked only from the `mod tests`
+  module in `runtime/execution.rs`. It is production-dead code, which is why the
+  divergence was invisible: the fusion existed only where nothing ran it.
+- `gpu/elementwise` measures the consequence directly: a pure elementwise chain
+  costs one command per instruction in production.
 
 Measured divergence: a pure elementwise chain `y = tanh(exp((x+x) * (x+x)))`
 compiles to four elementwise instructions; the prepared path submits four
@@ -129,11 +135,21 @@ Two findings from this slice:
   explicit amortization floor (`VIEW_COPY_MIN_INSTRUCTIONS = 3`); a short region
   with a view input still declines the fusion.
 
-## Stage 2 (non-goal for now)
+## Stage 2 decision (recorded)
 
-Making `run_compiled*` a wrapper over prepare+run and deleting the duplicated
-executor is not part of this change. It needs its own evaluation of cold-call
-cost, caching, ownership, and fast paths.
+There is no second production executor to unify or delete: `run_compiled*`
+already prepares through the runtime's prepared-entry cache and then runs the
+scheduled executor, so it differs from `run_prepared` only in re-preparing (a
+cache lookup) instead of taking a caller-held handle. Making `run_compiled*` a
+wrapper over prepare+run is therefore a refactor of the entry points, not a
+behavioral unification, and it is not needed for parity.
+
+What remains is dead code: the segmented executor and its `execute*` entry
+points exist only for tests and mislead readers (this investigation was misled by
+them). `execution_path_contract.rs` now asserts those entry points are called
+only from the test module, so they cannot quietly become a second production
+path. Deleting the dead segmented executor is a separate cleanup change; it is
+not part of this one.
 
 ## Acceptance criteria
 

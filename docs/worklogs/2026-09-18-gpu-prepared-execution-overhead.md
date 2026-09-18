@@ -100,6 +100,16 @@ container.
   tenferro-cpu duplicates the crate (the `EngineRegistration` types differ), and
   `EngineRegistration` does not expose its event domain driver, so a counting
   driver cannot be injected either.
+- Correction (caller scan): the segmented executor in `segment.rs` is
+  production-dead. Every `ErasedTensorBackendExecutor::execute*` call site is
+  inside the `mod tests` module of `runtime/execution.rs`, and the scheduled
+  executor is the only production executor for `run_compiled`,
+  `run_compiled_values`, `run_prepared`, and scoped/admitted execution. The
+  earlier framing ("the unprepared path fuses, the prepared path does not") was
+  wrong: both production entry points ran the unfused scheduled executor, and the
+  segmented fusion only ever ran in tests. The command census now reports one
+  production count, and `execution_path_contract.rs` asserts the segmented entry
+  points stay test-only.
 - Detection artifacts today: the parity matrix above, plus
   `crates/tenferro-runtime/benches/elementwise_fusion.rs`, which now benchmarks
   `prepared_graph` and `unprepared_graph` in the same group (the earlier
@@ -123,6 +133,9 @@ container.
   the unprepared path) and
   `prepared_elementwise_region_falls_back_when_fusion_is_declined` (one fallback
   below the floor, results equal).
+- Stage 2 (single production executor): no production duplicate exists, so the
+  remaining work is deleting the test-only segmented executor as separate
+  cleanup; the contract test prevents it from returning to production.
 - `run_compiled` and `run_prepared` share one prepared program through the
   prepared-entry cache, which the tests isolate by using a second runtime for the
   reference run.

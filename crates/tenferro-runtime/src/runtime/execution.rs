@@ -77,18 +77,16 @@ impl PreparedCompiledGraph {
         (counters.fused(), counters.fallbacks())
     }
 
-    /// Plan-derived command counts for the two execution paths, for
-    /// execution-path parity tests.
+    /// Plan-derived command count for the production execution path, for
+    /// execution-path tests: scheduled operations that no region covers, plus
+    /// one command per planned region.
     ///
-    /// The first value is the number of commands the prepared path submits
-    /// (operations no region covers plus one per region); the second is the
-    /// segmented executor's count for the same program. This is a plan census,
-    /// not a runtime submission count.
+    /// This is a plan census, not a runtime submission count.
     #[doc(hidden)]
     #[must_use]
-    pub fn execution_command_counts(&self) -> (usize, usize) {
+    pub fn execution_command_count(&self) -> usize {
         let root = self.prepared.root();
-        super::region::command_counts(root.staging(), root.schedule(), root.regions())
+        super::region::command_count(root.schedule(), root.regions())
     }
 }
 
