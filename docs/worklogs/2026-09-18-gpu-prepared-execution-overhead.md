@@ -80,3 +80,28 @@ container.
 - Not verified: whether the remaining inter-kernel gap can be reduced further,
   and whether the same retirement reasoning should cover the cuFFT work area and
   cuTENSOR permutation plans.
+
+## Stage 0 status (execution-path parity)
+
+- Numeric parity test: `runtime_prepared_matches_compiled_for_elementwise_chain`
+  runs the same chain through `run_compiled` and through
+  `prepare_compiled` + `run_prepared` and asserts equal results.
+- Plan census and parity matrix: `PreparedCompiledGraph::execution_command_counts`
+  reports (prepared commands, segmented commands) as a plan census, and
+  `execution_path_command_counts_matrix` asserts the current state: a pure
+  elementwise chain is (4, 1) - the divergence Stage 1 removes - while the same
+  chain with a reduction is (3, 3), because a run containing a reduction is
+  fusion-ineligible in both paths.
+- The segmented command count is a plan census, not a runtime submission count:
+  it assumes the general elementwise fusion path applies and does not model the
+  broadcast-multiply triplet/pair fast paths.
+- Real submission counting is deferred to Stage 1 verification. A unit test
+  cannot register the CPU engine because tenferro-runtime's dev-dependency on
+  tenferro-cpu duplicates the crate (the `EngineRegistration` types differ), and
+  `EngineRegistration` does not expose its event domain driver, so a counting
+  driver cannot be injected either.
+- Detection artifacts today: the parity matrix above, plus
+  `crates/tenferro-runtime/benches/elementwise_fusion.rs`, which now benchmarks
+  `prepared_graph` and `unprepared_graph` in the same group (the earlier
+  `segmented_graph` label measured only the prepared path). The `gpu/elementwise`
+  benchmark case is still to add.
