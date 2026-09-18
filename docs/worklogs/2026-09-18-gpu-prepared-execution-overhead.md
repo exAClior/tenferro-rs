@@ -135,3 +135,12 @@ container.
   elementwise chains. These are single idle-machine runs, not the three-repetition
   controlled A/B a performance claim needs, and an earlier run under build
   contention was several times slower overall.
+
+- GPU verification with region execution enabled (A100 container, `nvidia-gpu`
+  standard suite, run `20260918_region`): 56 ok / 51 unsupported / 0 failures,
+  matching the pre-change status set. `gpu/tensornetwork` trace 70.3 ms, eager
+  75.1 ms, PyTorch 109.6 ms; dense matmul trace 3.369 ms. The suite is unchanged
+  because its prepared programs hold no elementwise graph instructions (the
+  tensornetwork program is 549 FFI einsum ops and the linalg AD programs have
+  mixed runs), so regions are not planned there. The elementwise-chain benefit
+  needs the `gpu/elementwise` case that is still to add.
