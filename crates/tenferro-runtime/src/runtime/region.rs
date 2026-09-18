@@ -21,6 +21,14 @@ use crate::exec::{ExecInstruction, ExecProgram};
 use crate::runtime::schedule::{ScheduledGraph, ScheduledNode};
 use crate::segment::{build_elementwise_fusion_plan, segment_exec_program, Segment};
 
+/// Region length from which a borrowed view input is materialized once.
+///
+/// The fused entry point takes owned tensors, so a view input needs one copy.
+/// That copy is a full pass over the input, which only pays off when the region
+/// replaces enough commands: below this length the region keeps the
+/// per-instruction path, which resolves views itself.
+pub(crate) const VIEW_COPY_MIN_INSTRUCTIONS: usize = 3;
+
 /// One elementwise region that may execute as a single fused command.
 #[derive(Debug)]
 pub(crate) struct ElementwiseRegion {

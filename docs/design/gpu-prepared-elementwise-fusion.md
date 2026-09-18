@@ -95,11 +95,13 @@ is validated for presence and residency before it is published, and region
 inputs whose last use is inside the region are released at the region boundary.
 
 Regions apply only in tensor output mode; value mode keeps the per-instruction
-path, which preserves its contract. The fused entry point takes owned tensors,
-so a region with a borrowed view input declines the fusion and keeps the
-per-instruction path instead of failing or copying silently. For a pure
-elementwise chain over graph inputs that is the common case today, which is why
-the benchmark benefit needs the follow-up below.
+path, which preserves its contract. The fused entry point takes owned tensors, so
+a region with a borrowed view input materializes each view once
+(`VIEW_COPY_MIN_INSTRUCTIONS = 3`) and fuses; below that length the copy cannot be
+amortized and the region keeps the per-instruction path, which resolves views
+itself. This is what makes a chain over graph inputs or embedded constants fuse
+on CUDA: without it the chain fell back to one command per instruction
+(`gpu/elementwise` trace 0.975 ms at n=1048576 against 0.190 ms after).
 
 Re-divergence is guarded from two sides. The plan census
 (`execution_command_counts`, computed in `region.rs` from the shared
@@ -123,9 +125,9 @@ Two findings from this slice:
   runtime's prepared-entry cache, so their execution counters and any prepared
   state are already shared. Tests must isolate the counted runtime to observe one
   path's execution.
-- Materializing a borrowed view input for a region (one copy amortized over the
-  region's commands) is the follow-up that would let chains over graph inputs
-  fuse; it needs the amortization condition written down before it is added.
+- Materializing a borrowed view input for a region is now implemented with an
+  explicit amortization floor (`VIEW_COPY_MIN_INSTRUCTIONS = 3`); a short region
+  with a view input still declines the fusion.
 
 ## Stage 2 (non-goal for now)
 

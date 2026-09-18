@@ -884,6 +884,7 @@ pub(super) trait ErasedTensorBackendExecutor: fmt::Debug + Send + Sync {
     fn execute_elementwise_fusion_slots<'input>(
         &self,
         input_slots: &[usize],
+        instruction_count: usize,
         plan: &tenferro_tensor::backend::ElementwiseFusionPlan,
         slots: &mut [Option<ExecSlot<'input>>],
         output_slots: &[usize],
@@ -1282,25 +1283,49 @@ where
     fn execute_elementwise_fusion_slots<'input>(
         &self,
         input_slots: &[usize],
+        instruction_count: usize,
         plan: &tenferro_tensor::backend::ElementwiseFusionPlan,
         slots: &mut [Option<ExecSlot<'input>>],
         output_slots: &[usize],
     ) -> Result<bool> {
-        // The fused entry point takes owned tensors. A borrowed view input keeps
-        // the per-instruction path, which resolves views itself, instead of
-        // failing or silently copying the view here.
+        // The fused entry point takes owned tensors. A borrowed view input is
+        // materialized once when the region is long enough to amortize that
+        // copy; otherwise the per-instruction path, which resolves views itself,
+        // stays in charge.
+        let mut views: Vec<usize> = Vec::new();
+        for &slot in input_slots {
+            let value = slots
+                .get(slot)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| crate::Error::from(tenferro_tensor::Error::MissingValue { slot }))?;
+            if value.as_tensor("elementwise_region").is_err() {
+                views.push(slot);
+            }
+        }
+        if !views.is_empty() {
+            if instruction_count < super::region::VIEW_COPY_MIN_INSTRUCTIONS {
+                return Ok(false);
+            }
+            let mut lease = self.lease_state("Runtime::run_prepared elementwise region copy")?;
+            let backend = &mut lease.state_mut().backend;
+            for &slot in &views {
+                let tensor = {
+                    let read = slots[slot].as_ref().map(ExecSlot::as_read).ok_or_else(|| {
+                        crate::Error::from(tenferro_tensor::Error::MissingValue { slot })
+                    })?;
+                    backend.with_backend_session(|exec| exec.to_contiguous_read(read))?
+                };
+                slots[slot] = Some(ExecSlot::Owned(tensor));
+            }
+        }
+
         let mut inputs: Vec<&Tensor> = Vec::with_capacity(input_slots.len());
         for &slot in input_slots {
             let value = slots
                 .get(slot)
                 .and_then(Option::as_ref)
                 .ok_or_else(|| crate::Error::from(tenferro_tensor::Error::MissingValue { slot }))?;
-            match value.as_tensor("elementwise_region") {
-                Ok(tensor) => inputs.push(tensor),
-                // A borrowed view keeps the per-instruction path, which resolves
-                // views itself, instead of failing or silently copying here.
-                Err(_) => return Ok(false),
-            }
+            inputs.push(value.as_tensor("elementwise_region")?);
         }
 
         let mut lease = self.lease_state("Runtime::run_prepared elementwise region")?;
@@ -1875,6 +1900,7 @@ fn execute_scheduled_slots<'input>(
                             }
                             let applied = operation.executor().execute_elementwise_fusion_slots(
                                 &region.input_slots,
+                                region.instructions.len(),
                                 &region.plan,
                                 &mut staged,
                                 &region.output_slots,

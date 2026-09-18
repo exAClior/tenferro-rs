@@ -194,6 +194,7 @@ impl ErasedTensorBackendExecutor for AdmissionTestExecutor {
     fn execute_elementwise_fusion_slots<'input>(
         &self,
         _input_slots: &[usize],
+        _instruction_count: usize,
         _plan: &tenferro_tensor::backend::ElementwiseFusionPlan,
         _slots: &mut [Option<ExecSlot<'input>>],
         _output_slots: &[usize],
