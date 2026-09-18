@@ -937,3 +937,122 @@ fn prepared_elementwise_region_is_stable_across_repeated_runs() {
         assert_eq!((fused, fallbacks), (run, 0), "run {run} should fuse once");
     }
 }
+
+/// Stage 1: a chain, an FFI operation, and another chain in one program.
+///
+/// The large chain fuses, the small chain after the matrix multiply falls back
+/// below the CPU fused kernel's element floor, and both outputs match the
+/// unprepared path, so interleaving regions with FFI work keeps its contract.
+#[test]
+fn prepared_regions_interleave_with_ffi_work() {
+    let runtime = cpu_runtime();
+    let chain_len = 16 * 1024usize;
+    let n = 8usize;
+
+    let vector = |len: usize, seed: f64| {
+        Tensor::from_vec_col_major(
+            vec![len],
+            (0..len).map(|i| seed + (i % 11) as f64 * 0.125).collect(),
+        )
+        .unwrap()
+    };
+    let matrix = |seed: f64| {
+        Tensor::from_vec_col_major(
+            vec![n, n],
+            (0..n * n).map(|i| seed + (i % 7) as f64 * 0.125).collect(),
+        )
+        .unwrap()
+    };
+
+    let x = TracedTensor::from_tensor_concrete_shape(vector(chain_len, 0.5)).unwrap();
+    let a = TracedTensor::from_tensor_concrete_shape(matrix(0.5)).unwrap();
+    let b = TracedTensor::from_tensor_concrete_shape(matrix(0.25)).unwrap();
+
+    let before = (&x * &x).unwrap().exp().unwrap().tanh().unwrap();
+    let product = a.matmul(&b).unwrap();
+    let after = (&product * &product)
+        .unwrap()
+        .exp()
+        .unwrap()
+        .tanh()
+        .unwrap();
+    let program = GraphCompiler::new()
+        .compile_many(&[&before, &after])
+        .expect("interleaved graph should compile");
+
+    let prepared = runtime.prepare_compiled(&program, &[]).unwrap();
+    let (regions, _) = prepared.elementwise_region_summary();
+    assert!(regions >= 1, "the chains should plan at least one region");
+
+    let mut prepared_out = runtime.run_prepared(&prepared, &[]).unwrap();
+    let (fused, fallbacks) = prepared.elementwise_region_execution_counts();
+    assert!(fused >= 1, "the large chain should fuse: {fused} fused");
+    assert!(
+        fallbacks >= 1,
+        "the chain below the element floor should fall back: {fallbacks} fallbacks"
+    );
+
+    let reference_runtime = cpu_runtime();
+    let mut compiled = reference_runtime.run_compiled(&program, &[]).unwrap();
+    assert_eq!(prepared_out.len(), 2);
+    assert_eq!(compiled.len(), 2);
+    while let Some(expected) = compiled.pop() {
+        let actual = prepared_out.pop().unwrap();
+        assert_eq!(actual.shape(), expected.shape());
+        let actual = actual.as_slice::<f64>().unwrap();
+        let expected = expected.as_slice::<f64>().unwrap();
+        for (left, right) in actual.iter().zip(expected) {
+            assert!(
+                (left - right).abs() <= 1e-12,
+                "interleaved output diverged: {left} != {right}"
+            );
+        }
+    }
+}
+
+/// Stage 1: the fallback path stays stable across repeated runs.
+#[test]
+fn prepared_elementwise_fallback_is_stable_across_repeated_runs() {
+    let runtime = cpu_runtime();
+    let n = 4usize;
+
+    let x = TracedTensor::input_concrete_shape(DType::F64, &[n]).unwrap();
+    let doubled = (&x + &x).unwrap();
+    let chain = doubled
+        .mul(&doubled)
+        .unwrap()
+        .exp()
+        .unwrap()
+        .tanh()
+        .unwrap();
+    let mut compiler = GraphCompiler::new();
+    let program = compiler
+        .compile_with_input_specs(&chain, &[(&x, DType::F64, &[n])])
+        .unwrap();
+    let input = Tensor::from_vec_col_major(vec![n], vec![0.5_f64, 1.0, 1.5, 2.0]).unwrap();
+    let prepared = runtime.prepare_compiled(&program, &[&input]).unwrap();
+
+    let mut first: Option<Vec<f64>> = None;
+    for run in 1..=8 {
+        let mut out = runtime.run_prepared(&prepared, &[&input]).unwrap();
+        let out = out.pop().unwrap();
+        let values = out.as_slice::<f64>().unwrap().to_vec();
+        match &first {
+            None => first = Some(values),
+            Some(expected) => {
+                for (left, right) in values.iter().zip(expected) {
+                    assert!(
+                        (left - right).abs() <= 1e-15,
+                        "fallback run {run} diverged: {left} != {right}"
+                    );
+                }
+            }
+        }
+        let (fused, fallbacks) = prepared.elementwise_region_execution_counts();
+        assert_eq!(
+            (fused, fallbacks),
+            (0, run),
+            "run {run} should fall back once"
+        );
+    }
+}

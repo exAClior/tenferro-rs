@@ -187,3 +187,13 @@ container.
   runs the chain 16 times and asserts each run fuses exactly once with identical
   results, covering the "no accumulating transient state" part of the acceptance
   criteria at the runtime level.
+
+- Stage 1 coverage completed for the acceptance criteria that can be tested
+  without fault injection: `prepared_regions_interleave_with_ffi_work` (a chain,
+  an FFI matrix multiply, and a second chain in one program: the large chain
+  fuses, the small chain after the FFI work falls back below the element floor,
+  both outputs match), and `prepared_elementwise_fallback_is_stable_across_repeated_runs`
+  (eight fallback runs, one fallback each, identical results). Fault injection for
+  delayed completion, partial submit, and event-record failure is still not
+  covered; the region executes inside one enqueue, so the existing
+  `SubmissionCleanupGuard` synchronizes the stream on those failures.
