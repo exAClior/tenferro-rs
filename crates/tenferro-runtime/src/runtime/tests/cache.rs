@@ -387,7 +387,7 @@ fn same_key_waiter_does_not_miss_publication_before_first_wait() {
         let waiter_before_wait = Arc::clone(&waiter_before_wait);
         let waiter_release = Arc::clone(&waiter_release);
         thread::spawn(move || {
-            let lookup = cache
+            cache
                 .get_or_prepare_with_entry_wait_hooks_for_test(
                     TestKey(8),
                     CacheInFlightBehavior::Wait,
@@ -399,8 +399,7 @@ fn same_key_waiter_does_not_miss_publication_before_first_wait() {
                     },
                     || panic!("waiter must not sleep after producer publication"),
                 )
-                .unwrap();
-            lookup
+                .unwrap()
         })
     };
     waiter_before_wait.wait();
