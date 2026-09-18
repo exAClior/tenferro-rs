@@ -1809,13 +1809,12 @@ impl RuntimeReconfiguration<'_> {
         engine_id: &EngineId,
     ) -> Result<&mut Self, RuntimeConfigError> {
         let module_id = value.module_id().clone();
-        if let Some(existing) = self.candidate.modules.get(&module_id) {
-            if existing
+        if let Some(existing) = self.candidate.modules.get(&module_id)
+            && existing
                 .engines
                 .contains_key(&(family_id, engine_id.clone()))
-            {
-                return Ok(self);
-            }
+        {
+            return Ok(self);
         }
 
         let record = configure_module(Arc::clone(&value))
@@ -1899,20 +1898,20 @@ impl RuntimeReconfiguration<'_> {
         engine_id: &EngineId,
     ) -> Result<&mut Self, RuntimeConfigError> {
         let module_id = value.module_id().clone();
-        if let Some(existing) = self.candidate.modules.get(&module_id) {
-            if existing.module_identical(&value) {
-                if existing
-                    .engines
-                    .contains_key(&(family_id, engine_id.clone()))
-                {
-                    return Ok(self);
-                }
-                return Err(RuntimeConfigError::MissingExtensionEngine {
-                    module_id,
-                    family_id,
-                    engine_id: engine_id.clone(),
-                });
+        if let Some(existing) = self.candidate.modules.get(&module_id)
+            && existing.module_identical(&value)
+        {
+            if existing
+                .engines
+                .contains_key(&(family_id, engine_id.clone()))
+            {
+                return Ok(self);
             }
+            return Err(RuntimeConfigError::MissingExtensionEngine {
+                module_id,
+                family_id,
+                engine_id: engine_id.clone(),
+            });
         }
 
         let record = configure_module(Arc::clone(&value))

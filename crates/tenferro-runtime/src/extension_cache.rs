@@ -474,10 +474,10 @@ impl ExtensionCacheStore {
     }
 
     fn put_entry(&mut self, key: ExtensionCacheKey, entry: ExtensionCacheEntry) {
-        if let Some((removed_key, _)) = self.entries.push(key, entry) {
-            if removed_key != key {
-                self.record_eviction(&removed_key);
-            }
+        if let Some((removed_key, _)) = self.entries.push(key, entry)
+            && removed_key != key
+        {
+            self.record_eviction(&removed_key);
         }
         self.evict_to_limits();
     }

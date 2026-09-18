@@ -1260,10 +1260,10 @@ fn validate_ad_values(
     builder: &SemanticProgramBuilder,
 ) -> Result<(), SemanticAdError> {
     for (index, value) in values.iter().copied().enumerate() {
-        if let AdValue::Value(value) = value {
-            if builder.validate_value(value).is_err() {
-                return Err(SemanticAdError::ForeignValue { field, index });
-            }
+        if let AdValue::Value(value) = value
+            && builder.validate_value(value).is_err()
+        {
+            return Err(SemanticAdError::ForeignValue { field, index });
         }
     }
     Ok(())

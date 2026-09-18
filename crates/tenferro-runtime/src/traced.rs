@@ -558,10 +558,9 @@ fn validate_broadcast_in_dim_args(
     if let (Some(input_shape), Some(output_shape)) = (
         concrete_input_shape.as_deref(),
         concrete_output_shape.as_deref(),
-    ) {
-        if let Some(error) = broadcast_in_dim_extent_error(input_shape, output_shape, dims) {
-            return Err(graph_broadcast_error(op, error));
-        }
+    ) && let Some(error) = broadcast_in_dim_extent_error(input_shape, output_shape, dims)
+    {
+        return Err(graph_broadcast_error(op, error));
     }
 
     let mut seen = vec![false; output_shape.len()];
@@ -1982,22 +1981,20 @@ impl TracedTensor {
                 },
             ));
         }
-        if let (Some(lhs_shape), Some(rhs_shape)) = (&self.shape_hint, &other.shape_hint) {
-            if let (Some(lhs_cols), Some(rhs_rows)) =
+        if let (Some(lhs_shape), Some(rhs_shape)) = (&self.shape_hint, &other.shape_hint)
+            && let (Some(lhs_cols), Some(rhs_rows)) =
                 (lhs_shape[1].constant_value(), rhs_shape[0].constant_value())
-            {
-                if lhs_cols != rhs_rows {
-                    return Err(graph_validation(
-                        "TracedTensor::matmul",
-                        ShapeMismatch::ContractedDimensions {
-                            lhs_axis: 1,
-                            lhs_size: lhs_cols,
-                            rhs_axis: 0,
-                            rhs_size: rhs_rows,
-                        },
-                    ));
-                }
-            }
+            && lhs_cols != rhs_rows
+        {
+            return Err(graph_validation(
+                "TracedTensor::matmul",
+                ShapeMismatch::ContractedDimensions {
+                    lhs_axis: 1,
+                    lhs_size: lhs_cols,
+                    rhs_axis: 0,
+                    rhs_size: rhs_rows,
+                },
+            ));
         }
         self.dot_general(
             other,

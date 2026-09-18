@@ -1536,14 +1536,13 @@ fn householder_qr_from_factors_meta(
         shapes[0][1].constant_value(),
         shapes[0][0].constant_value(),
         shapes[1][1].constant_value(),
-    ) {
-        if q_cols > q_rows.min(r_cols) {
-            return Err(Error::invalid_argument(
-                OP,
-                "shape",
-                "Q column count exceeds min(Q rows, R columns)",
-            ));
-        }
+    ) && q_cols > q_rows.min(r_cols)
+    {
+        return Err(Error::invalid_argument(
+            OP,
+            "shape",
+            "Q column count exceeds min(Q rows, R columns)",
+        ));
     }
     let m = shapes[0][0].clone();
     let n = shapes[1][1].clone();
@@ -1574,14 +1573,14 @@ fn require_static_extent_equal(
     lhs: &SymDim,
     rhs: &SymDim,
 ) -> tenferro_tensor::Result<()> {
-    if let (Some(lhs), Some(rhs)) = (lhs.constant_value(), rhs.constant_value()) {
-        if lhs != rhs {
-            return Err(Error::invalid_argument(
-                op,
-                field,
-                format!("expected equal extents, got {lhs} and {rhs}"),
-            ));
-        }
+    if let (Some(lhs), Some(rhs)) = (lhs.constant_value(), rhs.constant_value())
+        && lhs != rhs
+    {
+        return Err(Error::invalid_argument(
+            op,
+            field,
+            format!("expected equal extents, got {lhs} and {rhs}"),
+        ));
     }
     Ok(())
 }

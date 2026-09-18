@@ -390,12 +390,12 @@ impl InputSpecializationRequirementsBuilder {
                 });
             }
         }
-        if let Some(alignment_log2) = self.alignment_log2 {
-            if u32::from(alignment_log2) >= usize::BITS {
-                return Err(
-                    InputSpecializationRequirementsError::InvalidAlignmentClass { alignment_log2 },
-                );
-            }
+        if let Some(alignment_log2) = self.alignment_log2
+            && u32::from(alignment_log2) >= usize::BITS
+        {
+            return Err(
+                InputSpecializationRequirementsError::InvalidAlignmentClass { alignment_log2 },
+            );
         }
         Ok(InputSpecializationRequirements {
             dtype: self.dtype,

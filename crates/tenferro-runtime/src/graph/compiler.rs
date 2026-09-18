@@ -492,12 +492,10 @@ impl GraphCompiler {
         let mut output_keys = Vec::with_capacity(outputs.len());
         for output in outputs {
             roots.extend(output.resolve_roots());
-            if include_checkpoint_aliases {
-                if let Some(chain) = &output.checkpoint_chain {
-                    roots.extend(chain.collect_graphs());
-                    for (alias_key, target_key) in chain.collect_aliases() {
-                        insert_checkpoint_alias(&mut checkpoint_aliases, alias_key, target_key)?;
-                    }
+            if include_checkpoint_aliases && let Some(chain) = &output.checkpoint_chain {
+                roots.extend(chain.collect_graphs());
+                for (alias_key, target_key) in chain.collect_aliases() {
+                    insert_checkpoint_alias(&mut checkpoint_aliases, alias_key, target_key)?;
                 }
             }
             output_keys.push(output.graph.values()[output.val].key.clone());
@@ -1526,25 +1524,25 @@ fn prune_compiled_extension_outputs(prog: &mut CompiledProgram<StdTensorOp>) -> 
             })
             .collect::<Result<Vec<_>>>()?;
 
-        if let StdTensorOp::Extension(ext) = &instr.operation {
-            if let Some(pruned) = ext.prune_outputs(&live_outputs) {
-                let kept_outputs = instr
-                    .outputs
-                    .iter()
-                    .zip(live_outputs.iter())
-                    .filter_map(|(&slot, &live)| live.then_some(slot))
-                    .collect::<Vec<_>>();
-                if pruned.output_count() != kept_outputs.len() {
-                    return Err(invalid_compiled_graph(format!(
-                        "extension family_id={:?} pruned to {} outputs for {} live slots",
-                        ext.family_id(),
-                        pruned.output_count(),
-                        kept_outputs.len()
-                    )));
-                }
-                instr.operation = StdTensorOp::Extension(pruned);
-                instr.outputs = kept_outputs;
+        if let StdTensorOp::Extension(ext) = &instr.operation
+            && let Some(pruned) = ext.prune_outputs(&live_outputs)
+        {
+            let kept_outputs = instr
+                .outputs
+                .iter()
+                .zip(live_outputs.iter())
+                .filter_map(|(&slot, &live)| live.then_some(slot))
+                .collect::<Vec<_>>();
+            if pruned.output_count() != kept_outputs.len() {
+                return Err(invalid_compiled_graph(format!(
+                    "extension family_id={:?} pruned to {} outputs for {} live slots",
+                    ext.family_id(),
+                    pruned.output_count(),
+                    kept_outputs.len()
+                )));
             }
+            instr.operation = StdTensorOp::Extension(pruned);
+            instr.outputs = kept_outputs;
         }
 
         if live_outputs.iter().any(|&live| live) {

@@ -1353,20 +1353,18 @@ fn execute_published_route_with_targets(
     .expect("published route extension has one output");
     let program = GraphCompiler::new().compile_with_input_specs(&y, &[(&x, DType::F64, &[2])])?;
     let mut input = TestAllocationDomain(fixture.source_domain).allocate(DType::F64, &[2])?;
-    if let Some(input) = input.as_typed_mut::<f64>() {
-        if input.backend_buffer_mut().is_some() {
-            input
-                .backend_buffer_mut()
-                .expect("backend input buffer")
-                .map_write()
-                .map_err(|source| {
-                    tenferro_tensor::Error::host_access("published-route-input", source)
-                })?
-                .copy_from_slice(&[3.0, 5.0])
-                .map_err(|source| {
-                    tenferro_tensor::Error::host_access("published-route-input", source)
-                })?;
-        }
+    if let Some(input) = input.as_typed_mut::<f64>()
+        && input.backend_buffer_mut().is_some()
+    {
+        input
+            .backend_buffer_mut()
+            .expect("backend input buffer")
+            .map_write()
+            .map_err(|source| tenferro_tensor::Error::host_access("published-route-input", source))?
+            .copy_from_slice(&[3.0, 5.0])
+            .map_err(|source| {
+                tenferro_tensor::Error::host_access("published-route-input", source)
+            })?;
     }
     let output = fixture.runtime.run_compiled(&program, &[&input])?;
 

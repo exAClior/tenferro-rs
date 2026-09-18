@@ -438,10 +438,10 @@ pub(crate) fn terminal_output_slots(program: &ExecProgram) -> Vec<bool> {
 
     let mut terminal = vec![false; program.n_slots];
     for &slot in &program.output_slots {
-        if let Some(terminal) = terminal.get_mut(slot) {
-            if !consumed.get(slot).copied().unwrap_or(true) {
-                *terminal = true;
-            }
+        if let Some(terminal) = terminal.get_mut(slot)
+            && !consumed.get(slot).copied().unwrap_or(true)
+        {
+            *terminal = true;
         }
     }
     terminal
@@ -1222,10 +1222,8 @@ pub(crate) fn reclaim_last_use_inputs_exec<'input>(
     exec: &mut dyn BackendSession,
 ) {
     for (i, &is_last) in inst.last_use.iter().enumerate() {
-        if is_last {
-            if let Some(slot) = slots[inst.input_slots[i]].take() {
-                reclaim_exec_slot_with_session(slot, exec);
-            }
+        if is_last && let Some(slot) = slots[inst.input_slots[i]].take() {
+            reclaim_exec_slot_with_session(slot, exec);
         }
     }
 }
@@ -1236,10 +1234,8 @@ pub(crate) fn reclaim_last_use_inputs_backend<'input, B: TensorBackend>(
     backend: &mut B,
 ) {
     for (i, &is_last) in inst.last_use.iter().enumerate() {
-        if is_last {
-            if let Some(slot) = slots[inst.input_slots[i]].take() {
-                reclaim_exec_slot_with_backend(slot, backend);
-            }
+        if is_last && let Some(slot) = slots[inst.input_slots[i]].take() {
+            reclaim_exec_slot_with_backend(slot, backend);
         }
     }
 }

@@ -3508,10 +3508,10 @@ impl EagerTensor {
         // A pooled value duplicates through its descriptor view; a caller-owned
         // payload has no such view and duplicates through its own read path, which
         // copies the value while keeping its element type.
-        if let Ok(value) = self.value() {
-            if let Ok(tensor) = value.duplicate_host_tensor() {
-                return Ok(tensor);
-            }
+        if let Ok(value) = self.value()
+            && let Ok(tensor) = value.duplicate_host_tensor()
+        {
+            return Ok(tensor);
         }
         let read = self
             ._record

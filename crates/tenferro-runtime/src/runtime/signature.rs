@@ -425,10 +425,10 @@ fn validate_entry(
             stride_count: strides.len(),
         });
     }
-    if let Some(alignment_log2) = alignment_log2 {
-        if u32::from(alignment_log2) >= usize::BITS {
-            return Err(InputSignatureError::InvalidAlignmentClass { alignment_log2 });
-        }
+    if let Some(alignment_log2) = alignment_log2
+        && u32::from(alignment_log2) >= usize::BITS
+    {
+        return Err(InputSignatureError::InvalidAlignmentClass { alignment_log2 });
     }
     Ok(())
 }

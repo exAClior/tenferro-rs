@@ -110,10 +110,10 @@ impl LinalgBackend for CpuExecSession<'_> {
         let kind = self.kind();
         self.with_linalg_pool_fresh(move |context, buffers| {
             let provider = linalg_provider_kind(kind, "cholesky")?;
-            if tensor_uses_backend_storage(input) {
-                if let Some(domain) = domain.as_deref() {
-                    return managed_cholesky(context, buffers, input, domain, provider);
-                }
+            if tensor_uses_backend_storage(input)
+                && let Some(domain) = domain.as_deref()
+            {
+                return managed_cholesky(context, buffers, input, domain, provider);
             }
             ensure_host_tensor("cholesky", input)?;
             cholesky_entered(provider, context, buffers, input)
@@ -667,10 +667,10 @@ impl LinalgBackend for CpuExecSession<'_> {
         let kind = self.kind();
         self.with_linalg_pool_fresh(move |context, buffers| {
             let provider = linalg_provider_kind(kind, "cholesky")?;
-            if let (Some(domain), Some(tensor)) = (domain.as_deref(), input.as_tensor()) {
-                if tensor_uses_backend_storage(tensor) {
-                    return managed_cholesky(context, buffers, tensor, domain, provider);
-                }
+            if let (Some(domain), Some(tensor)) = (domain.as_deref(), input.as_tensor())
+                && tensor_uses_backend_storage(tensor)
+            {
+                return managed_cholesky(context, buffers, tensor, domain, provider);
             }
             ensure_host_tensor_read("cholesky", &input)?;
             ensure_supported_linalg_dtype("cholesky", input.dtype())?;

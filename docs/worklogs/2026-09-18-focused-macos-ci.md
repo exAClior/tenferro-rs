@@ -61,12 +61,14 @@ actionlint 1.7.12 does not recognize that supported GitHub key; a one-file,
 one-diagnostic exception is paired with explicit queue/lifecycle contract tests.
 Cache restores compile PTX with the restored nvcc and headers before use.
 
-### Local paired measurements
+### Local paired measurements (initial experiment invalidated)
 
 Baseline `cf971d0f18d0357133da97dae66802e26bd56e2f`; measured candidate
 `4e8e705ff72b991f4ff9a597aa99331bb5104c26`. The later BLAS-only extern declaration
 fix is not compiled by the measured faer configuration. This is CI compiler/test
-latency, measured in the actual `ci` profile, not a kernel throughput benchmark.
+latency, not a kernel throughput benchmark. The initial experiment selected
+`ci`, but a local `build.incremental=true` override meant it was not the hosted
+profile's effective configuration.
 EPYC 7713P, rustc 1.97.1, four-CPU affinity (0–3), Cargo jobs 16, four doctest
 workers, default CPU backend and OpenBLAS/OpenMP explicitly 1T. A compiled probe
 confirmed `CpuBackend::num_threads() == 1`; examples deliberately demonstrating
@@ -79,12 +81,15 @@ Dependencies are warm; one warmup precedes three retained samples per variant.
 | Edition 2024 | 12.54 s | 12.59 s | 12.30 s | 12.54 s |
 
 All **1125 doctests** passed in every sample, including standalone compile-fail
-examples: **93.4% less time (15.2×)** for these four crates. The predeclared >=20%
-median improvement gate passed. Max/min was <1.03 on both sides (limit 1.30),
-and sampled load1 remained below the 64-CPU noise threshold. This is not a
-measurement of the full hosted workspace or whole-PR speedup. The same selected
-BLAS doctests also pass. Full protocol, run scripts, raw logs and per-sample load/
-CPU-pressure observations are retained under `/tmp/tenferro-ci-bench/`.
+examples. These preliminary times are **INCONCLUSIVE for promotion** because of
+the incremental configuration mismatch. The scalar experiment was also stopped;
+all preliminary evidence remains in `/tmp/tenferro-ci-bench/exploratory-incremental/`.
+The entire paired experiment is repeated with explicit `CARGO_INCREMENTAL=0`
+and verbose compiler-command verification. The original acceptance threshold
+(>=20% median improvement), three samples, max/min <=1.30 and load1 <64 noise
+limits remain unchanged. The same selected BLAS doctests pass. Full protocol,
+run scripts and raw results are retained under `/tmp/tenferro-ci-bench/`.
+No whole-workspace or whole-PR speedup is inferred from selected doctests.
 
 ## Verification and limitations
 

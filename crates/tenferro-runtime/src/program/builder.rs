@@ -492,10 +492,10 @@ impl SemanticProgramBuilder {
         };
         let mut metadata = metadata;
         for value in &mut metadata {
-            if matches!(value.dtype(), tenferro_tensor::DType::External(_)) {
-                if let Some(identity) = identity {
-                    *value = value.clone().with_scalar_identity(identity);
-                }
+            if matches!(value.dtype(), tenferro_tensor::DType::External(_))
+                && let Some(identity) = identity
+            {
+                *value = value.clone().with_scalar_identity(identity);
             }
             require_scalar_identity(value, "an operation output")?;
         }
@@ -769,15 +769,15 @@ impl ImportTransaction {
                 continue;
             }
             needed_values[slot] = true;
-            if let Some(operation_index) = producer[slot] {
-                if !needed_operations[operation_index] {
-                    needed_operations[operation_index] = true;
-                    let operation = &source.operations[operation_index];
-                    for output in &operation.outputs {
-                        needed_values[output.slot as usize] = true;
-                    }
-                    pending.extend(operation.inputs.iter().map(|input| input.slot as usize));
+            if let Some(operation_index) = producer[slot]
+                && !needed_operations[operation_index]
+            {
+                needed_operations[operation_index] = true;
+                let operation = &source.operations[operation_index];
+                for output in &operation.outputs {
+                    needed_values[output.slot as usize] = true;
                 }
+                pending.extend(operation.inputs.iter().map(|input| input.slot as usize));
             }
         }
 
@@ -1273,10 +1273,10 @@ fn resolve_dim_expr_from_input_shapes(
     match expr {
         DimExpr::Const(_) => expr.clone(),
         DimExpr::InputDim { input_idx, axis } => {
-            if let Some(Some(shape)) = bound_input_shapes.get(*input_idx) {
-                if let Some(dim) = shape.get(*axis) {
-                    return dim.clone();
-                }
+            if let Some(Some(shape)) = bound_input_shapes.get(*input_idx)
+                && let Some(dim) = shape.get(*axis)
+            {
+                return dim.clone();
             }
             expr.clone()
         }
