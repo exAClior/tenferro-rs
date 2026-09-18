@@ -197,3 +197,11 @@ container.
   delayed completion, partial submit, and event-record failure is still not
   covered; the region executes inside one enqueue, so the existing
   `SubmissionCleanupGuard` synchronizes the stream on those failures.
+
+- Added `enqueue_failure_after_launch_is_not_retried_and_registers_no_completion`,
+  a runtime event-domain fault-injection test. Its driver runs the launch once,
+  then returns an injected completion-record error; the test verifies that the
+  error propagates, no completion token is registered for dependents, and a
+  later enqueue does not retry the failed run. This covers the runtime-side
+  partial-submit/event-record-failure ordering; CUDA stream cleanup remains
+  owned by the backend `SubmissionCleanupGuard`.
