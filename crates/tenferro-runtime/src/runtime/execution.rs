@@ -97,12 +97,20 @@ impl PreparedCompiledGraph {
         use crate::segment::{build_elementwise_fusion_plan, segment_exec_program, Segment};
 
         let root = self.prepared.root();
-        let prepared = root
+        let operations = root
             .schedule()
             .nodes()
             .iter()
             .filter(|node| matches!(node, super::schedule::ScheduledNode::Operation(_)))
             .count();
+        // A planned region executes as one command and its covered nodes are
+        // skipped, so the prepared path's command count is the operations that
+        // are not covered plus one per region.
+        let regions = root.regions();
+        let covered: usize = regions.iter().map(|region| region.node_indices.len()).sum();
+        let prepared = operations
+            .saturating_sub(covered)
+            .saturating_add(regions.len());
         let unprepared = segment_exec_program(root.staging())
             .into_iter()
             .map(|segment| match segment {

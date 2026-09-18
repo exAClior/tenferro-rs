@@ -126,3 +126,12 @@ container.
 - `run_compiled` and `run_prepared` share one prepared program through the
   prepared-entry cache, which the tests isolate by using a second runtime for the
   reference run.
+
+- Stage 1 bench (CPU, `benches/elementwise_fusion.rs`, one idle-machine run, medians):
+  prepared vs unprepared `add_mul` 4096 = 85.3 vs 107.1 us, 65536 = 81.0 vs
+  107.1 us, 1048576 = 936.6 vs 975.7 us; `broadcast_mul` 256x256 = 958.0 vs
+  1080.8 us. The prepared path is now at or ahead of the unprepared path on
+  every measured case, where before the region work it was behind on the
+  elementwise chains. These are single idle-machine runs, not the three-repetition
+  controlled A/B a performance claim needs, and an earlier run under build
+  contention was several times slower overall.

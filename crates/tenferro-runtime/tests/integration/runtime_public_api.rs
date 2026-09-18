@@ -525,14 +525,14 @@ fn runtime_prepared_matches_compiled_for_elementwise_chain() {
     }
 }
 
-/// Execution-path parity matrix (Stage 0, characterization).
+/// Execution-path parity matrix.
 ///
-/// The prepared executor dispatches one command per scheduled operation; the
-/// segmented executor fuses a pure elementwise chain into one command. Stage 1
-/// must turn the first case into `1 == 1`. The second case shows the fusion
-/// eligibility boundary: a run containing a reduction is rejected by
-/// `build_elementwise_fusion_plan` in both paths, so both submit one command per
-/// instruction and already agree.
+/// The planned prepared regions and the segmented executor must agree on how
+/// many commands a program submits. The first case is the pure elementwise chain
+/// that used to diverge (`(4, 1)` before the region work); the second shows the
+/// fusion eligibility boundary, where a run containing a reduction is rejected
+/// by `build_elementwise_fusion_plan` in both paths and both dispatch per
+/// instruction.
 #[test]
 fn execution_path_command_counts_matrix() {
     let runtime = cpu_runtime();
@@ -555,8 +555,8 @@ fn execution_path_command_counts_matrix() {
     let prepared = runtime.prepare_compiled(&program, &[&input]).unwrap();
     assert_eq!(
         prepared.execution_command_counts(),
-        (4, 1),
-        "pure elementwise chain: prepared dispatches per instruction, segmented fuses (Stage 1 target: (1, 1))"
+        (1, 1),
+        "pure elementwise chain: the prepared region and the segmented fusion both submit one command"
     );
 
     let x2 = TracedTensor::input_concrete_shape(DType::F64, &[n]).unwrap();
