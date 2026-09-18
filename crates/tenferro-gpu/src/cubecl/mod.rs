@@ -147,6 +147,9 @@ pub(crate) mod raw;
 mod runtime;
 mod runtime_adapter;
 pub(crate) mod session_cubecl;
+mod workspace_retirement;
+
+pub use workspace_retirement::WorkspaceRetirementStats;
 
 use dispatch::{
     alloc_bool_output, alloc_output, bool_tensor_array_arg, comptime_sequence, cube_count_for_len,
@@ -925,6 +928,20 @@ impl CudaBackend {
     /// Returns [`crate::Error::RuntimeState`] if the cache mutex is poisoned.
     pub fn cutensor_plan_cache_stats(&self) -> crate::Result<CacheStats> {
         gemm::cutensor_plan_cache_stats(self)
+    }
+
+    /// Return deferred cuTENSOR workspace retirement counters.
+    ///
+    /// Retirements are deferred until the workspace's stream reaches the event
+    /// recorded at retirement time. `in_flight` is the number of workspaces
+    /// whose handle has not returned to the CubeCL pool yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::RuntimeState`] if the retirement queue lock is
+    /// poisoned.
+    pub fn cutensor_workspace_retirement_stats(&self) -> crate::Result<WorkspaceRetirementStats> {
+        gemm::cutensor_workspace_retirement_stats(self)
     }
 
     /// Return the cuTENSOR contraction plan entry bound.
