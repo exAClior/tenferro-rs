@@ -775,3 +775,157 @@ fn prepared_elementwise_region_falls_back_when_fusion_is_declined() {
         );
     }
 }
+
+/// Stage 1: a region with several live-outs publishes every one of them.
+///
+/// Both `y` and `z` are program outputs of one elementwise region.
+#[test]
+fn prepared_elementwise_region_publishes_multiple_live_outs() {
+    let runtime = cpu_runtime();
+    let n = 16 * 1024usize;
+
+    let data: Vec<f64> = (0..n).map(|i| 0.25 + (i % 13) as f64 * 0.125).collect();
+    let x = TracedTensor::from_tensor_concrete_shape(
+        Tensor::from_vec_col_major(vec![n], data).unwrap(),
+    )
+    .unwrap();
+    let shared = (&x + &x).unwrap();
+    let y = shared.exp().unwrap().tanh().unwrap();
+    let z = (&shared * &shared).unwrap();
+    let program = GraphCompiler::new()
+        .compile_many(&[&y, &z])
+        .expect("two-output constant graph should compile");
+
+    let prepared = runtime.prepare_compiled(&program, &[]).unwrap();
+    let (regions, covered) = prepared.elementwise_region_summary();
+    assert_eq!((regions, covered), (1, 4), "one region covers the chain");
+
+    let mut prepared_out = runtime.run_prepared(&prepared, &[]).unwrap();
+    let (fused, fallbacks) = prepared.elementwise_region_execution_counts();
+    assert_eq!((fused, fallbacks), (1, 0), "the region should fuse once");
+
+    let reference_runtime = cpu_runtime();
+    let mut compiled = reference_runtime.run_compiled(&program, &[]).unwrap();
+    assert_eq!(prepared_out.len(), 2);
+    assert_eq!(compiled.len(), 2);
+    while let Some(expected) = compiled.pop() {
+        let actual = prepared_out.pop().unwrap();
+        assert_eq!(actual.shape(), expected.shape());
+        let actual = actual.as_slice::<f64>().unwrap();
+        let expected = expected.as_slice::<f64>().unwrap();
+        for (left, right) in actual.iter().zip(expected) {
+            assert!(
+                (left - right).abs() <= 1e-12,
+                "live-out diverged: {left} != {right}"
+            );
+        }
+    }
+}
+
+/// Stage 1: the value output mode keeps its per-instruction path and results.
+#[test]
+fn runtime_compiled_values_matches_prepared_for_elementwise_chain() {
+    let runtime = cpu_runtime();
+    let n = 1024usize;
+
+    let x = TracedTensor::input_concrete_shape(DType::F64, &[n]).unwrap();
+    let doubled = (&x + &x).unwrap();
+    let chain = doubled
+        .mul(&doubled)
+        .unwrap()
+        .exp()
+        .unwrap()
+        .tanh()
+        .unwrap();
+    let mut compiler = GraphCompiler::new();
+    let program = compiler
+        .compile_with_input_specs(&chain, &[(&x, DType::F64, &[n])])
+        .unwrap();
+    let data: Vec<f64> = (0..n).map(|i| 0.5 + (i % 7) as f64 * 0.25).collect();
+    let input = Tensor::from_vec_col_major(vec![n], data).unwrap();
+
+    let prepared = runtime.prepare_compiled(&program, &[&input]).unwrap();
+    let mut prepared_out = runtime.run_prepared(&prepared, &[&input]).unwrap();
+    let mut value_out = runtime.run_compiled_values(&program, &[&input]).unwrap();
+    assert_eq!(value_out.len(), 1);
+    let value = value_out.pop().unwrap();
+    let value = value.as_tensor().expect("value output should own a tensor");
+    let prepared_out = prepared_out.pop().unwrap();
+    assert_eq!(value.shape(), prepared_out.shape());
+    let value = value.as_slice::<f64>().unwrap();
+    let prepared_out = prepared_out.as_slice::<f64>().unwrap();
+    for (left, right) in value.iter().zip(prepared_out) {
+        assert!(
+            (left - right).abs() <= 1e-12,
+            "value mode diverged: {left} != {right}"
+        );
+    }
+}
+
+/// Stage 1: an elementwise region next to an FFI operation.
+///
+/// The region covers only the elementwise chain; the matrix multiply stays its
+/// own command, and both outputs match the unprepared path.
+#[test]
+fn prepared_elementwise_region_stays_separate_from_ffi_op() {
+    let runtime = cpu_runtime();
+    // The CPU fused kernel only engages above its element floor, so the chain
+    // runs over a vector large enough to fuse while the multiply stays small.
+    let n = 8usize;
+    let chain_len = 16 * 1024usize;
+
+    let matrix = |seed: f64| {
+        Tensor::from_vec_col_major(
+            vec![n, n],
+            (0..n * n).map(|i| seed + (i % 7) as f64 * 0.125).collect(),
+        )
+        .unwrap()
+    };
+    let a = TracedTensor::from_tensor_concrete_shape(matrix(0.5)).unwrap();
+    let b = TracedTensor::from_tensor_concrete_shape(matrix(0.25)).unwrap();
+    let x = TracedTensor::from_tensor_concrete_shape(
+        Tensor::from_vec_col_major(
+            vec![chain_len],
+            (0..chain_len)
+                .map(|i| 0.5 + (i % 5) as f64 * 0.25)
+                .collect(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let m = a.matmul(&b).unwrap();
+    let chain = (&x * &x).unwrap().exp().unwrap().tanh().unwrap();
+    let program = GraphCompiler::new()
+        .compile_many(&[&m, &chain])
+        .expect("mixed graph should compile");
+
+    let prepared = runtime.prepare_compiled(&program, &[]).unwrap();
+    let (regions, covered) = prepared.elementwise_region_summary();
+    assert_eq!(
+        (regions, covered),
+        (1, 3),
+        "only the elementwise chain should form a region"
+    );
+
+    let mut prepared_out = runtime.run_prepared(&prepared, &[]).unwrap();
+    let (fused, fallbacks) = prepared.elementwise_region_execution_counts();
+    assert_eq!((fused, fallbacks), (1, 0), "the chain region should fuse");
+
+    let reference_runtime = cpu_runtime();
+    let mut compiled = reference_runtime.run_compiled(&program, &[]).unwrap();
+    assert_eq!(prepared_out.len(), 2);
+    assert_eq!(compiled.len(), 2);
+    while let Some(expected) = compiled.pop() {
+        let actual = prepared_out.pop().unwrap();
+        assert_eq!(actual.shape(), expected.shape());
+        let actual = actual.as_slice::<f64>().unwrap();
+        let expected = expected.as_slice::<f64>().unwrap();
+        for (left, right) in actual.iter().zip(expected) {
+            assert!(
+                (left - right).abs() <= 1e-12,
+                "mixed-graph output diverged: {left} != {right}"
+            );
+        }
+    }
+}

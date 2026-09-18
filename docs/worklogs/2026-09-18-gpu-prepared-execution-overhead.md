@@ -144,3 +144,16 @@ container.
   tensornetwork program is 549 FFI einsum ops and the linalg AD programs have
   mixed runs), so regions are not planned there. The elementwise-chain benefit
   needs the `gpu/elementwise` case that is still to add.
+
+- Stage 1 correctness coverage added: `prepared_elementwise_region_publishes_multiple_live_outs`
+  (one region, two program outputs), `prepared_elementwise_region_stays_separate_from_ffi_op`
+  (region covers only the chain next to a matrix multiply), and
+  `runtime_compiled_values_matches_prepared_for_elementwise_chain` (value output
+  mode keeps its per-instruction path and matches). Note that segments are runs
+  of non-host/non-FFI instructions, so a chain followed by a reduction is not
+  fusable at all in either path; only an FFI or host boundary ends a region.
+- `gpu/elementwise` (new suite, `benchmarks/gpu/elementwise.yaml`) is the GPU
+  detection device: chain `tanh(t * a + b)` x 8 at n=1024 and n=1048576. At
+  292cdffe the trace rows read 1.047 ms and 1.011 ms against PyTorch's 0.154 ms
+  and 0.324 ms; with the region work they read 0.143 ms and 0.190 ms, while the
+  eager path (no fusion) stays at 1.586 ms and 1.638 ms.
