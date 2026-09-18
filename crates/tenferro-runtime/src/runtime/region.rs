@@ -189,6 +189,52 @@ impl RegionExecutionCounters {
     }
 }
 
+/// Plan-derived command counts for the two execution paths.
+///
+/// The first value is the number of commands the prepared path submits:
+/// scheduled operations that no region covers, plus one command per region. The
+/// second is the number of commands the segmented executor submits for the same
+/// program, counted as one command for a host/FFI segment and for a segment
+/// whose elementwise fusion plan is accepted, and one command per instruction
+/// for a segment that fusion rejects. The broadcast-multiply triplet/pair fast
+/// paths are not modeled.
+pub(crate) fn command_counts(
+    staging: &ExecProgram,
+    schedule: &ScheduledGraph,
+    regions: &[ElementwiseRegion],
+) -> (usize, usize) {
+    let operations = schedule
+        .nodes()
+        .iter()
+        .filter(|node| matches!(node, ScheduledNode::Operation(_)))
+        .count();
+    let covered: usize = regions.iter().map(|region| region.node_indices.len()).sum();
+    let prepared = operations
+        .saturating_sub(covered)
+        .saturating_add(regions.len());
+    let unprepared = segment_exec_program(staging)
+        .into_iter()
+        .map(|segment| match segment {
+            Segment::Fused {
+                instructions,
+                input_slots,
+                output_slots,
+                ..
+            } => {
+                if build_elementwise_fusion_plan(&instructions, &input_slots, &output_slots)
+                    .is_some()
+                {
+                    1
+                } else {
+                    instructions.len()
+                }
+            }
+            _ => 1,
+        })
+        .sum();
+    (prepared, unprepared)
+}
+
 /// Number of regions and the instructions they cover, for parity tests.
 pub(crate) fn region_summary(regions: &[ElementwiseRegion]) -> (usize, usize) {
     (

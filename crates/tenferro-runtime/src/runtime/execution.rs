@@ -80,58 +80,15 @@ impl PreparedCompiledGraph {
     /// Plan-derived command counts for the two execution paths, for
     /// execution-path parity tests.
     ///
-    /// The first value is the number of scheduled operations the prepared
-    /// executor dispatches: one command per operation. The second is the number
-    /// of commands the segmented executor submits for the same program, counted
-    /// as one command for a host/FFI segment and for a segment whose
-    /// elementwise fusion plan is accepted, and one command per instruction for
-    /// a segment that fusion rejects.
-    ///
-    /// This is a plan census, not a runtime submission count. The
-    /// broadcast-multiply triplet/pair fast paths of the segmented executor are
-    /// not modeled, so a segment that only those paths fuse is counted as a
-    /// fallback here.
+    /// The first value is the number of commands the prepared path submits
+    /// (operations no region covers plus one per region); the second is the
+    /// segmented executor's count for the same program. This is a plan census,
+    /// not a runtime submission count.
     #[doc(hidden)]
     #[must_use]
     pub fn execution_command_counts(&self) -> (usize, usize) {
-        use crate::segment::{build_elementwise_fusion_plan, segment_exec_program, Segment};
-
         let root = self.prepared.root();
-        let operations = root
-            .schedule()
-            .nodes()
-            .iter()
-            .filter(|node| matches!(node, super::schedule::ScheduledNode::Operation(_)))
-            .count();
-        // A planned region executes as one command and its covered nodes are
-        // skipped, so the prepared path's command count is the operations that
-        // are not covered plus one per region.
-        let regions = root.regions();
-        let covered: usize = regions.iter().map(|region| region.node_indices.len()).sum();
-        let prepared = operations
-            .saturating_sub(covered)
-            .saturating_add(regions.len());
-        let unprepared = segment_exec_program(root.staging())
-            .into_iter()
-            .map(|segment| match segment {
-                Segment::Fused {
-                    instructions,
-                    input_slots,
-                    output_slots,
-                    ..
-                } => {
-                    if build_elementwise_fusion_plan(&instructions, &input_slots, &output_slots)
-                        .is_some()
-                    {
-                        1
-                    } else {
-                        instructions.len()
-                    }
-                }
-                _ => 1,
-            })
-            .sum();
-        (prepared, unprepared)
+        super::region::command_counts(root.staging(), root.schedule(), root.regions())
     }
 }
 

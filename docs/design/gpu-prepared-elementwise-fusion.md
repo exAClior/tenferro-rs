@@ -101,6 +101,14 @@ per-instruction path instead of failing or copying silently. For a pure
 elementwise chain over graph inputs that is the common case today, which is why
 the benchmark benefit needs the follow-up below.
 
+Re-divergence is guarded from two sides. The plan census
+(`execution_command_counts`, computed in `region.rs` from the shared
+segmentation and eligibility) is asserted against the segmented executor's count
+in the parity matrix, and `tests/integration/execution_path_contract.rs` scans
+the runtime sources so that segmentation, eligibility, and region construction
+each have exactly one definition site and the executor cannot decide eligibility
+itself.
+
 Runtime evidence: `PreparedCompiledGraph::elementwise_region_execution_counts`
 records fused and fallback executions.
 `prepared_elementwise_region_executes_as_one_fused_command` asserts one fused
