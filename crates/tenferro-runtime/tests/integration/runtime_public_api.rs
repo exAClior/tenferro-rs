@@ -486,3 +486,41 @@ fn runtime_ordered_input_errors_are_covered() {
     let shape = runtime.run_compiled(&program, &[&shape_input]).unwrap_err();
     assert!(matches!(shape, Error::PlaceholderShapeMismatch { .. }));
 }
+
+/// Execution-path parity (Stage 0): the prepared and unprepared paths must agree
+/// numerically on an elementwise chain, even though they submit a different
+/// number of commands today.
+#[test]
+fn runtime_prepared_matches_compiled_for_elementwise_chain() {
+    let runtime = cpu_runtime();
+    let x = TracedTensor::input_concrete_shape(DType::F64, &[4]).unwrap();
+    let doubled = (&x + &x).unwrap();
+    let y = doubled
+        .mul(&doubled)
+        .unwrap()
+        .exp()
+        .unwrap()
+        .tanh()
+        .unwrap();
+    let mut compiler = GraphCompiler::new();
+    let program = compiler
+        .compile_with_input_specs(&y, &[(&x, DType::F64, &[4])])
+        .unwrap();
+    let input = Tensor::from_vec_col_major(vec![4], vec![0.5_f64, 1.0, 1.5, 2.0]).unwrap();
+
+    let mut compiled = runtime.run_compiled(&program, &[&input]).unwrap();
+    let prepared = runtime.prepare_compiled(&program, &[&input]).unwrap();
+    let mut prepared_out = runtime.run_prepared(&prepared, &[&input]).unwrap();
+
+    let compiled = compiled.pop().unwrap();
+    let prepared_out = prepared_out.pop().unwrap();
+    assert_eq!(compiled.shape(), prepared_out.shape());
+    let compiled = compiled.as_slice::<f64>().unwrap();
+    let prepared_out = prepared_out.as_slice::<f64>().unwrap();
+    for (left, right) in compiled.iter().zip(prepared_out) {
+        assert!(
+            (left - right).abs() <= 1e-12,
+            "prepared and unprepared paths diverged: {left} != {right}"
+        );
+    }
+}
