@@ -130,14 +130,30 @@ benchmark alone cannot show which path submitted what.
 
 ## Open questions to settle before implementation
 
-1. Does the fusion API's `None` path, together with input collection, guarantee
-   a state that can be re-executed?
-2. On a partial submit or an event-record failure, who owns the inputs and
-   intermediate allocations until completion?
-3. Does one region completion cover every submission of the fallback path?
-4. Do the existing builder and backend really satisfy the multiple-live-out and
-   terminal-Value output contracts?
-5. Do the signature and epoch checks cover a plan's specialization conditions?
+1. **Answered (code reading).** `collect_segment_inputs` borrows
+   (`Vec<&Tensor>`) and inputs are reclaimed only after a successful fusion
+   (`reclaim_segment_inputs_exec` on `last_use` slots), so a fusion that returns
+   `None` leaves the inputs and slots untouched and the fallback can run. The
+   remaining assumption is that a backend's `execute_elementwise_fusion` returns
+   `None` without partially writing outputs; the CUDA and CPU implementations
+   must be checked for that, and the prepared region executor must not reuse the
+   segmented `last_use` reclamation, which the design already forbids.
+2. Open. On a partial submit or an event-record failure, who owns the inputs and
+   intermediate allocations until completion? Read the CUDA
+   `SubmissionCleanupGuard` and the segmented executor's error paths.
+3. **Answered (code reading).** The unprepared path has no event domains at all
+   (`segment.rs` has no reference to them), so "one region completion covers
+   every submission" is a prepared-path property: the prepared executor records
+   the completion event inside the enqueue closure, so it must record it after
+   the region's last command in both the fused and the fallback case. This is a
+   constraint on the Stage 1 implementation, not an existing behavior.
+4. Open. Do the existing builder and backend really satisfy the multiple-live-out
+   and terminal-Value output contracts? Read
+   `build_elementwise_fusion_plan`'s output handling and the CUDA/CPU
+   `execute_elementwise_fusion` implementations.
+5. Open. Do the signature and epoch checks cover a plan's specialization
+   conditions? Read `prepare_compiled_for`'s `PreparedEntryKey` specialization
+   and the run-time `validate_prepared_runtime`/signature checks.
 
 ## Non-goals
 
