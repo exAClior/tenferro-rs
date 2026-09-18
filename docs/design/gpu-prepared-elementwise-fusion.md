@@ -82,6 +82,43 @@ and the outer schedule topology and boundary contract do not change at run time.
   `PreparedOperationPlan` by original instruction id, never by schedule index.
   Do not store run-specific handles or completion tokens in cached plans.
 
+## Stage 1 status
+
+Implemented for tensor output mode: a planned region's start node executes the
+whole region as one fused command through the new
+`ErasedTensorBackendExecutor::execute_elementwise_fusion_slots`, and every
+covered node's completion resolves to the region's completion token, which the
+event domain records after the region's last command. When the backend declines
+the fusion the region dispatches its instructions one by one inside the same
+enqueue, so one region completion still covers every submission. Every live-out
+is validated for presence and residency before it is published, and region
+inputs whose last use is inside the region are released at the region boundary.
+
+Regions apply only in tensor output mode; value mode keeps the per-instruction
+path, which preserves its contract. The fused entry point takes owned tensors,
+so a region with a borrowed view input declines the fusion and keeps the
+per-instruction path instead of failing or copying silently. For a pure
+elementwise chain over graph inputs that is the common case today, which is why
+the benchmark benefit needs the follow-up below.
+
+Runtime evidence: `PreparedCompiledGraph::elementwise_region_execution_counts`
+records fused and fallback executions.
+`prepared_elementwise_region_executes_as_one_fused_command` asserts one fused
+execution and matching results against the unprepared path for a chain above the
+CPU fused kernel's element-size floor, and
+`prepared_elementwise_region_falls_back_when_fusion_is_declined` asserts a
+single fallback and matching results below that floor.
+
+Two findings from this slice:
+
+- `run_compiled` and `run_prepared` share one prepared program through the
+  runtime's prepared-entry cache, so their execution counters and any prepared
+  state are already shared. Tests must isolate the counted runtime to observe one
+  path's execution.
+- Materializing a borrowed view input for a region (one copy amortized over the
+  region's commands) is the follow-up that would let chains over graph inputs
+  fuse; it needs the amortization condition written down before it is added.
+
 ## Stage 2 (non-goal for now)
 
 Making `run_compiled*` a wrapper over prepare+run and deleting the duplicated

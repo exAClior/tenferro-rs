@@ -570,7 +570,9 @@ fn execution_path_command_counts_matrix() {
     let program2 = compiler2
         .compile_with_input_specs(&with_reduce, &[(&x2, DType::F64, &[n])])
         .unwrap();
-    let input2 = Tensor::from_vec_col_major(vec![n], vec![1.0_f64, 2.0, 3.0, 4.0]).unwrap();
+    let data2: Vec<f64> = (0..n).map(|i| 0.5 + (i % 11) as f64 * 0.25).collect();
+    let input2 = Tensor::from_vec_col_major(vec![n], data2).unwrap();
+    let _ = &input2;
     let prepared2 = runtime.prepare_compiled(&program2, &[&input2]).unwrap();
     assert_eq!(
         prepared2.execution_command_counts(),
@@ -657,4 +659,119 @@ fn prepared_elementwise_regions_are_planned_at_prepare_time() {
         (0, 0),
         "a run containing a reduction is not an elementwise region"
     );
+}
+
+/// Stage 1 evidence: the planned region executes as one fused command (the
+/// runtime counter records it), the results match the unprepared path, and a
+/// run containing a reduction plans and executes no region.
+#[test]
+fn prepared_elementwise_region_executes_as_one_fused_command() {
+    let runtime = cpu_runtime();
+    // The CPU fused kernel only engages above its element-count floor, so use a
+    // size that can actually fuse; the small-size fallback is covered by
+    // prepared_elementwise_region_falls_back_when_fusion_is_declined.
+    let n = 16 * 1024usize;
+
+    let x = TracedTensor::input_concrete_shape(DType::F64, &[n]).unwrap();
+    let doubled = (&x + &x).unwrap();
+    let chain = doubled
+        .mul(&doubled)
+        .unwrap()
+        .exp()
+        .unwrap()
+        .tanh()
+        .unwrap();
+    let mut compiler = GraphCompiler::new();
+    let program = compiler
+        .compile_with_input_specs(&chain, &[(&x, DType::F64, &[n])])
+        .unwrap();
+    let data: Vec<f64> = (0..n).map(|i| 0.25 + (i % 17) as f64 * 0.125).collect();
+    let input = Tensor::from_vec_col_major(vec![n], data).unwrap();
+    let prepared = runtime.prepare_compiled(&program, &[&input]).unwrap();
+
+    // `run_compiled` shares the runtime's prepared-entry cache, so the reference
+    // run uses a second runtime to keep this runtime's counters meaningful.
+    let reference_runtime = cpu_runtime();
+    let mut compiled = reference_runtime.run_compiled(&program, &[&input]).unwrap();
+    let mut fused = runtime.run_prepared(&prepared, &[&input]).unwrap();
+    assert_eq!(
+        prepared.elementwise_region_execution_counts(),
+        (1, 0),
+        "the chain region should execute fused, with no fallback"
+    );
+
+    let compiled = compiled.pop().unwrap();
+    let fused = fused.pop().unwrap();
+    let compiled = compiled.as_slice::<f64>().unwrap();
+    let fused = fused.as_slice::<f64>().unwrap();
+    for (left, right) in compiled.iter().zip(fused) {
+        assert!(
+            (left - right).abs() <= 1e-12,
+            "fused region diverged from the unprepared path: {left} != {right}"
+        );
+    }
+
+    let x2 = TracedTensor::input_concrete_shape(DType::F64, &[n]).unwrap();
+    let with_reduce = (&x2 + &x2)
+        .unwrap()
+        .exp()
+        .unwrap()
+        .reduce_sum(None)
+        .unwrap();
+    let mut compiler2 = GraphCompiler::new();
+    let program2 = compiler2
+        .compile_with_input_specs(&with_reduce, &[(&x2, DType::F64, &[n])])
+        .unwrap();
+    let data2: Vec<f64> = (0..n).map(|i| 0.5 + (i % 11) as f64 * 0.25).collect();
+    let input2 = Tensor::from_vec_col_major(vec![n], data2).unwrap();
+    let prepared2 = runtime.prepare_compiled(&program2, &[&input2]).unwrap();
+    let _ = runtime.run_prepared(&prepared2, &[&input2]).unwrap();
+    assert_eq!(
+        prepared2.elementwise_region_execution_counts(),
+        (0, 0),
+        "a run containing a reduction plans no region"
+    );
+}
+
+/// Stage 1 evidence: when the backend declines the fusion the region falls back
+/// to its instructions and still matches the unprepared path. A tiny element
+/// count is below the CPU fused kernel's floor, so this exercises the fallback.
+#[test]
+fn prepared_elementwise_region_falls_back_when_fusion_is_declined() {
+    let runtime = cpu_runtime();
+    let n = 4usize;
+
+    let x = TracedTensor::input_concrete_shape(DType::F64, &[n]).unwrap();
+    let doubled = (&x + &x).unwrap();
+    let chain = doubled
+        .mul(&doubled)
+        .unwrap()
+        .exp()
+        .unwrap()
+        .tanh()
+        .unwrap();
+    let mut compiler = GraphCompiler::new();
+    let program = compiler
+        .compile_with_input_specs(&chain, &[(&x, DType::F64, &[n])])
+        .unwrap();
+    let input = Tensor::from_vec_col_major(vec![n], vec![0.5_f64, 1.0, 1.5, 2.0]).unwrap();
+    let prepared = runtime.prepare_compiled(&program, &[&input]).unwrap();
+
+    let reference_runtime = cpu_runtime();
+    let mut compiled = reference_runtime.run_compiled(&program, &[&input]).unwrap();
+    let mut prepared_out = runtime.run_prepared(&prepared, &[&input]).unwrap();
+    let (fused, fallbacks) = prepared.elementwise_region_execution_counts();
+    assert_eq!(fused, 0, "the CPU backend declines fusion below its floor");
+    assert_eq!(fallbacks, 1, "the region should fall back exactly once");
+
+    let compiled = compiled.pop().unwrap();
+    let prepared_out = prepared_out.pop().unwrap();
+    let compiled = compiled.as_slice::<f64>().unwrap();
+    let prepared_out = prepared_out.as_slice::<f64>().unwrap();
+    for (left, right) in compiled.iter().zip(prepared_out) {
+        assert!(
+            (left - right).abs() <= 1e-12,
+            "fallback diverged from the unprepared path: {left} != {right}"
+        );
+    }
 }

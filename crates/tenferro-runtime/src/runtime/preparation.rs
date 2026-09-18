@@ -329,6 +329,8 @@ pub(crate) struct PreparedProgramRoot {
     schedule: Arc<ScheduledGraph>,
     /// Elementwise regions planned at prepare time; see `runtime::region`.
     regions: Arc<[super::region::ElementwiseRegion]>,
+    /// Runtime evidence for region execution; see `runtime::region`.
+    region_counters: super::region::RegionExecutionCounters,
     extension_planning: Arc<[Arc<dyn ExtensionPlanningConfig>]>,
     logical_retained_bytes: Option<usize>,
 }
@@ -367,6 +369,7 @@ impl PreparedProgramRoot {
             staging,
             schedule,
             regions,
+            region_counters: super::region::RegionExecutionCounters::default(),
             extension_planning,
             logical_retained_bytes,
         })
@@ -385,6 +388,10 @@ impl PreparedProgramRoot {
 
     pub(crate) fn regions(&self) -> &[super::region::ElementwiseRegion] {
         &self.regions
+    }
+
+    pub(crate) fn region_counters(&self) -> &super::region::RegionExecutionCounters {
+        &self.region_counters
     }
 
     pub(crate) fn schedule(&self) -> &ScheduledGraph {

@@ -68,6 +68,15 @@ impl PreparedCompiledGraph {
         super::region::region_summary(self.prepared.root().regions())
     }
 
+    /// Number of planned elementwise regions executed as one fused command, and
+    /// the number that fell back to per-instruction dispatch.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn elementwise_region_execution_counts(&self) -> (usize, usize) {
+        let counters = self.prepared.root().region_counters();
+        (counters.fused(), counters.fallbacks())
+    }
+
     /// Plan-derived command counts for the two execution paths, for
     /// execution-path parity tests.
     ///
@@ -901,6 +910,19 @@ pub(super) trait ErasedTensorBackendExecutor: fmt::Debug + Send + Sync {
         output_mode: RuntimeOutputMode,
         terminal_slots: &[bool],
     ) -> Result<()>;
+    /// Execute one planned elementwise region as a single fused command.
+    ///
+    /// Reads `input_slots` from `slots`, runs `plan`, and writes the fused
+    /// outputs into `output_slots`. Returns `Ok(false)` when the backend
+    /// rejects the fusion, in which case the caller executes the region's
+    /// instructions one by one; nothing is written in that case.
+    fn execute_elementwise_fusion_slots<'input>(
+        &self,
+        input_slots: &[usize],
+        plan: &tenferro_tensor::backend::ElementwiseFusionPlan,
+        slots: &mut [Option<ExecSlot<'input>>],
+        output_slots: &[usize],
+    ) -> Result<bool>;
     fn materialize_slot<'input>(&self, slot: ExecSlot<'input>) -> Result<Tensor>;
     fn materialize_slot_value<'input>(&self, slot: ExecSlot<'input>) -> Result<TensorValue>;
 }
@@ -1292,6 +1314,50 @@ where
         Ok(())
     }
 
+    fn execute_elementwise_fusion_slots<'input>(
+        &self,
+        input_slots: &[usize],
+        plan: &tenferro_tensor::backend::ElementwiseFusionPlan,
+        slots: &mut [Option<ExecSlot<'input>>],
+        output_slots: &[usize],
+    ) -> Result<bool> {
+        // The fused entry point takes owned tensors. A borrowed view input keeps
+        // the per-instruction path, which resolves views itself, instead of
+        // failing or silently copying the view here.
+        let mut inputs: Vec<&Tensor> = Vec::with_capacity(input_slots.len());
+        for &slot in input_slots {
+            let value = slots
+                .get(slot)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| crate::Error::from(tenferro_tensor::Error::MissingValue { slot }))?;
+            match value.as_tensor("elementwise_region") {
+                Ok(tensor) => inputs.push(tensor),
+                // A borrowed view keeps the per-instruction path, which resolves
+                // views itself, instead of failing or silently copying here.
+                Err(_) => return Ok(false),
+            }
+        }
+
+        let mut lease = self.lease_state("Runtime::run_prepared elementwise region")?;
+        let backend = &mut lease.state_mut().backend;
+        let outputs =
+            backend.with_backend_session(|exec| exec.execute_elementwise_fusion(&inputs, plan))?;
+        let Some(outputs) = outputs else {
+            return Ok(false);
+        };
+        if outputs.len() != output_slots.len() {
+            return Err(crate::Error::Internal(format!(
+                "fused elementwise region produced {} outputs for {} slots",
+                outputs.len(),
+                output_slots.len()
+            )));
+        }
+        for (&slot, tensor) in output_slots.iter().zip(outputs) {
+            slots[slot] = Some(ExecSlot::Owned(tensor));
+        }
+        Ok(true)
+    }
+
     fn materialize_slot<'input>(&self, slot: ExecSlot<'input>) -> Result<Tensor> {
         let mut lease = self.lease_state("Runtime::run_compiled collect outputs")?;
         let backend = &mut lease.state_mut().backend;
@@ -1332,6 +1398,8 @@ pub(super) fn run_compiled(
     execute_scheduled_reads(
         prepared.root().staging(),
         prepared.root().schedule(),
+        prepared.root().regions(),
+        prepared.root().region_counters(),
         prepared.operations(),
         &inputs,
     )
@@ -1401,6 +1469,8 @@ fn execute_scoped_admitted<'env>(
     let mut located = execute_scheduled_slots(
         program,
         schedule,
+        &[],
+        &super::region::RegionExecutionCounters::default(),
         operations,
         input_slots,
         RuntimeOutputMode::Tensor,
@@ -1564,6 +1634,8 @@ pub(super) fn run_prepared(
     execute_scheduled_reads(
         prepared.prepared.root().staging(),
         prepared.prepared.root().schedule(),
+        prepared.prepared.root().regions(),
+        prepared.prepared.root().region_counters(),
         prepared.prepared.operations(),
         &inputs,
     )
@@ -1602,6 +1674,8 @@ fn execute_admitted(
     execute_scheduled_reads(
         prepared.prepared.root().staging(),
         prepared.prepared.root().schedule(),
+        prepared.prepared.root().regions(),
+        prepared.prepared.root().region_counters(),
         prepared.prepared.operations(),
         inputs,
     )
@@ -1690,6 +1764,8 @@ fn validate_prepared_epoch(
 fn execute_scheduled_reads(
     program: &ExecProgram,
     schedule: &ScheduledGraph,
+    regions: &[super::region::ElementwiseRegion],
+    region_counters: &super::region::RegionExecutionCounters,
     operations: &[PreparedOperationPlan],
     inputs: &[TensorRead<'_>],
 ) -> Result<Vec<Tensor>> {
@@ -1699,6 +1775,8 @@ fn execute_scheduled_reads(
     execute_scheduled_slots(
         program,
         schedule,
+        regions,
+        region_counters,
         operations,
         inputs,
         RuntimeOutputMode::Tensor,
@@ -1722,6 +1800,8 @@ fn execute_scheduled_value_reads(
     execute_scheduled_slots(
         program,
         schedule,
+        &[],
+        &super::region::RegionExecutionCounters::default(),
         operations,
         inputs,
         RuntimeOutputMode::Value,
@@ -1736,6 +1816,8 @@ fn execute_scheduled_value_reads(
 fn execute_scheduled_slots<'input>(
     program: &ExecProgram,
     schedule: &ScheduledGraph,
+    regions: &[super::region::ElementwiseRegion],
+    region_counters: &super::region::RegionExecutionCounters,
     operations: &[PreparedOperationPlan],
     inputs: Vec<ExecSlot<'input>>,
     output_mode: RuntimeOutputMode,
@@ -1753,6 +1835,21 @@ fn execute_scheduled_slots<'input>(
     // runs are declared after the value stores so unwinding drops
     // and drains native domain work before any tensor storage is released.
     // Driver preflight completes before input ingress or any operation launch.
+    // Planned elementwise regions: the start node executes the whole region as
+    // one fused command and the covered nodes are skipped. Regions apply to
+    // tensor output mode; value mode keeps the per-instruction path.
+    let regions_applicable = matches!(output_mode, RuntimeOutputMode::Tensor);
+    let mut region_starts: HashMap<usize, usize> = HashMap::new();
+    let mut region_covered: HashSet<usize> = HashSet::new();
+    if regions_applicable {
+        for (region_index, region) in regions.iter().enumerate() {
+            if let Some(&first) = region.node_indices.first() {
+                region_starts.insert(first, region_index);
+            }
+            region_covered.extend(region.node_indices.iter().copied());
+        }
+    }
+
     let mut event_domains = ScheduledEventDomains::new(schedule)?;
     let result = (|| {
         crate::exec::initialize_exec_slots_in(program, inputs, &mut staged)?;
@@ -1781,6 +1878,127 @@ fn execute_scheduled_slots<'input>(
         for (node_index, node) in schedule.nodes().iter().enumerate() {
             match node {
                 ScheduledNode::Operation(operation_node) => {
+                    if let Some(&region_index) = region_starts.get(&node_index) {
+                        let region = &regions[region_index];
+                        let first_instruction = program
+                            .instructions
+                            .get(region.instruction_range.start)
+                            .ok_or_else(|| {
+                                Error::runtime_state(
+                                    "Runtime::run_prepared",
+                                    ErrorPhase::Execution,
+                                    format!(
+                                        "elementwise region references instruction {}, but the                                          execution program has {} instructions",
+                                        region.instruction_range.start,
+                                        program.instructions.len()
+                                    ),
+                                )
+                            })?;
+                        let operation = instruction_execution(schedule, first_instruction)?;
+                        if operation.location() != operation_node.location() {
+                            return Err(Error::runtime_state(
+                                "Runtime::run_prepared",
+                                ErrorPhase::Execution,
+                                "elementwise region location does not match its first prepared                                  operation"
+                                    .to_string(),
+                            ));
+                        }
+                        let location = operation.location().clone();
+                        let mut launch = || {
+                            for &slot in &region.input_slots {
+                                stage_slot_input(slot, &location, &mut located, &mut staged)?;
+                            }
+                            let applied = operation.executor().execute_elementwise_fusion_slots(
+                                &region.input_slots,
+                                &region.plan,
+                                &mut staged,
+                                &region.output_slots,
+                            )?;
+                            if applied {
+                                region_counters.record_fused();
+                                validate_region_outputs(region, &location, &staged)?;
+                                return retain_region_results(
+                                    region,
+                                    &location,
+                                    &mut located,
+                                    &mut staged,
+                                );
+                            }
+                            // The backend rejected the fusion: execute the
+                            // region's instructions one by one.
+                            region_counters.record_fallback();
+                            for (offset, instruction) in region.instructions.iter().enumerate() {
+                                let instruction_index = region.instruction_range.start + offset;
+                                let member = instruction_execution(schedule, instruction)?;
+                                if member.location() != operation_node.location() {
+                                    return Err(Error::runtime_state(
+                                        "Runtime::run_prepared",
+                                        ErrorPhase::Execution,
+                                        "elementwise region member location does not match the                                          region location"
+                                            .to_string(),
+                                    ));
+                                }
+                                stage_instruction_inputs(
+                                    instruction,
+                                    member.location(),
+                                    &mut located,
+                                    &mut staged,
+                                )?;
+                                member.executor().execute_slot_instruction(
+                                    instruction_index,
+                                    instruction,
+                                    operations,
+                                    &mut staged,
+                                    output_mode,
+                                    &terminal_slots,
+                                )?;
+                                validate_instruction_outputs(
+                                    instruction_index,
+                                    instruction,
+                                    member.location(),
+                                    &staged,
+                                )?;
+                                retain_instruction_results(
+                                    instruction,
+                                    member.location(),
+                                    &mut located,
+                                    &mut staged,
+                                )?;
+                            }
+                            Ok(())
+                        };
+                        event_domains.enqueue(node_index, node, &mut launch)?;
+                        // Every covered node's completion resolves to the region's
+                        // completion token, which was recorded after the region's
+                        // last command.
+                        let completion = EventDependency::from_completion(node.completion());
+                        if let Some(token) = event_domains.completions.get(&completion).cloned() {
+                            for &covered in &region.node_indices {
+                                if covered == node_index {
+                                    continue;
+                                }
+                                let covered_node = schedule.nodes().get(covered).ok_or_else(|| {
+                                    Error::runtime_state(
+                                        "Runtime::run_prepared",
+                                        ErrorPhase::Execution,
+                                        format!(
+                                            "elementwise region references schedule node {covered},                                              but the schedule has {} nodes",
+                                            schedule.nodes().len()
+                                        ),
+                                    )
+                                })?;
+                                event_domains.completions.insert(
+                                    EventDependency::from_completion(covered_node.completion()),
+                                    Arc::clone(&token),
+                                );
+                            }
+                        }
+                        continue;
+                    }
+                    if region_covered.contains(&node_index) {
+                        // Executed as part of its region.
+                        continue;
+                    }
                     let mut launch = || {
                         let instruction_index = operation_node.instruction_index();
                         let instruction =
@@ -2355,21 +2573,97 @@ fn stage_instruction_inputs<'input>(
     staged: &mut [Option<ExecSlot<'input>>],
 ) -> Result<()> {
     for &slot in &instruction.input_slots {
-        if staged
-            .get(slot)
-            .ok_or(tenferro_tensor::Error::MissingValue { slot })?
-            .is_some()
+        stage_slot_input(slot, location, located, staged)?;
+    }
+    Ok(())
+}
+
+/// Move one slot's value from `located` into `staged`.
+fn stage_slot_input<'input>(
+    slot: usize,
+    location: &ExecutionLocation,
+    located: &mut [Vec<LocatedExecSlot<'input>>],
+    staged: &mut [Option<ExecSlot<'input>>],
+) -> Result<()> {
+    if staged
+        .get(slot)
+        .ok_or(tenferro_tensor::Error::MissingValue { slot })?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let values = located
+        .get_mut(slot)
+        .ok_or(tenferro_tensor::Error::MissingValue { slot })?;
+    let value_index = values
+        .iter()
+        .position(|value| &value.location == location)
+        .ok_or(tenferro_tensor::Error::MissingValue { slot })?;
+    staged[slot] = Some(values.swap_remove(value_index).value);
+    Ok(())
+}
+
+/// Validate every live-out of a fused elementwise region: present and resident
+/// on the region's location.
+fn validate_region_outputs(
+    region: &super::region::ElementwiseRegion,
+    location: &ExecutionLocation,
+    staged: &[Option<ExecSlot<'_>>],
+) -> Result<()> {
+    for &output_slot in &region.output_slots {
+        let output = staged
+            .get(output_slot)
+            .and_then(Option::as_ref)
+            .ok_or(tenferro_tensor::Error::MissingValue { slot: output_slot })?;
+        let output = output.as_read();
+        if !location
+            .witness()
+            .owns_resident_tensor(&output, location.storage_class())
         {
-            continue;
+            return Err(Error::runtime_state_source(
+                "Runtime::run_prepared",
+                ErrorPhase::Execution,
+                super::EngineExecutionContractError::OutputResidencyMismatch {
+                    instruction_index: region.instruction_range.start,
+                    output_slot,
+                    engine_id: location.engine_id().clone(),
+                    storage_class: location.storage_class().clone(),
+                    backend_family: output.backend_family(),
+                    allocation_domain: output.allocation_domain(),
+                },
+            ));
         }
+    }
+    Ok(())
+}
+
+/// Publish a fused region's results: release region inputs whose last use is
+/// inside the region and move every live-out into `located`.
+fn retain_region_results<'input>(
+    region: &super::region::ElementwiseRegion,
+    location: &ExecutionLocation,
+    located: &mut [Vec<LocatedExecSlot<'input>>],
+    staged: &mut [Option<ExecSlot<'input>>],
+) -> Result<()> {
+    for (&slot, &last_use) in region.input_slots.iter().zip(region.input_last_use.iter()) {
+        if last_use {
+            located[slot].clear();
+            staged[slot].take();
+        }
+    }
+    for &slot in &region.output_slots {
+        let value = staged
+            .get_mut(slot)
+            .and_then(Option::take)
+            .ok_or(tenferro_tensor::Error::MissingValue { slot })?;
         let values = located
             .get_mut(slot)
             .ok_or(tenferro_tensor::Error::MissingValue { slot })?;
-        let value_index = values
-            .iter()
-            .position(|value| &value.location == location)
-            .ok_or(tenferro_tensor::Error::MissingValue { slot })?;
-        staged[slot] = Some(values.swap_remove(value_index).value);
+        values.clear();
+        values.push(LocatedExecSlot {
+            location: location.clone(),
+            value,
+        });
     }
     Ok(())
 }

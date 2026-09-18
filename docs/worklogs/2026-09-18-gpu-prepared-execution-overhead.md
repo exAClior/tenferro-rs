@@ -105,3 +105,24 @@ container.
   `prepared_graph` and `unprepared_graph` in the same group (the earlier
   `segmented_graph` label measured only the prepared path). The `gpu/elementwise`
   benchmark case is still to add.
+
+## Stage 1 status (prepared elementwise regions)
+
+- Regions are planned at prepare time (`runtime::region`) with the shared
+  segmentation and eligibility, and the region start node executes the whole
+  region as one fused command; covered nodes are skipped and their completions
+  resolve to the region token.
+- Fallback keeps one region completion: when the backend declines the fusion the
+  region dispatches its instructions inside the same enqueue.
+- Region inputs that are borrowed views decline the fusion (the fused entry
+  point takes owned tensors), so chains over graph inputs keep the
+  per-instruction path today; materializing a view for a region is the recorded
+  follow-up.
+- Evidence: `prepared_elementwise_region_executes_as_one_fused_command` (one
+  fused execution above the CPU fused kernel's element floor, results equal to
+  the unprepared path) and
+  `prepared_elementwise_region_falls_back_when_fusion_is_declined` (one fallback
+  below the floor, results equal).
+- `run_compiled` and `run_prepared` share one prepared program through the
+  prepared-entry cache, which the tests isolate by using a second runtime for the
+  reference run.

@@ -157,6 +157,38 @@ pub(crate) fn plan_elementwise_regions(
     regions
 }
 
+/// Execution counters for planned elementwise regions.
+///
+/// `fused` counts regions executed as one fused command; `fallbacks` counts
+/// regions whose fusion the backend rejected and which therefore dispatched
+/// their instructions one by one. Together they are the runtime evidence for
+/// execution-path parity tests.
+#[derive(Debug, Default)]
+pub(crate) struct RegionExecutionCounters {
+    fused: std::sync::atomic::AtomicUsize,
+    fallbacks: std::sync::atomic::AtomicUsize,
+}
+
+impl RegionExecutionCounters {
+    pub(crate) fn record_fused(&self) {
+        self.fused
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn record_fallback(&self) {
+        self.fallbacks
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub(crate) fn fused(&self) -> usize {
+        self.fused.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn fallbacks(&self) -> usize {
+        self.fallbacks.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
 /// Number of regions and the instructions they cover, for parity tests.
 pub(crate) fn region_summary(regions: &[ElementwiseRegion]) -> (usize, usize) {
     (

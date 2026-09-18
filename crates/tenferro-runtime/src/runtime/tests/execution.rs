@@ -191,6 +191,18 @@ impl ErasedTensorBackendExecutor for AdmissionTestExecutor {
             .map_err(Error::from)
     }
 
+    fn execute_elementwise_fusion_slots<'input>(
+        &self,
+        _input_slots: &[usize],
+        _plan: &tenferro_tensor::backend::ElementwiseFusionPlan,
+        _slots: &mut [Option<ExecSlot<'input>>],
+        _output_slots: &[usize],
+    ) -> crate::Result<bool> {
+        // This executor is an admission/scheduling double; it declines fusion so
+        // regions keep the per-instruction path.
+        Ok(false)
+    }
+
     fn execute_slot_instruction<'input>(
         &self,
         _instruction_index: usize,
