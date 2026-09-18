@@ -61,49 +61,71 @@ actionlint 1.7.12 does not recognize that supported GitHub key; a one-file,
 one-diagnostic exception is paired with explicit queue/lifecycle contract tests.
 Cache restores compile PTX with the restored nvcc and headers before use.
 
-### Local paired measurements (initial experiment invalidated)
+### Local paired measurements
 
-Baseline `cf971d0f18d0357133da97dae66802e26bd56e2f`; measured candidate
-`4e8e705ff72b991f4ff9a597aa99331bb5104c26`. The later BLAS-only extern declaration
-fix is not compiled by the measured faer configuration. This is CI compiler/test
-latency, not a kernel throughput benchmark. The initial experiment selected
-`ci`, but a local `build.incremental=true` override meant it was not the hosted
-profile's effective configuration.
+Baseline `cf971d0f18d0357133da97dae66802e26bd56e2f`; doctest candidate
+`a772a01f`. The scalar candidate additionally contains the provider corrections
+committed as `93924bb`; those changes preceded its warmup and timed samples.
+This measures CI compiler/test latency, not kernel throughput.
+
 EPYC 7713P, rustc 1.97.1, four-CPU affinity (0–3), Cargo jobs 16, four doctest
-workers, default CPU backend and OpenBLAS/OpenMP explicitly 1T. A compiled probe
-confirmed `CpuBackend::num_threads() == 1`; examples deliberately demonstrating
-other thread counts are unchanged. Compiler wrapping is disabled for both sides.
-Dependencies are warm; one warmup precedes three retained samples per variant.
+workers, explicit `CARGO_INCREMENTAL=0`, `RUSTC_WRAPPER=''`, and
+`RAYON_NUM_THREADS=OPENBLAS_NUM_THREADS=OMP_NUM_THREADS=1` on both sides.
+A compiled probe confirmed `CpuBackend::num_threads() == 1`; examples deliberately
+demonstrating other thread counts are unchanged. One warmup precedes three
+retained samples. The acceptance threshold was >=20% median improvement, with
+max/min <=1.30 and load1 <64; both comparisons meet those limits.
 
-| Selected faer doctests | Sample 1 | Sample 2 | Sample 3 | Median |
+| Operation / variant | Sample 1 | Sample 2 | Sample 3 | Median |
 | --- | --- | --- | --- | --- |
-| Edition 2021 | 190.56 s | 189.90 s | 191.79 s | 190.56 s |
-| Edition 2024 | 12.54 s | 12.59 s | 12.30 s | 12.54 s |
+| Selected faer doctests, edition 2021 | 189.55 s | 190.83 s | 190.74 s | 190.74 s |
+| Selected faer doctests, edition 2024 | 12.55 s | 12.55 s | 12.44 s | 12.55 s |
+| Scalar evidence, separate dev build | 126.73 s | 128.81 s | 129.32 s | 128.81 s |
+| Scalar evidence, ci reuse | 57.07 s | 56.89 s | 56.38 s | 56.89 s |
 
-All **1125 doctests** passed in every sample, including standalone compile-fail
-examples. These preliminary times are **INCONCLUSIVE for promotion** because of
-the incremental configuration mismatch. The scalar experiment was also stopped;
-all preliminary evidence remains in `/tmp/tenferro-ci-bench/exploratory-incremental/`.
-The entire paired experiment is repeated with explicit `CARGO_INCREMENTAL=0`
-and verbose compiler-command verification. The original acceptance threshold
-(>=20% median improvement), three samples, max/min <=1.30 and load1 <64 noise
-limits remain unchanged. The same selected BLAS doctests pass. Full protocol,
-run scripts and raw results are retained under `/tmp/tenferro-ci-bench/`.
-No whole-workspace or whole-PR speedup is inferred from selected doctests.
+All **1125 doctests** pass in every sample, including standalone compile-fail
+examples: **93.4%** less time for the selected four crates. The scalar comparisons
+both pass the object-level assertions: **55.8%** less time. Scalar measurements
+model the actual transition from ordinary ci test builds: each sample first
+builds the ci test targets, and the baseline's separate dev output is removed.
+This does not claim the same saving when dev artifacts are already available.
+Selected BLAS doctests also pass. No whole-workspace or whole-PR speedup is
+inferred from these selected measurements.
+
+An earlier experiment accidentally inherited local `build.incremental=true`.
+It is invalid for promotion, retained under
+`/tmp/tenferro-ci-bench/exploratory-incremental/`, and not used above. The corrected
+protocol, scripts, verbose compiler commands, timing/load records, reports and
+raw outputs are under `/tmp/tenferro-ci-bench/` (`valid-*` and `scalar-*`).
 
 ## Verification and limitations
 
-The selected Apple feature graph contains accelerate-src and no faer. All 206
-CI Python tests, Rust formatting, documentation consistency and actionlint pass.
-A standalone LLVM/nextest
-smoke test verifies the `ci` profile and JSON report CLI combination, not this
-repository's full coverage equivalence.
+PR #1816's first hosted revision (`a772a01f`) passed Linux faer/BLAS workspace
+checks, clippy, rustfmt, the existing trusted GPU lifecycle and coverage.
+Coverage ran **3219 tests**, with **227/227 file thresholds** passing, in **5m57s**;
+this one run is not a paired coverage speedup measurement. The Linux faer job
+was 10m51s, BLAS 8m03s; the GPU gate arrived about 14 minutes after workflow
+creation. The new paid-workflow split/toolkit cache is not active on main yet.
 
-Native Apple execution and new wall-clock timings are not measured on this
-Linux host. Cross-target checking stopped in cblas-src because the available C
-compiler cannot compile for macOS. Metal availability on the hosted runner must
-be verified: past nextest PASS lines alone are not proof that the optional-device
-tests executed. No runner replacement, silent hardware skip, threshold reduction,
-or additional paid GPU run is part of this change. Local kache verification
-still reports one blob-index drift after repair; the Rust checks bypassed the
-wrapper rather than modifying the shared cache service.
+That run exposed an actual Apple build failure: `provider-src` unnecessarily
+compiled a second Netlib CBLAS requiring gfortran. Supported providers already
+export CBLAS, so the redundant dependency/link marker is removed rather than
+installing another compiler. The independent feature selection also exposed
+missing linalg cpu-blas/WebGPU forwarding and stale Apple tests using pre-session
+APIs. Those are corrected without dropping assertions. The exact selected Apple
+targets now pass `cargo check --target aarch64-apple-darwin` on Linux, but this
+is not native linking or Metal execution. The first docs gate also detected a
+stale generated inventory digest; its case inventory is unchanged and regenerated.
+
+Local checks include 1642 relevant nextest tests, 212 CI helper tests, seven CPU
+provider-contract tests, CI-parity clippy, formatting, documentation consistency
+and actionlint. One final fast-gate invocation had a shell-quoting error in its
+test command after clippy passed; the corrected focused nextest command passed.
+Coverage now clears only profraw samples before `--no-clean`, retaining builds
+without merging stale measurements; the command sequence passes a 1T smoke test.
+
+Native Apple/Metal execution and new GPU/toolkit wall-clock timings remain
+pending. Past nextest PASS lines alone are not proof that optional-device tests
+executed. No silent hardware skip or threshold reduction is allowed. Local kache
+verification still reports one blob-index drift after repair; Rust checks bypass
+that wrapper rather than changing the shared cache service.
