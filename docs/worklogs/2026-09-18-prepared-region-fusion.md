@@ -53,8 +53,10 @@ cleanup rather than a second production executor design.
   scheduled event-domain submission boundary directly. On the same prepared
   program, `run_compiled` increments the counter once and `run_prepared`
   increments it once again; this is runtime submission evidence rather than a
-  plan census. It counts successful scheduled submissions, not individual CUDA
-  kernels launched inside a fallback enqueue.
+  plan census. `compiled_and_prepared_submission_counts_match_shape_matrix`
+  repeats that assertion for shapes 4, 64, and 1024. It counts successful
+  scheduled submissions, not individual CUDA kernels launched inside a
+  fallback enqueue.
 - The tenferro-runtime local gate passed: formatting, clippy with `-D warnings`,
   and 412 library plus 160 integration/target tests. The pre-existing
   `eager_backend_capability_boundary` trybuild failure remains outside this

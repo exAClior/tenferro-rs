@@ -616,6 +616,47 @@ fn compiled_and_prepared_submission_counts_match() {
     );
 }
 
+/// Runtime parity matrix: shapes in the normal fused range submit once through
+/// each production entry point.
+#[test]
+fn compiled_and_prepared_submission_counts_match_shape_matrix() {
+    for n in [4usize, 64, 1024] {
+        let runtime = cpu_runtime();
+        let x = TracedTensor::input_concrete_shape(DType::F64, &[n]).unwrap();
+        let chain = (&x + &x)
+            .unwrap()
+            .mul(&x)
+            .unwrap()
+            .exp()
+            .unwrap()
+            .tanh()
+            .unwrap();
+        let mut compiler = GraphCompiler::new();
+        let program = compiler
+            .compile_with_input_specs(&chain, &[(&x, DType::F64, &[n])])
+            .unwrap();
+        let input = Tensor::from_vec_col_major(vec![n], vec![1.0_f64; n]).unwrap();
+        let prepared = runtime.prepare_compiled(&program, &[&input]).unwrap();
+        let baseline = prepared.execution_submission_count();
+
+        runtime.run_compiled(&program, &[&input]).unwrap();
+        let after_compiled = prepared.execution_submission_count();
+        runtime.run_prepared(&prepared, &[&input]).unwrap();
+        let after_prepared = prepared.execution_submission_count();
+
+        assert_eq!(
+            after_compiled - baseline,
+            1,
+            "compiled path submission count for shape {n}"
+        );
+        assert_eq!(
+            after_prepared - after_compiled,
+            1,
+            "prepared path submission count for shape {n}"
+        );
+    }
+}
+
 /// Stage 1 planning: the elementwise chain becomes one planned region covering
 /// all four instructions, while a run containing a reduction plans none.
 #[test]
