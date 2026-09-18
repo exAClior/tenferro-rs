@@ -195,7 +195,7 @@ pub struct CudaRuntime {
     inner: Arc<CudaRuntimeState>,
 }
 
-struct CudaRuntimeState {
+pub(crate) struct CudaRuntimeState {
     client: ComputeClient<CubeclCudaRuntime>,
     device_id: CudaDeviceId,
     device_ordinal: usize,
@@ -222,6 +222,9 @@ struct CudaRuntimeState {
     // (`cudaHostAlloc`, `PINNED_SCALAR_BYTES` bytes). Freed in `Drop` with
     // `cudaFreeHost` while the primary context is still retained.
     pinned_scalar: Mutex<PinnedScalarSlot>,
+    // Vendor workspaces whose CubeCL handle may only return to the pool after
+    // their stream reaches the event recorded at retirement time.
+    workspace_retirements: Mutex<super::workspace_retirement::WorkspaceRetirementQueue>,
 }
 
 /// One cached cuBLAS handle bound to a fixed CUDA stream.
@@ -365,6 +368,7 @@ impl CudaRuntime {
                 pinned_scalar: Mutex::new(PinnedScalarSlot {
                     ptr: std::ptr::null_mut(),
                 }),
+                workspace_retirements: Mutex::new(Default::default()),
             }),
         })
     }
@@ -511,16 +515,18 @@ impl CudaRuntime {
         self.inner.set_current_cuda_context(op)
     }
 
-    pub(crate) fn raw_cuda_stream(&self) -> crate::Result<u64> {
-        self.inner.raw_cuda_stream()
+    pub(crate) fn workspace_retirements(
+        &self,
+    ) -> &Mutex<super::workspace_retirement::WorkspaceRetirementQueue> {
+        &self.inner.workspace_retirements
     }
 
-    pub(crate) fn synchronize_raw_stream(
-        &self,
-        stream: u64,
-        op: &'static str,
-    ) -> crate::Result<()> {
-        self.inner.synchronize_raw_stream(stream, op)
+    pub(crate) fn state(&self) -> &CudaRuntimeState {
+        &self.inner
+    }
+
+    pub(crate) fn raw_cuda_stream(&self) -> crate::Result<u64> {
+        self.inner.raw_cuda_stream()
     }
 
     /// Run one cuBLAS enqueue with the handle for the current CubeCL stream.
@@ -607,7 +613,7 @@ impl CudaRuntimeState {
         stream_id.value as usize % self.raw_streams.len()
     }
 
-    fn set_current_cuda_context(&self, op: &'static str) -> crate::Result<()> {
+    pub(crate) fn set_current_cuda_context(&self, op: &'static str) -> crate::Result<()> {
         // Fast path: the tenferro primary context is already current on this
         // thread. `cuCtxGetCurrent` only reads driver thread state, so this
         // skips the per-op `cudaSetDevice` + `cuCtxSetCurrent` round trips.
@@ -659,10 +665,21 @@ impl CudaRuntimeState {
         // A cached raw stream does not drain CubeCL's host-side launch queue.
         self.flush_cubecl(OP)?;
         let stream = self.raw_cuda_stream()?;
-        self.synchronize_raw_stream(stream, OP)
+        self.synchronize_raw_stream(stream, OP)?;
+        // An explicit barrier also resolves deferred workspace retirements, so
+        // callers that synchronize observe released workspaces.
+        self.workspace_retirements
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .drain_blocking(self);
+        Ok(())
     }
 
-    fn synchronize_raw_stream(&self, stream: u64, op: &'static str) -> crate::Result<()> {
+    pub(crate) fn synchronize_raw_stream(
+        &self,
+        stream: u64,
+        op: &'static str,
+    ) -> crate::Result<()> {
         self.set_current_cuda_context(op)?;
         unsafe { cuda_result::stream::synchronize(stream as usize as cudaStream_t) }
             .map_err(|err| crate::Error::backend_source(op, err))
@@ -936,6 +953,12 @@ impl Drop for CudaRuntimeState {
         // primary context while queued kernels on any initialized slot may
         // still reference it.
         if self.retire_initialized_streams() {
+            // Every stream is retired, so queued workspace retirements are
+            // complete and their handles can return to the pool.
+            self.workspace_retirements
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .drain_blocking(self);
             // Retirement left the primary context current; release CUDA
             // library resources before the retained primary context drops.
             self.release_cuda_library_resources();

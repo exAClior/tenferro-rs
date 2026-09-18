@@ -46,6 +46,7 @@ pub mod cuda {
         with_cuda_exec_session, CudaBackend, CudaComputeCapability, CudaDeviceError, CudaDeviceId,
         CudaDeviceInfo, CudaDeviceUuid, CudaExecSession, CudaExtensionCache,
         CudaExtensionCacheGuard, CudaRuntime, CudaRuntimeIdentity, GpuExtensionCapability,
+        WorkspaceRetirementStats,
     };
 
     /// Public tenferro-wide CubeCL session (issue #1597).

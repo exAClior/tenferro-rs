@@ -266,14 +266,14 @@ impl Drop for Workspace {
         let (Some(runtime), Some(handle)) = (self.runtime.as_ref(), self._handle.take()) else {
             return;
         };
-        if runtime
-            .synchronize_raw_stream(self.stream, "cutensor_workspace_drop")
-            .is_err()
-        {
-            // Without a proven barrier the evicted workspace may still be in
-            // use. Leak its CubeCL handle rather than race device reclamation.
-            std::mem::forget(handle);
-        }
+        // Defer the handle release until this workspace's stream reaches the
+        // event recorded now, instead of draining the pipeline here. The event
+        // is the same completion witness the barrier provided.
+        let mut retirements = runtime
+            .workspace_retirements()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        retirements.retire(runtime.state(), self.stream, handle);
     }
 }
 
@@ -1199,6 +1199,23 @@ pub(super) fn cutensor_plan_cache_workspace_bytes(backend: &CudaBackend) -> crat
     Ok(total)
 }
 
+/// Deferred workspace retirement counters for tests and diagnostics.
+pub(crate) fn cutensor_workspace_retirement_stats(
+    backend: &CudaBackend,
+) -> crate::Result<super::workspace_retirement::WorkspaceRetirementStats> {
+    Ok(backend
+        .runtime()
+        .workspace_retirements()
+        .lock()
+        .map_err(|_| {
+            crate::Error::runtime_state(
+                "cutensor_workspace_retirement",
+                "retirement queue lock poisoned",
+            )
+        })?
+        .stats())
+}
+
 pub(super) fn cutensor_plan_cache_max_entries(
     backend: &CudaBackend,
 ) -> crate::Result<NonZeroUsize> {
@@ -1328,6 +1345,13 @@ fn alloc_workspace(rt: &CudaRuntime, workspace_size: u64) -> crate::Result<Works
     if workspace_size == 0 {
         return Ok(Workspace::none());
     }
+    // Memory pressure only appears where a workspace is allocated, and eviction
+    // (which queues a retirement) is what leads here: release completed
+    // retirements before asking CubeCL for a new block.
+    rt.workspace_retirements()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .drain(rt.state());
     let workspace_len =
         usize::try_from(workspace_size).map_err(|_| workspace_size_overflow(OP, workspace_size))?;
     let handle = rt.client().empty(workspace_len);

@@ -591,3 +591,56 @@ fn test_accum_zero_contraction_view_output_beta_error() {
     let actual = download_f64(&gpu, &out_gpu);
     assert_eq!(actual, out_host);
 }
+
+#[test]
+#[ignore]
+fn test_workspace_retirement_defers_eviction_barrier_f64() {
+    // Evicting a cached cuTENSOR contraction retires its workspace. The handle
+    // must only return to the CubeCL pool once the stream reaches the event
+    // recorded at retirement, so eviction must not drain the stream itself.
+    use std::num::NonZeroUsize;
+
+    let mut gpu = gpu_backend();
+    let mut cpu = cpu_backend();
+    // Keep a single plan so the second contraction evicts the first.
+    gpu.set_cutensor_plan_cache_max_entries(NonZeroUsize::new(1).unwrap())
+        .unwrap();
+
+    let mut expected = None;
+    for (rows, k, cols) in [(8_usize, 8_usize, 8_usize), (16, 16, 16)] {
+        let lhs = tensor_f64(vec![rows, k], flat_f64(rows * k, 0.5));
+        let rhs = tensor_f64(vec![k, cols], flat_f64(k * cols, -0.25));
+        let lhs_gpu = upload(&gpu, &lhs);
+        let rhs_gpu = upload(&gpu, &rhs);
+        let actual = gpu
+            .dot_general(&lhs_gpu, &rhs_gpu, &matmul_config())
+            .unwrap();
+        let actual = download(&gpu, &actual);
+        let reference = cpu.dot_general(&lhs, &rhs, &matmul_config()).unwrap();
+        assert_tensor_close(&actual, &reference, 1e-10);
+        expected = Some(reference);
+    }
+    assert!(expected.is_some());
+
+    let stats = gpu.cutensor_workspace_retirement_stats().unwrap();
+    assert!(
+        stats.deferred >= 1,
+        "eviction should defer at least one workspace retirement, got {stats:?}"
+    );
+    assert!(
+        stats.barrier_fallbacks == 0,
+        "deferred retirement should not need a barrier, got {stats:?}"
+    );
+
+    // An explicit barrier resolves every deferred retirement.
+    gpu.runtime().synchronize().unwrap();
+    let stats = gpu.cutensor_workspace_retirement_stats().unwrap();
+    assert_eq!(
+        stats.in_flight, 0,
+        "barrier should release retirements: {stats:?}"
+    );
+    assert!(
+        stats.released >= 1,
+        "retirements should be released: {stats:?}"
+    );
+}
