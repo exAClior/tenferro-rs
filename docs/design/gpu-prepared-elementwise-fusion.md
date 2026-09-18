@@ -147,13 +147,26 @@ benchmark alone cannot show which path submitted what.
    the completion event inside the enqueue closure, so it must record it after
    the region's last command in both the fused and the fallback case. This is a
    constraint on the Stage 1 implementation, not an existing behavior.
-4. Open. Do the existing builder and backend really satisfy the multiple-live-out
-   and terminal-Value output contracts? Read
-   `build_elementwise_fusion_plan`'s output handling and the CUDA/CPU
-   `execute_elementwise_fusion` implementations.
-5. Open. Do the signature and epoch checks cover a plan's specialization
-   conditions? Read `prepare_compiled_for`'s `PreparedEntryKey` specialization
-   and the run-time `validate_prepared_runtime`/signature checks.
+4. **Answered (code reading).** `build_elementwise_fusion_plan` maps every
+   `output_slots` entry to a plan value and stores the list in the
+   `ElementwiseFusionPlan`, and the CUDA `fusion::launch` allocates one output
+   per `plan.outputs()` and returns `Vec<TypedTensor<T>>`, so multiple live-outs
+   are supported end to end. There is no `execute_elementwise_fusion_value`:
+   Value mode is handled at the segment level by
+   `execute_fused_value_segment`, which uses the Tensor-returning fusion and
+   keeps `terminal_slots` handling around it. Stage 1 must therefore keep
+   terminal and value handling at the region level and write every plan output
+   back to its slot. Residual: a Stage 1 test must cover a terminal output inside
+   a fused region in Value mode, using `execute_fused_value_segment` as the
+   reference behavior.
+5. **Answered (code reading and a new test).** Preparation keys a prepared
+   program by `PreparedEntryKey` = (root, requirements, specialization), and the
+   specialization is projected from the input signature, so a different
+   signature cannot reuse a stale prepared program. At run time
+   `run_prepared` rejects inputs outside that signature:
+   `runtime_prepared_rejects_inputs_outside_its_signature` asserts that an f32
+   input for an f64 signature and a length-3 input for a length-2 signature both
+   fail.
 
 ## Non-goals
 

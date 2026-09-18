@@ -578,3 +578,35 @@ fn execution_path_command_counts_matrix() {
         "a run containing a reduction is fusion-ineligible, so both paths dispatch per instruction"
     );
 }
+
+/// Prepared-path input specialization (open question 5): a prepared program must
+/// reject inputs that violate the signature it was prepared with, the way the
+/// unprepared path reports `Placeholder*Mismatch`.
+#[test]
+fn runtime_prepared_rejects_inputs_outside_its_signature() {
+    let runtime = cpu_runtime();
+    let x = TracedTensor::input_concrete_shape(DType::F64, &[2]).unwrap();
+    let y = (&x + &x).unwrap();
+    let mut compiler = GraphCompiler::new();
+    let program = compiler
+        .compile_with_input_specs(&y, &[(&x, DType::F64, &[2])])
+        .unwrap();
+    let prepared_input = Tensor::from_vec_col_major(vec![2], vec![1.0_f64, 2.0]).unwrap();
+    let prepared = runtime
+        .prepare_compiled(&program, &[&prepared_input])
+        .unwrap();
+
+    let wrong_dtype = Tensor::from_vec_col_major(vec![2], vec![1.0_f32, 2.0]).unwrap();
+    let dtype_error = runtime.run_prepared(&prepared, &[&wrong_dtype]);
+    assert!(
+        dtype_error.is_err(),
+        "prepared execution accepted an f32 input for an f64 signature"
+    );
+
+    let wrong_shape = Tensor::from_vec_col_major(vec![3], vec![1.0_f64, 2.0, 3.0]).unwrap();
+    let shape_error = runtime.run_prepared(&prepared, &[&wrong_shape]);
+    assert!(
+        shape_error.is_err(),
+        "prepared execution accepted a length-3 input for a length-2 signature"
+    );
+}
