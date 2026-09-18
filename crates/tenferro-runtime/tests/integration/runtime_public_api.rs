@@ -610,3 +610,51 @@ fn runtime_prepared_rejects_inputs_outside_its_signature() {
         "prepared execution accepted a length-3 input for a length-2 signature"
     );
 }
+
+/// Stage 1 planning: the elementwise chain becomes one planned region covering
+/// all four instructions, while a run containing a reduction plans none.
+#[test]
+fn prepared_elementwise_regions_are_planned_at_prepare_time() {
+    let runtime = cpu_runtime();
+    let n = 4usize;
+
+    let x = TracedTensor::input_concrete_shape(DType::F64, &[n]).unwrap();
+    let doubled = (&x + &x).unwrap();
+    let chain = doubled
+        .mul(&doubled)
+        .unwrap()
+        .exp()
+        .unwrap()
+        .tanh()
+        .unwrap();
+    let mut compiler = GraphCompiler::new();
+    let program = compiler
+        .compile_with_input_specs(&chain, &[(&x, DType::F64, &[n])])
+        .unwrap();
+    let input = Tensor::from_vec_col_major(vec![n], vec![1.0_f64, 2.0, 3.0, 4.0]).unwrap();
+    let prepared = runtime.prepare_compiled(&program, &[&input]).unwrap();
+    assert_eq!(
+        prepared.elementwise_region_summary(),
+        (1, 4),
+        "the pure elementwise chain should plan one region over four instructions"
+    );
+
+    let x2 = TracedTensor::input_concrete_shape(DType::F64, &[n]).unwrap();
+    let with_reduce = (&x2 + &x2)
+        .unwrap()
+        .exp()
+        .unwrap()
+        .reduce_sum(None)
+        .unwrap();
+    let mut compiler2 = GraphCompiler::new();
+    let program2 = compiler2
+        .compile_with_input_specs(&with_reduce, &[(&x2, DType::F64, &[n])])
+        .unwrap();
+    let input2 = Tensor::from_vec_col_major(vec![n], vec![1.0_f64, 2.0, 3.0, 4.0]).unwrap();
+    let prepared2 = runtime.prepare_compiled(&program2, &[&input2]).unwrap();
+    assert_eq!(
+        prepared2.elementwise_region_summary(),
+        (0, 0),
+        "a run containing a reduction is not an elementwise region"
+    );
+}

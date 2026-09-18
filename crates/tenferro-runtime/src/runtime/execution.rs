@@ -60,6 +60,14 @@ pub struct PreparedCompiledGraph {
 }
 
 impl PreparedCompiledGraph {
+    /// Number of planned elementwise regions and the instructions they cover,
+    /// for execution-path parity tests.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn elementwise_region_summary(&self) -> (usize, usize) {
+        super::region::region_summary(self.prepared.root().regions())
+    }
+
     /// Plan-derived command counts for the two execution paths, for
     /// execution-path parity tests.
     ///

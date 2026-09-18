@@ -10,6 +10,7 @@ mod extension_provider;
 mod identity;
 mod policy;
 mod preparation;
+mod region;
 mod schedule;
 mod signature;
 mod snapshot;
