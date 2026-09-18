@@ -5,8 +5,6 @@ use cblas_sys::{cblas_zgemm, CBLAS_LAYOUT, CBLAS_TRANSPOSE};
 
 #[cfg(feature = "provider-src")]
 extern crate blas_src as _;
-#[cfg(feature = "provider-src")]
-extern crate cblas_src as _;
 
 const PHYS_DIM: usize = 2;
 const CHIS: &[usize] = &[1, 2, 4, 8, 16, 32];

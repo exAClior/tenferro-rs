@@ -106,8 +106,9 @@ class RunProfileTests(unittest.TestCase):
         )
 
     def test_coverage_excludes_tutorial_package(self) -> None:
+        self.assertEqual(commands_for("coverage")[0], "cargo llvm-cov clean --profraw-only")
         self.assertEqual(
-            commands_for("coverage")[0],
+            commands_for("coverage")[1],
             "cargo llvm-cov nextest --workspace --exclude tenferro-tutorial-code "
             "--cargo-profile ci --no-clean --json --output-path coverage.json",
         )
@@ -126,6 +127,12 @@ class RunProfileTests(unittest.TestCase):
         self.assertNotIn("--workspace", args)
         self.assertNotIn("--doc", args)
         self.assertNotIn("cpu-faer", commands[0])
+        cpu_manifest = tomllib.loads((ROOT / "crates/tenferro-cpu/Cargo.toml").read_text())
+        self.assertNotIn("cblas-src", cpu_manifest["dependencies"])
+        linalg_features = tomllib.loads((ROOT / "crates/tenferro-linalg/Cargo.toml").read_text())["features"]
+        for provider in ("blas-accelerate", "blas-openblas", "blas-mkl"):
+            self.assertIn("cpu-blas", linalg_features[provider])
+        self.assertIn("tenferro-ad?/webgpu", linalg_features["webgpu"])
         with patch.dict("os.environ", {}, clear=True), patch(
             "scripts.ci.run_profile.subprocess.run"
         ) as run:

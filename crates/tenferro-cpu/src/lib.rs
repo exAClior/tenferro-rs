@@ -153,8 +153,6 @@ pub(crate) fn erased_raw_strided_mut<'a>(
 extern crate blas_src as _;
 #[cfg(feature = "provider-inject")]
 extern crate cblas_inject as _;
-#[cfg(feature = "provider-src")]
-extern crate cblas_src as _;
 #[cfg(feature = "provider-inject")]
 extern crate lapack_inject as _;
 #[cfg(feature = "provider-src")]

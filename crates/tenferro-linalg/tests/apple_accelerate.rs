@@ -35,7 +35,7 @@ fn accelerate_gemm_and_cholesky_without_metal() {
         product.as_slice::<f64>().unwrap(),
         &[20.0, 14.0, 14.0, 13.0]
     );
-    let lower = cpu.cholesky(&input).unwrap();
+    let lower = support::with_cpu_linalg(&mut cpu, |session| session.cholesky(&input)).unwrap();
     for (&actual, expected) in
         lower
             .as_slice::<f64>()

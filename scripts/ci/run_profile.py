@@ -113,6 +113,8 @@ PROFILE_COMMANDS: dict[str, tuple[str, ...]] = {
         "bash scripts/build_docs_site.sh",
     ),
     "coverage": (
+        # Keep instrumented build artifacts, never measurements from earlier runs.
+        "cargo llvm-cov clean --profraw-only",
         f"cargo llvm-cov nextest --workspace --exclude tenferro-tutorial-code "
         f"{_NEXTEST_PROFILE} --no-clean --json --output-path coverage.json",
         "python3 scripts/check-coverage.py coverage.json",
