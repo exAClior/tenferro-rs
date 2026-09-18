@@ -170,3 +170,20 @@ container.
   292cdffe the trace rows read 1.047 ms and 1.011 ms against PyTorch's 0.154 ms
   and 0.324 ms; with the region work they read 0.143 ms and 0.190 ms, while the
   eager path (no fusion) stays at 1.586 ms and 1.638 ms.
+
+- `gpu/elementwise` three-repetition A/B (A100, every run collected with
+  OMP/MKL/OpenBLAS/Rayon thread settings at 1, recorded in each `run.yaml`):
+
+  | case | tenferro-rs 292cdffe | region work (3 reps) | PyTorch (3 reps) |
+  | --- | ---: | ---: | ---: |
+  | trace n=1024 | 1.047 ms | 0.151 / 0.161 / 0.165 ms | 0.131 / 0.151 / 0.154 ms |
+  | trace n=1048576 | 1.011 ms | 0.174 / 0.189 / 0.204 ms | 0.324 / 0.326 / 0.327 ms |
+  | eager n=1024 | 1.572 ms | 1.487 / 1.566 / 1.560 ms | - |
+  | eager n=1048576 | 1.246 ms | 1.523 / 1.579 / 1.660 ms | - |
+
+  The prepared path is 5-7x faster than before and now ahead of PyTorch on the
+  large chain; the eager path, which has no fusion, is unchanged.
+- Repeated-run stability: `prepared_elementwise_region_is_stable_across_repeated_runs`
+  runs the chain 16 times and asserts each run fuses exactly once with identical
+  results, covering the "no accumulating transient state" part of the acceptance
+  criteria at the runtime level.

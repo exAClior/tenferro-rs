@@ -893,3 +893,47 @@ fn prepared_elementwise_region_stays_separate_from_ffi_op() {
         }
     }
 }
+
+/// Stage 1: repeated prepared runs neither fall back nor accumulate state.
+#[test]
+fn prepared_elementwise_region_is_stable_across_repeated_runs() {
+    let runtime = cpu_runtime();
+    let n = 16 * 1024usize;
+
+    let x = TracedTensor::input_concrete_shape(DType::F64, &[n]).unwrap();
+    let doubled = (&x + &x).unwrap();
+    let chain = doubled
+        .mul(&doubled)
+        .unwrap()
+        .exp()
+        .unwrap()
+        .tanh()
+        .unwrap();
+    let mut compiler = GraphCompiler::new();
+    let program = compiler
+        .compile_with_input_specs(&chain, &[(&x, DType::F64, &[n])])
+        .unwrap();
+    let data: Vec<f64> = (0..n).map(|i| 0.25 + (i % 17) as f64 * 0.125).collect();
+    let input = Tensor::from_vec_col_major(vec![n], data).unwrap();
+    let prepared = runtime.prepare_compiled(&program, &[&input]).unwrap();
+
+    let mut first: Option<Vec<f64>> = None;
+    for run in 1..=16 {
+        let mut out = runtime.run_prepared(&prepared, &[&input]).unwrap();
+        let out = out.pop().unwrap();
+        let values = out.as_slice::<f64>().unwrap().to_vec();
+        match &first {
+            None => first = Some(values),
+            Some(expected) => {
+                for (left, right) in values.iter().zip(expected) {
+                    assert!(
+                        (left - right).abs() <= 1e-15,
+                        "run {run} diverged from the first run: {left} != {right}"
+                    );
+                }
+            }
+        }
+        let (fused, fallbacks) = prepared.elementwise_region_execution_counts();
+        assert_eq!((fused, fallbacks), (run, 0), "run {run} should fuse once");
+    }
+}
