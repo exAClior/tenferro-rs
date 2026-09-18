@@ -1004,3 +1004,112 @@ fn scheduler_rejects_changed_run_before_transfer_host_wait() -> Result<()> {
     assert_eq!(launches, 0);
     Ok(())
 }
+
+/// Driver whose first enqueue runs the launch closure and then fails, as an
+/// event-record failure would after the work was submitted. Later enqueues are
+/// rejected so a failed run cannot be re-executed.
+#[derive(Debug)]
+struct FailAfterLaunchDriver;
+
+impl EventDomainDriver for FailAfterLaunchDriver {
+    fn begin_run(&self, domain: EventDomainId) -> Result<Box<dyn EventDomainRun>> {
+        Ok(Box::new(FailAfterLaunchRun {
+            domain,
+            failed: false,
+        }))
+    }
+}
+
+#[derive(Debug)]
+struct FailAfterLaunchRun {
+    domain: EventDomainId,
+    failed: bool,
+}
+
+impl EventDomainRun for FailAfterLaunchRun {
+    fn domain(&self) -> EventDomainId {
+        self.domain
+    }
+
+    fn enqueue(
+        &mut self,
+        _dependencies: &[Arc<dyn EventToken>],
+        launch: &mut dyn FnMut() -> Result<()>,
+    ) -> Result<Arc<dyn EventToken>> {
+        if self.failed {
+            return Err(Error::runtime_state(
+                "event-domain-test",
+                crate::ErrorPhase::Execution,
+                "enqueue on a failed run",
+            ));
+        }
+        launch()?;
+        self.failed = true;
+        Err(Error::runtime_state(
+            "event-domain-test",
+            crate::ErrorPhase::Execution,
+            "injected completion-record failure",
+        ))
+    }
+
+    fn drain(&mut self) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn enqueue_failure_after_launch_is_not_retried_and_registers_no_completion() -> Result<()> {
+    let domain = qualified_domain(1, 1, 1, 1);
+    let launches = Arc::new(AtomicUsize::new(0));
+    let driver: Arc<dyn EventDomainDriver> = Arc::new(FailAfterLaunchDriver);
+    let mut scheduler = ScheduledEventDomains::for_test(vec![(domain, driver)])?;
+
+    let launches_for_closure = Arc::clone(&launches);
+    let mut launch = move || {
+        launches_for_closure.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    };
+    let error = scheduler
+        .enqueue(0, &operation(domain, 0, []), &mut launch)
+        .expect_err("injected completion-record failure should propagate");
+    assert!(matches!(error, Error::RuntimeState { .. }), "{error:?}");
+    assert_eq!(
+        launches.load(Ordering::SeqCst),
+        1,
+        "the work was submitted exactly once"
+    );
+
+    // A dependent must not proceed on an unproven completion.
+    let dependent = operation(
+        domain,
+        1,
+        [EventDependency::new(domain, EventSlotId::new(0), 0)],
+    );
+    let mut noop = || Ok(());
+    let dependent_error = scheduler
+        .enqueue(1, &dependent, &mut noop)
+        .expect_err("dependent should fail without a completion token");
+    let Error::RuntimeStateSource { source, .. } = dependent_error else {
+        panic!("missing scheduled completion must retain a typed source");
+    };
+    assert!(
+        source
+            .downcast_ref::<MissingScheduledDependencyCompletionError>()
+            .is_some(),
+        "{source:?}"
+    );
+
+    // The failed run is not re-executed.
+    let mut launch_again = || {
+        launches.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    };
+    let retry = scheduler.enqueue(2, &operation(domain, 2, []), &mut launch_again);
+    assert!(retry.is_err(), "a failed run must not be re-executed");
+    assert_eq!(
+        launches.load(Ordering::SeqCst),
+        1,
+        "no additional submission after the failure"
+    );
+    Ok(())
+}

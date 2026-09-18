@@ -327,6 +327,10 @@ pub(crate) struct PreparedProgramRoot {
     semantic: Arc<SemanticProgram>,
     staging: Arc<ExecProgram>,
     schedule: Arc<ScheduledGraph>,
+    /// Elementwise regions planned at prepare time; see `runtime::region`.
+    regions: Arc<[super::region::ElementwiseRegion]>,
+    /// Runtime evidence for region execution; see `runtime::region`.
+    region_counters: super::region::RegionExecutionCounters,
     extension_planning: Arc<[Arc<dyn ExtensionPlanningConfig>]>,
     logical_retained_bytes: Option<usize>,
 }
@@ -349,11 +353,14 @@ impl PreparedProgramRoot {
             operation_locations,
             transfer_registry,
         )?);
+        let regions: Arc<[super::region::ElementwiseRegion]> =
+            super::region::plan_elementwise_regions(&staging, &schedule).into();
         let logical_retained_bytes = prepared_program_root_retained_bytes(
             &identity,
             &semantic,
             &staging,
             &schedule,
+            &regions,
             &extension_planning,
         );
         Ok(Self {
@@ -361,6 +368,8 @@ impl PreparedProgramRoot {
             semantic,
             staging,
             schedule,
+            regions,
+            region_counters: super::region::RegionExecutionCounters::default(),
             extension_planning,
             logical_retained_bytes,
         })
@@ -375,6 +384,14 @@ impl PreparedProgramRoot {
 
     pub(crate) fn staging(&self) -> &ExecProgram {
         &self.staging
+    }
+
+    pub(crate) fn regions(&self) -> &[super::region::ElementwiseRegion] {
+        &self.regions
+    }
+
+    pub(crate) fn region_counters(&self) -> &super::region::RegionExecutionCounters {
+        &self.region_counters
     }
 
     pub(crate) fn schedule(&self) -> &ScheduledGraph {
@@ -2099,6 +2116,7 @@ fn prepared_program_root_retained_bytes(
     semantic: &SemanticProgram,
     staging: &ExecProgram,
     schedule: &ScheduledGraph,
+    regions: &[super::region::ElementwiseRegion],
     extension_planning: &[Arc<dyn ExtensionPlanningConfig>],
 ) -> Option<usize> {
     checked_sum([
@@ -2107,6 +2125,7 @@ fn prepared_program_root_retained_bytes(
         semantic.logical_retained_bytes()?,
         exec_program_retained_bytes(staging)?,
         schedule.retained_bytes()?,
+        checked_sum_options(regions.iter().map(|region| region.retained_bytes()))?,
         extension_planning
             .len()
             .checked_mul(size_of::<Arc<dyn ExtensionPlanningConfig>>())?,
