@@ -577,6 +577,45 @@ fn prepared_execution_command_count_fuses_elementwise_chains() {
     );
 }
 
+/// Runtime evidence: the compiled and prepared entry points each submit a pure
+/// elementwise chain once through the scheduled production executor.
+#[test]
+fn compiled_and_prepared_submission_counts_match() {
+    let runtime = cpu_runtime();
+    let n = 4usize;
+
+    let x = TracedTensor::input_concrete_shape(DType::F64, &[n]).unwrap();
+    let chain = (&x + &x)
+        .unwrap()
+        .mul(&x)
+        .unwrap()
+        .exp()
+        .unwrap()
+        .tanh()
+        .unwrap();
+    let mut compiler = GraphCompiler::new();
+    let program = compiler
+        .compile_with_input_specs(&chain, &[(&x, DType::F64, &[n])])
+        .unwrap();
+    let input = Tensor::from_vec_col_major(vec![n], vec![1.0_f64, 2.0, 3.0, 4.0]).unwrap();
+    let prepared = runtime.prepare_compiled(&program, &[&input]).unwrap();
+    assert_eq!(prepared.execution_submission_count(), 0);
+
+    let _ = runtime.run_compiled(&program, &[&input]).unwrap();
+    assert_eq!(
+        prepared.execution_submission_count(),
+        1,
+        "compiled execution should submit the region once"
+    );
+
+    let _ = runtime.run_prepared(&prepared, &[&input]).unwrap();
+    assert_eq!(
+        prepared.execution_submission_count(),
+        2,
+        "prepared execution should submit the same region once"
+    );
+}
+
 /// Stage 1 planning: the elementwise chain becomes one planned region covering
 /// all four instructions, while a run containing a reduction plans none.
 #[test]

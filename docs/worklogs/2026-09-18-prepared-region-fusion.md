@@ -49,6 +49,12 @@ cleanup rather than a second production executor design.
   was 0.324/0.326/0.327 ms. The small trace case was 1.047 ms baseline versus
   0.151/0.161/0.165 ms with regions. These are latency-bound detection cases,
   separate from throughput benchmarks.
+- `compiled_and_prepared_submission_counts_match` observes the successful
+  scheduled event-domain submission boundary directly. On the same prepared
+  program, `run_compiled` increments the counter once and `run_prepared`
+  increments it once again; this is runtime submission evidence rather than a
+  plan census. It counts successful scheduled submissions, not individual CUDA
+  kernels launched inside a fallback enqueue.
 - The tenferro-runtime local gate passed: formatting, clippy with `-D warnings`,
   and 412 library plus 160 integration/target tests. The pre-existing
   `eager_backend_capability_boundary` trybuild failure remains outside this

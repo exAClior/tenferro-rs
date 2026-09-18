@@ -77,6 +77,16 @@ impl PreparedCompiledGraph {
         (counters.fused(), counters.fallbacks())
     }
 
+    /// Number of successful scheduled event-domain submissions observed by this
+    /// prepared program's production executor.
+    ///
+    /// This is runtime submission evidence, rather than a plan-derived census.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn execution_submission_count(&self) -> usize {
+        self.prepared.root().region_counters().submissions()
+    }
+
     /// Plan-derived command count for the production execution path, for
     /// execution-path tests: scheduled operations that no region covers, plus
     /// one command per planned region.
@@ -1957,6 +1967,7 @@ fn execute_scheduled_slots<'input>(
                             Ok(())
                         };
                         event_domains.enqueue(node_index, node, &mut launch)?;
+                        region_counters.record_submission();
                         // Every covered node's completion resolves to the region's
                         // completion token, which was recorded after the region's
                         // last command.
@@ -2042,10 +2053,12 @@ fn execute_scheduled_slots<'input>(
                         )
                     };
                     event_domains.enqueue(node_index, node, &mut launch)?;
+                    region_counters.record_submission();
                 }
                 ScheduledNode::Transfer(transfer) => {
                     let mut launch = || execute_scheduled_transfer(transfer, &mut located);
                     event_domains.enqueue(node_index, node, &mut launch)?;
+                    region_counters.record_submission();
                 }
                 ScheduledNode::Collective(_) => {
                     return Err(Error::runtime_state_source(
@@ -2060,6 +2073,7 @@ fn execute_scheduled_slots<'input>(
                 ScheduledNode::Barrier(_) => {
                     let mut launch = || Ok(());
                     event_domains.enqueue(node_index, node, &mut launch)?;
+                    region_counters.record_submission();
                 }
             }
         }

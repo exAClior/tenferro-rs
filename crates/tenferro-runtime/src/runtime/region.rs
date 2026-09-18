@@ -169,12 +169,15 @@ pub(crate) fn plan_elementwise_regions(
 ///
 /// `fused` counts regions executed as one fused command; `fallbacks` counts
 /// regions whose fusion the backend rejected and which therefore dispatched
-/// their instructions one by one. Together they are the runtime evidence for
+/// their instructions one by one. `submissions` counts successful scheduled
+/// event-domain submissions, which is the runtime submission boundary shared by
+/// the production backends. Together they are the runtime evidence for
 /// execution-path parity tests.
 #[derive(Debug, Default)]
 pub(crate) struct RegionExecutionCounters {
     fused: std::sync::atomic::AtomicUsize,
     fallbacks: std::sync::atomic::AtomicUsize,
+    submissions: std::sync::atomic::AtomicUsize,
 }
 
 impl RegionExecutionCounters {
@@ -188,12 +191,21 @@ impl RegionExecutionCounters {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
+    pub(crate) fn record_submission(&self) {
+        self.submissions
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub(crate) fn fused(&self) -> usize {
         self.fused.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     pub(crate) fn fallbacks(&self) -> usize {
         self.fallbacks.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub(crate) fn submissions(&self) -> usize {
+        self.submissions.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
