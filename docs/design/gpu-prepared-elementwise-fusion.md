@@ -1,8 +1,34 @@
 # Elementwise fusion in prepared execution
 
-Status: proposal for review. Not implemented.
+Status: **superseded by measurement. Do not implement as written.**
 
-## Problem
+A census of the prepared program for `gpu/tensornetwork` trace shows why: the
+compiled graph contains 549 instructions and **all of them are FFI einsum
+extension ops** (`Extension(EinsumExtensionOp { .. })`, one per tree node;
+host=0, other=0). `segment_exec_program` therefore finds zero fusion candidates
+(candidates=0), and the ~362 `broadcast_multiply` commands per call are not graph
+instructions at all: tenferro-einsum emits them from its own execution
+(`crates/tenferro-einsum/src/eager.rs` `outer_product`), where the CUDA backend
+already serves them as one fused command through
+`BackendSession::execute_broadcast_multiply` (`broadcast_multiply_float_e_f32`).
+
+Prepared-path fusion cannot reduce that command count. The remaining question is
+different: whether the per-node broadcast-multiply that tenferro-einsum performs
+to align operand label orders can be avoided (for example by contracting in the
+natural label order and permuting the result afterwards, or by a single fused
+broadcast-multiply-contract kernel), and whether that is cheaper than one fused
+command per tree node. That question belongs to tenferro-einsum, not to the
+runtime's scheduling, and it needs its own measurement before any design.
+
+## Superseded content (kept for the record)
+
+Original premise: `run_prepared` executes one command per scheduled instruction,
+the unprepared segmented executor (`crate::segment::eval_exec_segmented_*`)
+groups instructions and fuses elementwise runs, and the prepared path should do
+the same at prepare time. The measurements below are still valid; the conclusion
+that the prepared path holds the fusion opportunity is not.
+
+## Problem (measurements, still valid)
 
 `run_prepared` executes one command per scheduled instruction. The unprepared
 segmented executor (`crate::segment::eval_exec_segmented_*`) instead groups

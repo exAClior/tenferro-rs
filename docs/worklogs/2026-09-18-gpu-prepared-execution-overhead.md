@@ -55,12 +55,18 @@ container.
 - Remaining 28.4 us median gap is not retirement. Next candidates: cubecl-cuda's
   per-command `cuCtxSetCurrent` and launch latency itself.
 - Command-count finding: 4706 of 7215 kernels in the same profile are
-  `broadcast_multiply` (~362 per call, ~2.3 us each) with elementwise runs of
-  length 1-8, while consecutive launch submissions are a median 54.1 us apart
-  and the driver launch itself is 4.1-10.8 us. The prepared path
-  (`run_prepared`) does not fuse elementwise runs even though the unprepared
-  segmented executor does (`segment.rs`), so each tiny elementwise op costs a
-  full command submission. See `docs/design/gpu-prepared-elementwise-fusion.md`.
+  `broadcast_multiply` (~362 per call, ~2.3 us each), while consecutive launch
+  submissions are a median 54.1 us apart and the driver launch itself is
+  4.1-10.8 us. A prepared-program census settled where they come from: the
+  compiled graph holds 549 instructions and all of them are FFI einsum extension
+  ops (host=0, other=0), so `segment_exec_program` has no fusion candidates. The
+  broadcast multiplies are emitted by tenferro-einsum's own execution
+  (`outer_product`), already as one fused command per node through
+  `BackendSession::execute_broadcast_multiply`. Prepared-path fusion was designed
+  on the opposite premise and is marked superseded in
+  `docs/design/gpu-prepared-elementwise-fusion.md`; the open question (can the
+  per-node broadcast-multiply be avoided at all) belongs to tenferro-einsum and
+  needs its own measurement.
 - Barrier attribution: `synchronize_raw_stream` runs 2944 times per run
   (~226 per call); its only non-explicit caller is `Workspace::drop`, reached
   from `CachedCutensorContraction` eviction. Raising the plan cache from 64 to
