@@ -80,10 +80,9 @@ fn matmul(lhs: &TracedTensor, rhs: &TracedTensor) -> TracedTensor {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn test_gpu_eager_backward_smoke() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let upload_backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).unwrap();
     let x_gpu = upload_tensor(
@@ -120,10 +119,9 @@ fn test_gpu_eager_backward_smoke() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn test_gpu_matmul_vjp() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let a_host = f64_tensor(
         vec![3, 4],

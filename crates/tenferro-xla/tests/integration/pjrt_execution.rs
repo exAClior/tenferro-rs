@@ -136,6 +136,10 @@ fn compile_nary_einsum(postprocess: bool) -> CompiledGraph {
 fn configured_executor() -> Option<(MutexGuard<'static, ()>, XlaExecutor)> {
     let guard = super::pjrt_env_lock();
     if std::env::var_os(TENFERRO_PJRT_PLUGIN_ENV).is_none_or(|path| path.is_empty()) {
+        assert!(
+            std::env::var_os("TENFERRO_REQUIRE_GPU").is_none(),
+            "required PJRT execution needs {TENFERRO_PJRT_PLUGIN_ENV}"
+        );
         eprintln!("skipping PJRT execution check; set {TENFERRO_PJRT_PLUGIN_ENV}");
         return None;
     }

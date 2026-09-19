@@ -19,10 +19,9 @@ mod cuda {
     }
 
     #[test]
+    #[ignore = "requires CUDA"]
     fn explicit_duplicate_has_new_identity_in_the_same_cuda_domain() {
-        if !gpu_available() {
-            return;
-        }
+        assert!(gpu_available(), "CUDA test requires an available device");
         let mut backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).unwrap();
         let host = Tensor::from_vec_col_major(vec![2], vec![1.0_f32, 2.0]).unwrap();
         let input = upload_tensor(backend.runtime(), &host).unwrap();
@@ -36,10 +35,9 @@ mod cuda {
     }
 
     #[test]
+    #[ignore = "requires CUDA"]
     fn cuda_runtime_rejects_a_foreign_allocation_domain_before_binding() {
-        if !gpu_available() {
-            return;
-        }
+        assert!(gpu_available(), "CUDA test requires an available device");
         let first = CudaBackend::new(CudaDeviceId::from_ordinal(0)).unwrap();
         let mut second = CudaBackend::new(CudaDeviceId::from_ordinal(0)).unwrap();
         let host = Tensor::from_vec_col_major(vec![1], vec![1.0_f32]).unwrap();

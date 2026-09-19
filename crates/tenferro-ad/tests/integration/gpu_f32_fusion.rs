@@ -15,10 +15,7 @@ fn f32_tensor(shape: Vec<usize>, data: Vec<f32>) -> Tensor {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_f32_gpu_fusion_chain_e2e() {
-    if !gpu_available() {
-        eprintln!("skipping test_f32_gpu_fusion_chain_e2e — no CUDA device found");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let a_host = f32_tensor(vec![3], vec![1.0, 2.0, 3.0]);
     let b_host = f32_tensor(vec![3], vec![0.5, -1.0, 2.0]);
     let c_host = f32_tensor(vec![3], vec![0.1, 0.1, 0.1]);

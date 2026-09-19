@@ -5,10 +5,8 @@
 //! `vdot_read`, `norm_squared_read`, and `axpby_read_into_accum` on
 //! [`CudaBackend`] bypass the generic `dot_general`/elementwise composition and
 //! call cuBLAS directly. These tests pin the numerics against the CPU backend,
-//! which keeps the composed reference semantics. They are no-ops on machines
-//! without an available CUDA device, and report the same `ok` when they skip as
-//! when they pass, so set `TENFERRO_REQUIRE_GPU=1` wherever a device is
-//! expected to turn that silent skip into a failure.
+//! which keeps the composed reference semantics. They are ignored by default;
+//! explicitly running them requires a CUDA device and fails if none is available.
 //!
 //! The conjugation convention in `vdot_read` is the reason this file exists: a
 //! `dotu`-for-`dotc` slip is invisible on real inputs and silently wrong on the
@@ -42,20 +40,7 @@ fn sample(len: usize, seed: f64) -> Tensor {
 }
 
 fn backends() -> Option<(CudaBackend, CpuBackend)> {
-    if !gpu_available() {
-        // Every case below returns without asserting anything when this is
-        // `None`, and the harness still prints `ok`. A green run therefore
-        // means nothing unless the reader independently knows a device was
-        // visible. On a machine that is supposed to have one, say so and let
-        // the absence fail loudly instead.
-        assert!(
-            std::env::var_os("TENFERRO_REQUIRE_GPU").is_none(),
-            "TENFERRO_REQUIRE_GPU is set but no CUDA device is available: this \
-             hardware parity gate would have reported success without executing \
-             a single cuBLAS call"
-        );
-        return None;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let cuda = CudaBackend::new(CudaDeviceId::from_ordinal(0)).unwrap();
     Some((cuda, CpuBackend::default()))
 }
@@ -87,6 +72,7 @@ fn assert_close_f64(actual: &Tensor, expected: &Tensor, what: &str) {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_blas1_covers_all_supported_dtypes() {
     let Some((mut cuda, mut cpu)) = backends() else {
         return;
@@ -185,6 +171,7 @@ fn cuda_blas1_covers_all_supported_dtypes() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_vdot_matches_cpu_and_conjugates_the_left_operand() {
     let Some((mut cuda, mut cpu)) = backends() else {
         return;
@@ -289,6 +276,7 @@ fn grid(seed: f64) -> Tensor {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_vdot_accepts_two_strided_operands() {
     let Some((mut cuda, mut cpu)) = backends() else {
         return;
@@ -334,6 +322,7 @@ fn cuda_vdot_accepts_two_strided_operands() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_axpby_accepts_a_non_contiguous_read() {
     let Some((mut cuda, mut cpu)) = backends() else {
         return;
@@ -378,6 +367,7 @@ fn cuda_axpby_accepts_a_non_contiguous_read() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_reductions_accept_compact_views_with_offsets() {
     let Some((mut cuda, mut cpu)) = backends() else {
         return;
@@ -442,6 +432,7 @@ fn cuda_reductions_accept_compact_views_with_offsets() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_reductions_accept_a_non_contiguous_read() {
     let Some((mut cuda, mut cpu)) = backends() else {
         return;
@@ -489,6 +480,7 @@ fn cuda_reductions_accept_a_non_contiguous_read() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_norm_squared_matches_cpu() {
     let Some((mut cuda, mut cpu)) = backends() else {
         return;
@@ -523,6 +515,7 @@ fn cuda_norm_squared_matches_cpu() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_axpby_matches_cpu_with_complex_coefficients() {
     let Some((mut cuda, mut cpu)) = backends() else {
         return;
@@ -560,6 +553,7 @@ fn cuda_axpby_matches_cpu_with_complex_coefficients() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_axpby_accepts_compact_views_with_offsets() {
     let Some((mut cuda, _)) = backends() else {
         return;
@@ -618,6 +612,7 @@ fn cuda_axpby_accepts_compact_views_with_offsets() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_blas1_cross_thread_operands_observe_vendor_writes() {
     let Some((cuda, _)) = backends() else {
         return;
@@ -654,6 +649,7 @@ fn cuda_blas1_cross_thread_operands_observe_vendor_writes() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_blas1_handles_empty_inputs() {
     let Some((mut cuda, _)) = backends() else {
         return;

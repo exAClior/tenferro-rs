@@ -35,10 +35,9 @@ fn cuda_runtime_identity_is_clone_stable_and_instance_scoped() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_backend_identity_tracks_the_exact_runtime_when_hardware_is_available() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let device = super::cuda_devices()
         .expect("CUDA device discovery should succeed")

@@ -719,9 +719,7 @@ fn test_cubecl_svd_gesvd_tall_f64_retains_direct_route() {
 #[test]
 #[ignore]
 fn test_cuda_compact_householder_qr_f64_reconstructs_input() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let input = tensor_f64(vec![4, 2], vec![1.0, 2.0, 3.0, 4.0, 2.0, -1.0, 0.5, 3.0]);
     let mut gpu = gpu_backend();
     let device_input = upload(&gpu, &input);
@@ -748,9 +746,7 @@ fn test_cuda_compact_householder_qr_f64_reconstructs_input() {
 #[test]
 #[ignore]
 fn test_cuda_compact_householder_qr_append_and_from_factors_f64() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let a = tensor_f64(vec![4, 2], vec![1.0, 2.0, 3.0, 4.0, 2.0, -1.0, 0.5, 3.0]);
     let b = tensor_f64(vec![4, 2], vec![0.5, 1.0, -2.0, 1.5, 2.0, 0.0, 1.0, -1.0]);
     let c = tensor_f64(vec![4, 1], vec![1.0, -0.5, 2.0, 0.25]);
@@ -827,9 +823,7 @@ fn test_cuda_compact_householder_qr_append_and_from_factors_f64() {
 #[test]
 #[ignore]
 fn test_cuda_compact_householder_qr_complex64_append_reconstructs() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let c = |re, im| Complex64::new(re, im);
     let a = tensor_c64(
         vec![3, 2],
@@ -889,9 +883,7 @@ fn test_cuda_compact_householder_qr_complex64_append_reconstructs() {
 #[test]
 #[ignore]
 fn test_cuda_compact_householder_qr_f32_and_c32_reconstruct() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let a = tensor_f32(vec![3, 2], vec![1.0, 2.0, 0.5, -1.0, 0.2, 2.0]);
     let b = tensor_f32(vec![3, 2], vec![0.5, 1.0, -2.0, 2.0, 0.0, 1.0]);
     let c = |re, im| Complex32::new(re, im);
@@ -986,9 +978,7 @@ fn test_cuda_compact_householder_qr_f32_and_c32_reconstruct() {
 #[test]
 #[ignore]
 fn test_cuda_compact_householder_qr_rank_deficient_zero_append_and_placement() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let input = tensor_f64(vec![3, 2], vec![1.0, 2.0, 3.0, 2.0, 4.0, 6.0]);
     let empty = tensor_f64(vec![3, 0], vec![]);
     let mut gpu = gpu_backend();
@@ -1031,9 +1021,7 @@ fn test_cuda_compact_householder_qr_rank_deficient_zero_append_and_placement() {
 #[test]
 #[ignore]
 fn test_cuda_qr_positive_diagonal_owned_and_read_paths_stay_on_device() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let c = |re, im| Complex64::new(re, im);
     let input = tensor_c64(
         vec![2, 2],
@@ -1118,9 +1106,7 @@ fn test_cuda_qr_positive_diagonal_owned_and_read_paths_stay_on_device() {
 #[test]
 #[ignore]
 fn test_cuda_compact_householder_qr_wide_empty_range_and_rank_deficient_import() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let wide = tensor_f64(vec![2, 4], vec![1.0, 2.0, -1.0, 0.5, 2.0, -0.5, 0.25, 1.5]);
     let rank_q = tensor_f64(vec![3, 2], vec![1.0, 2.0, 3.0, 2.0, 4.0, 6.0]);
     let rank_r = tensor_f64(vec![2, 2], vec![1.0, 0.0, -0.5, 2.0]);
@@ -1266,10 +1252,7 @@ fn test_cubecl_eigh_values_c64_matches_cpu() {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_gpu_eig_returns_unsupported_error() {
-    if !gpu_available() {
-        eprintln!("skipping test_gpu_eig_returns_unsupported_error — no CUDA device found");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = gpu_backend();
     let cpu = tensor_f64(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]);
     let gpu = upload(&backend, &cpu);
@@ -1281,10 +1264,7 @@ fn test_gpu_eig_returns_unsupported_error() {
 #[test]
 #[ignore = "requires an A100-class CUDA GPU"]
 fn test_cuda_rank_revealing_qr_f64_reconstructs_interspersed_rank_deficiency() {
-    if !gpu_available() {
-        eprintln!("skipping CUDA RRQR test: no CUDA device found");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let input = tensor_f64(
         vec![4, 5],
         vec![
@@ -1349,10 +1329,7 @@ fn test_cuda_rank_revealing_qr_f64_reconstructs_interspersed_rank_deficiency() {
 #[test]
 #[ignore = "requires an A100-class CUDA GPU"]
 fn test_cuda_rank_revealing_qr_complex_dtypes_reconstruct() {
-    if !gpu_available() {
-        eprintln!("skipping CUDA complex RRQR test: no CUDA device found");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut gpu = gpu_backend();
     let input_c32 = tensor_c32(
         vec![3, 3],
@@ -1458,10 +1435,7 @@ fn test_cuda_rank_revealing_qr_complex_dtypes_reconstruct() {
 #[test]
 #[ignore = "requires an A100-class CUDA GPU"]
 fn test_cuda_rank_revealing_qr_f32_batched_and_scaled_ranks() {
-    if !gpu_available() {
-        eprintln!("skipping CUDA batched RRQR test: no CUDA device found");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     // First 3x2 batch is full rank at large scale; second has duplicate columns.
     let input = tensor_f32(
         vec![3, 2, 2],

@@ -15,10 +15,9 @@ fn first_cuda_backend() -> Option<CudaBackend> {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn raw_session_exposes_stream_and_runtime_identity() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     with_cuda_exec(&mut backend, |session| {
         let identity = session.runtime_identity();
@@ -41,10 +40,9 @@ fn session_after_raw_still_runs(backend: &mut CudaBackend) -> bool {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn raw_session_allocates_output_and_bytes() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     with_cuda_exec(&mut backend, |session| {
         session
@@ -59,10 +57,9 @@ fn raw_session_allocates_output_and_bytes() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn raw_session_reports_capabilities() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     with_cuda_exec(&mut backend, |session| {
         assert!(session.supports(GpuExtensionCapability::CubeClKernel));
@@ -76,10 +73,9 @@ fn raw_session_reports_capabilities() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn raw_session_restores_context_on_error_path_observably() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     with_cuda_exec(&mut backend, |session| {
         let result: tenferro_tensor::Result<()> = session.with_raw("test.raw_error", |_raw| {
@@ -95,10 +91,9 @@ fn raw_session_restores_context_on_error_path_observably() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn raw_tensor_ref_carries_validated_span() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     let host = tensor_f32(vec![8], vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]);
     let gpu = upload(&backend, &host);
@@ -117,10 +112,9 @@ fn raw_tensor_ref_carries_validated_span() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn raw_retain_tensor_pins_the_allocation_across_a_drop() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     // Clone the runtime handle so the inner scope can upload without
     // re-borrowing `backend` while the mutable session borrow is live.
@@ -185,10 +179,9 @@ fn raw_retain_tensor_pins_the_allocation_across_a_drop() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn raw_retain_tensor_rejects_tensor_from_another_runtime() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     // Upload on a separate runtime instance: its allocation domain differs
     // from the session runtime's, so retention must be rejected.
@@ -215,10 +208,9 @@ fn raw_retain_tensor_rejects_tensor_from_another_runtime() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn raw_resource_guard_is_runtime_scoped_and_type_keyed() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     with_cuda_exec(&mut backend, |session| {
         session

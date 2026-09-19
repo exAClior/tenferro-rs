@@ -163,10 +163,10 @@ fn test_cubecl_sum_squares_does_not_contract_multiply_and_add() {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_cubecl_float_max_min_reductions_propagate_nan_for_unit_and_plane() {
-    if !crate::cubecl::gpu_available() {
-        eprintln!("skipping reduction NaN propagation parity test - no CUDA device found");
-        return;
-    }
+    assert!(
+        crate::cubecl::gpu_available(),
+        "CUDA test requires an available device"
+    );
 
     fn assert_all_nan(tensor: &crate::Tensor) {
         match tensor.dtype() {
