@@ -4,9 +4,12 @@ use tenferro_cpu::linalg_interop::{BufferPool, PoolScalar};
 use tenferro_tensor::{TypedTensor, TypedTensorView, TypedTensorViewMut};
 
 use super::helpers::{
-    batched_binary_result, check_lapack_info, dim_i32, has_zero_dim, matrix_core_and_batch_result,
+    check_lapack_info, checked_product, dim_i32, has_zero_dim, matrix_core_and_batch_result,
     square_core_and_batch_result, tensor_from_vec_with_template,
 };
+
+#[cfg(test)]
+mod tests;
 
 pub(crate) trait LapackSolve: Clone + Copy + PoolScalar {
     fn getrf(m: i32, n: i32, data: &mut [Self], lda: i32, ipiv: &mut [i32], info: &mut i32);
@@ -156,29 +159,72 @@ pub(crate) fn solve<T: LapackSolve + 'static>(
     b: &TypedTensor<T>,
     transpose_a: bool,
 ) -> tenferro_tensor::Result<TypedTensor<T>> {
+    let (n, a_batch_shape) = square_core_and_batch_result(a, "solve")?;
+    let (b_rows, b_cols, b_batch_shape) = matrix_core_and_batch_result(b, "solve")?;
+    if b_rows != n {
+        return Err(tenferro_tensor::Error::shape_mismatch(
+            "solve",
+            vec![n],
+            vec![b_rows],
+        ));
+    }
+    if a_batch_shape != b_batch_shape {
+        return Err(tenferro_tensor::Error::shape_mismatch(
+            "solve",
+            a_batch_shape.to_vec(),
+            b_batch_shape.to_vec(),
+        ));
+    }
     if has_zero_dim(a.shape()) || has_zero_dim(b.shape()) {
-        let (n, a_batch_shape) = square_core_and_batch_result(a, "solve")?;
-        let (b_rows, _, b_batch_shape) = matrix_core_and_batch_result(b, "solve")?;
-        if b_rows != n {
-            return Err(tenferro_tensor::Error::shape_mismatch(
-                "solve",
-                vec![n],
-                vec![b_rows],
-            ));
-        }
-        if a_batch_shape != b_batch_shape {
-            return Err(tenferro_tensor::Error::shape_mismatch(
-                "solve",
-                a_batch_shape.to_vec(),
-                b_batch_shape.to_vec(),
-            ));
-        }
         return tensor_from_vec_with_template(b.shape().to_vec(), Vec::new(), b);
     }
+    if a_batch_shape.is_empty() {
+        return solve_2d(buffers, a, b, transpose_a);
+    }
 
-    batched_binary_result("solve", buffers, a, b, |buffers, a, b| {
-        solve_2d(buffers, a, b, transpose_a)
-    })
+    let matrix_len = checked_product("solve", "matrix", &[n, n])?;
+    let rhs_len = checked_product("solve", "rhs", &[n, b_cols])?;
+    let n_i32 = dim_i32(n, "solve")?;
+    let nrhs = dim_i32(b_cols, "solve")?;
+    let mut lu = buffers.acquire_with_capacity::<T>(matrix_len);
+    let mut ipiv = vec![0_i32; n];
+    let mut output = buffers.acquire_with_capacity::<T>(b.n_elements());
+    output.extend_from_slice(b.host_data()?);
+    // INVARIANT: owned tensors are compact column-major; validated matching batch
+    // shapes give equally many nonempty matrix/RHS chunks. LAPACK overwrites only
+    // private LU scratch and the final output, preserving both caller inputs.
+    // LAPACK owns provider threading; reuse its serial batch loop's scratch rather
+    // than adding an independent Rayon pool around provider calls.
+    for (matrix, rhs) in a
+        .host_data()?
+        .chunks_exact(matrix_len)
+        .zip(output.chunks_exact_mut(rhs_len))
+    {
+        lu.clear();
+        lu.extend_from_slice(matrix);
+        let mut info = 0;
+        T::getrf(n_i32, n_i32, &mut lu, n_i32, &mut ipiv, &mut info);
+        check_lapack_info("solve", "getrf", info.min(0))?;
+        if info > 0 {
+            return Err(crate::error::into_tensor_error(
+                "solve",
+                crate::Error::Singular { op: "solve" },
+            ));
+        }
+        T::getrs(GetrsArgs {
+            trans: if transpose_a { b'T' } else { b'N' },
+            n: n_i32,
+            nrhs,
+            a: &lu,
+            lda: n_i32,
+            ipiv: &ipiv,
+            b: rhs,
+            ldb: n_i32,
+            info: &mut info,
+        });
+        check_lapack_info("solve", "getrs", info)?;
+    }
+    tensor_from_vec_with_template(b.shape().to_vec(), output, b)
 }
 
 /// Solve a single matrix system directly into a positive column-major output
@@ -237,15 +283,19 @@ fn solve_in_place<T: LapackSolve + 'static>(
         tenferro_tensor::Error::invalid_argument(op, "a", "matrix size overflows usize")
     })?;
     let mut lu = buffers.acquire_with_capacity::<T>(lu_len);
-    for col in 0..n {
-        for row in 0..n {
-            let value = a.get(&[row, col]).ok_or_else(|| {
-                tenferro_tensor::Error::runtime_state(
-                    op,
-                    "CPU LAPACK solve input view is not host-addressable",
-                )
-            })?;
-            lu.push(*value);
+    if a.is_col_major_contiguous()? {
+        lu.extend_from_slice(a.as_slice()?);
+    } else {
+        for col in 0..n {
+            for row in 0..n {
+                let value = a.get(&[row, col]).ok_or_else(|| {
+                    tenferro_tensor::Error::runtime_state(
+                        op,
+                        "CPU LAPACK solve input view is not host-addressable",
+                    )
+                })?;
+                lu.push(*value);
+            }
         }
     }
 
