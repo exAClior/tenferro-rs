@@ -4,9 +4,9 @@ use tenferro_cpu::linalg_interop::{BufferPool, PoolScalar};
 use tenferro_tensor::TypedTensor;
 
 use super::helpers::{
-    batched_multi, check_lapack_info, checked_product, dim_i32, has_zero_dim,
-    leading_upper_triangle_from_lapack, matrix_dims, matrix_with_batch_shape,
-    split_core_and_batch_result, tensor_from_vec_with_template, work_len,
+    check_lapack_info, checked_product, dim_i32, has_zero_dim, leading_upper_triangle_from_lapack,
+    matrix_dims, matrix_with_batch_shape, split_core_and_batch_result,
+    tensor_from_vec_with_template, work_len,
 };
 
 type CompactQrResult<T> = (TypedTensor<T>, TypedTensor<T>);
@@ -40,10 +40,25 @@ pub(crate) trait LapackQr:
     fn r_phase(diagonal: Self) -> Self;
     fn q_phase(diagonal: Self) -> Self;
 
-    fn qr_2d(
-        buffers: &mut BufferPool,
-        input: &TypedTensor<Self>,
-    ) -> tenferro_tensor::Result<Vec<TypedTensor<Self>>>;
+    fn factor_work(
+        m: i32,
+        n: i32,
+        data: &mut [Self],
+        tau: &mut [Self],
+        work: &mut [Self],
+        lwork: i32,
+    ) -> tenferro_tensor::Result<()>;
+
+    fn generate_work(
+        m: i32,
+        k: i32,
+        data: &mut [Self],
+        tau: &[Self],
+        work: &mut [Self],
+        lwork: i32,
+    ) -> tenferro_tensor::Result<()>;
+
+    fn qr_work_len(value: Self) -> tenferro_tensor::Result<i32>;
 }
 
 fn validate_state<T>(
@@ -509,71 +524,42 @@ macro_rules! impl_real_qr {
                 Self::r_phase(diagonal)
             }
 
-            fn qr_2d(
-                _buffers: &mut BufferPool,
-                input: &TypedTensor<Self>,
-            ) -> tenferro_tensor::Result<Vec<TypedTensor<Self>>> {
-                let (m, n) = matrix_dims(input, "qr")?;
-                let k = m.min(n);
-                let m_i32 = dim_i32(m, "qr")?;
-                let n_i32 = dim_i32(n, "qr")?;
-                let k_i32 = dim_i32(k, "qr")?;
-
-                let mut qr = input.host_data()?.to_vec();
-                let mut tau = vec![0.0 as $scalar; k];
-                let mut query = vec![0.0 as $scalar; 1];
+            fn factor_work(
+                m: i32,
+                n: i32,
+                data: &mut [Self],
+                tau: &mut [Self],
+                work: &mut [Self],
+                lwork: i32,
+            ) -> tenferro_tensor::Result<()> {
                 let mut info = 0;
-                // SAFETY: `qr` is a mutable column-major `m x n` buffer,
-                // `tau` has `k` entries, and `lwork = -1` makes `query` the only workspace output.
+                // SAFETY: qr validates m*n storage, min(m,n) tau entries and
+                // provides either the query slot or the queried workspace length.
                 unsafe {
-                    $geqrf(
-                        m_i32, n_i32, &mut qr, m_i32, &mut tau, &mut query, -1, &mut info,
-                    );
+                    $geqrf(m, n, data, m, tau, work, lwork, &mut info);
                 }
-                check_lapack_info("qr", concat!($geqrf_name, "(work query)"), info)?;
-                let lwork = work_len(query[0] as f64, "qr", $geqrf_name)?;
-                let mut work = vec![0.0 as $scalar; lwork as usize];
-                // SAFETY: dimensions and `lwork` come from validated inputs
-                // and the LAPACK workspace query; `qr`, `tau`, `work`, and `info` are live.
-                unsafe {
-                    $geqrf(
-                        m_i32, n_i32, &mut qr, m_i32, &mut tau, &mut work, lwork, &mut info,
-                    );
-                }
-                check_lapack_info("qr", $geqrf_name, info)?;
+                check_lapack_info("qr", $geqrf_name, info)
+            }
 
-                let r = leading_upper_triangle_from_lapack(&qr, m, k, n)?;
-                let q_len = checked_product("qr", "Q matrix", &[m, k])?;
-                let mut q = Vec::with_capacity(q_len);
-                for col in 0..k {
-                    let start = col * m;
-                    q.extend_from_slice(&qr[start..start + m]);
-                }
-
-                let mut query = vec![0.0 as $scalar; 1];
-                // SAFETY: `q` stores the first `k` reflectors in an `m x k`
-                // column-major buffer, `tau` has `k` entries, and query workspace is length 1.
+            fn generate_work(
+                m: i32,
+                k: i32,
+                data: &mut [Self],
+                tau: &[Self],
+                work: &mut [Self],
+                lwork: i32,
+            ) -> tenferro_tensor::Result<()> {
+                let mut info = 0;
+                // SAFETY: qr supplies m*k reflector entries, k tau entries,
+                // k<=m, and either one query slot or sufficient queried workspace.
                 unsafe {
-                    $orgqr(
-                        m_i32, k_i32, k_i32, &mut q, m_i32, &tau, &mut query, -1, &mut info,
-                    );
+                    $orgqr(m, k, k, data, m, tau, work, lwork, &mut info);
                 }
-                check_lapack_info("qr", concat!($orgqr_name, "(work query)"), info)?;
-                let lwork = work_len(query[0] as f64, "qr", $orgqr_name)?;
-                let mut work = vec![0.0 as $scalar; lwork as usize];
-                // SAFETY: `q`, `tau`, and `work` satisfy the dimensions and
-                // workspace length returned by the preceding LAPACK query.
-                unsafe {
-                    $orgqr(
-                        m_i32, k_i32, k_i32, &mut q, m_i32, &tau, &mut work, lwork, &mut info,
-                    );
-                }
-                check_lapack_info("qr", $orgqr_name, info)?;
+                check_lapack_info("qr", $orgqr_name, info)
+            }
 
-                Ok(vec![
-                    tensor_from_vec_with_template(vec![m, k], q, input)?,
-                    tensor_from_vec_with_template(vec![k, n], r, input)?,
-                ])
+            fn qr_work_len(value: Self) -> tenferro_tensor::Result<i32> {
+                work_len(value as f64, "qr", "QR workspace")
             }
         }
     };
@@ -766,71 +752,42 @@ macro_rules! impl_complex_qr {
                 }
             }
 
-            fn qr_2d(
-                _buffers: &mut BufferPool,
-                input: &TypedTensor<Self>,
-            ) -> tenferro_tensor::Result<Vec<TypedTensor<Self>>> {
-                let (m, n) = matrix_dims(input, "qr")?;
-                let k = m.min(n);
-                let m_i32 = dim_i32(m, "qr")?;
-                let n_i32 = dim_i32(n, "qr")?;
-                let k_i32 = dim_i32(k, "qr")?;
-
-                let mut qr = input.host_data()?.to_vec();
-                let mut tau = vec![<$complex>::new(0.0, 0.0); k];
-                let mut query = vec![<$complex>::new(0.0, 0.0); 1];
+            fn factor_work(
+                m: i32,
+                n: i32,
+                data: &mut [Self],
+                tau: &mut [Self],
+                work: &mut [Self],
+                lwork: i32,
+            ) -> tenferro_tensor::Result<()> {
                 let mut info = 0;
-                // SAFETY: `qr` is a mutable column-major `m x n` buffer,
-                // `tau` has `k` entries, and `lwork = -1` makes `query` the only workspace output.
+                // SAFETY: qr validates m*n storage, min(m,n) tau entries and
+                // provides either the query slot or the queried workspace length.
                 unsafe {
-                    $geqrf(
-                        m_i32, n_i32, &mut qr, m_i32, &mut tau, &mut query, -1, &mut info,
-                    );
+                    $geqrf(m, n, data, m, tau, work, lwork, &mut info);
                 }
-                check_lapack_info("qr", concat!($geqrf_name, "(work query)"), info)?;
-                let lwork = work_len(query[0].re as f64, "qr", $geqrf_name)?;
-                let mut work = vec![<$complex>::new(0.0, 0.0); lwork as usize];
-                // SAFETY: dimensions and `lwork` come from validated inputs
-                // and the LAPACK workspace query; `qr`, `tau`, `work`, and `info` are live.
-                unsafe {
-                    $geqrf(
-                        m_i32, n_i32, &mut qr, m_i32, &mut tau, &mut work, lwork, &mut info,
-                    );
-                }
-                check_lapack_info("qr", $geqrf_name, info)?;
+                check_lapack_info("qr", $geqrf_name, info)
+            }
 
-                let r = leading_upper_triangle_from_lapack(&qr, m, k, n)?;
-                let q_len = checked_product("qr", "Q matrix", &[m, k])?;
-                let mut q = Vec::with_capacity(q_len);
-                for col in 0..k {
-                    let start = col * m;
-                    q.extend_from_slice(&qr[start..start + m]);
-                }
-
-                let mut query = vec![<$complex>::new(0.0, 0.0); 1];
-                // SAFETY: `q` stores the first `k` reflectors in an `m x k`
-                // column-major buffer, `tau` has `k` entries, and query workspace is length 1.
+            fn generate_work(
+                m: i32,
+                k: i32,
+                data: &mut [Self],
+                tau: &[Self],
+                work: &mut [Self],
+                lwork: i32,
+            ) -> tenferro_tensor::Result<()> {
+                let mut info = 0;
+                // SAFETY: qr supplies m*k reflector entries, k tau entries,
+                // k<=m, and either one query slot or sufficient queried workspace.
                 unsafe {
-                    $ungqr(
-                        m_i32, k_i32, k_i32, &mut q, m_i32, &tau, &mut query, -1, &mut info,
-                    );
+                    $ungqr(m, k, k, data, m, tau, work, lwork, &mut info);
                 }
-                check_lapack_info("qr", concat!($ungqr_name, "(work query)"), info)?;
-                let lwork = work_len(query[0].re as f64, "qr", $ungqr_name)?;
-                let mut work = vec![<$complex>::new(0.0, 0.0); lwork as usize];
-                // SAFETY: `q`, `tau`, and `work` satisfy the dimensions and
-                // workspace length returned by the preceding LAPACK query.
-                unsafe {
-                    $ungqr(
-                        m_i32, k_i32, k_i32, &mut q, m_i32, &tau, &mut work, lwork, &mut info,
-                    );
-                }
-                check_lapack_info("qr", $ungqr_name, info)?;
+                check_lapack_info("qr", $ungqr_name, info)
+            }
 
-                Ok(vec![
-                    tensor_from_vec_with_template(vec![m, k], q, input)?,
-                    tensor_from_vec_with_template(vec![k, n], r, input)?,
-                ])
+            fn qr_work_len(value: Self) -> tenferro_tensor::Result<i32> {
+                work_len(value.re as f64, "qr", "QR workspace")
             }
         }
     };
@@ -1173,13 +1130,6 @@ fn rank_revealing_qr_2d<T: LapackRankRevealingQr>(
     })
 }
 
-fn qr_2d<T: LapackQr>(
-    buffers: &mut BufferPool,
-    input: &TypedTensor<T>,
-) -> tenferro_tensor::Result<Vec<TypedTensor<T>>> {
-    T::qr_2d(buffers, input)
-}
-
 pub(crate) fn qr<T: LapackQr>(
     buffers: &mut BufferPool,
     input: &TypedTensor<T>,
@@ -1202,7 +1152,41 @@ pub(crate) fn qr<T: LapackQr>(
             )?,
         ]);
     }
-    batched_multi("qr", buffers, input, qr_2d)
+    let (matrix_shape, batch_shape) = split_core_and_batch_result(input, 2, "qr")?;
+    let (m, n) = (matrix_shape[0], matrix_shape[1]);
+    let k = m.min(n);
+    let (mi, ni, ki) = (dim_i32(m, "qr")?, dim_i32(n, "qr")?, dim_i32(k, "qr")?);
+    let matrix_len = checked_product("qr", "matrix", &[m, n])?;
+    let q_len = checked_product("qr", "Q matrix", &[m, k])?;
+    let q_shape = matrix_with_batch_shape(m, k, batch_shape);
+    let r_shape = matrix_with_batch_shape(k, n, batch_shape);
+    let mut q = buffers.acquire_with_capacity::<T>(checked_product("qr", "Q", &q_shape)?);
+    let mut r = buffers.acquire_with_capacity::<T>(checked_product("qr", "R", &r_shape)?);
+    let data = input.host_data()?;
+    let mut packed = buffers.acquire_with_capacity::<T>(matrix_len);
+    packed.extend_from_slice(&data[..matrix_len]);
+    let mut tau = vec![T::default(); k];
+    let mut query = [T::default()];
+    T::factor_work(mi, ni, &mut packed, &mut tau, &mut query, -1)?;
+    let factor_len = T::qr_work_len(query[0])?;
+    T::generate_work(mi, ki, &mut packed[..q_len], &tau, &mut query, -1)?;
+    let lwork = factor_len.max(T::qr_work_len(query[0])?);
+    let mut work = vec![T::default(); lwork as usize];
+    // INVARIANT: validated nonempty compact input has complete m*n chunks;
+    // reduced Q occupies the first m*k entries, k<=n. All batches share the
+    // queried dimensions and scratch, but never alias the original input.
+    // LAPACK owns threading; the batch loop only prepares provider calls.
+    for matrix in data.chunks_exact(matrix_len) {
+        packed.copy_from_slice(matrix);
+        T::factor_work(mi, ni, &mut packed, &mut tau, &mut work, lwork)?;
+        r.extend_from_slice(&leading_upper_triangle_from_lapack(&packed, m, k, n)?);
+        T::generate_work(mi, ki, &mut packed[..q_len], &tau, &mut work, lwork)?;
+        q.extend_from_slice(&packed[..q_len]);
+    }
+    Ok(vec![
+        tensor_from_vec_with_template(q_shape, q, input)?,
+        tensor_from_vec_with_template(r_shape, r, input)?,
+    ])
 }
 
 pub(crate) fn rank_revealing_qr<T: LapackRankRevealingQr>(
