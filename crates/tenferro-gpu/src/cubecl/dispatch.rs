@@ -607,6 +607,15 @@ pub(crate) fn typed_tensor_array_arg<T: CubeElement + TensorScalar + Clone>(
     Ok(prepared.into_array_arg(tensor.n_elements()))
 }
 
+pub(crate) fn typed_tensor_mut_array_arg<T: CubeElement + TensorScalar + Clone>(
+    tensor: &mut TypedTensor<T, impl TensorRank>,
+    op: &'static str,
+) -> crate::Result<ArrayArg<CubeclCudaRuntime>> {
+    let len = tensor.n_elements();
+    let prepared = downcast_prepared(tensor.prepare_device_write(op)?, op)?;
+    Ok(prepared.into_array_arg(len))
+}
+
 pub(crate) fn typed_view_array_arg<T: CubeElement + TensorScalar + Clone>(
     view: &TypedTensorView<'_, T, impl TensorRank>,
     op: &'static str,
@@ -844,6 +853,109 @@ where
     // with `ABSOLUTE_POS < out.len()`.
     launch(
         client,
+        cube_count_for_len(len)?,
+        cube_dim_1d(),
+        output_arg,
+        lhs_arg,
+        rhs_arg,
+    );
+    Ok(output)
+}
+
+pub(crate) fn launch_unary_view<TIn, TOut>(
+    rt: &CudaRuntime,
+    input: &TypedTensorView<'_, TIn>,
+    out_shape: &[usize],
+    op: &'static str,
+    launch: impl FnOnce(
+        &ComputeClient<CubeclCudaRuntime>,
+        CubeCount,
+        CubeDim,
+        ArrayArg<CubeclCudaRuntime>,
+        ArrayArg<CubeclCudaRuntime>,
+    ),
+) -> crate::Result<TypedTensor<TOut>>
+where
+    TIn: CubeElement + TensorScalar + Clone,
+    TOut: CubeElement + TensorScalar + Clone,
+{
+    ensure_same_shape(op, input.shape(), out_shape)?;
+    if input.offset() != 0 || !input.is_col_major_contiguous()? {
+        return Err(crate::Error::unsupported(
+            op,
+            "native elementwise read requires a zero-offset compact view",
+        ));
+    }
+    let output = alloc_output::<TOut>(rt, out_shape)?;
+    let len = output.n_elements();
+    ensure_view_resident_on_runtime(rt, input, op)?;
+    // INVARIANT: the zero-offset compact check above makes the raw array's
+    // logical order identical to the view's element order.
+    let input_arg = typed_view_array_arg(input, op)?;
+    if len == 0 {
+        return Ok(output);
+    }
+    let output_arg = typed_tensor_array_arg(&output, op)?;
+    launch(
+        rt.client(),
+        cube_count_for_len(len)?,
+        cube_dim_1d(),
+        output_arg,
+        input_arg,
+    );
+    Ok(output)
+}
+
+pub(crate) fn launch_binary_views<TLhs, TRhs, TOut>(
+    rt: &CudaRuntime,
+    lhs: &TypedTensorView<'_, TLhs>,
+    rhs: &TypedTensorView<'_, TRhs>,
+    out_shape: &[usize],
+    op: &'static str,
+    launch: impl FnOnce(
+        &ComputeClient<CubeclCudaRuntime>,
+        CubeCount,
+        CubeDim,
+        ArrayArg<CubeclCudaRuntime>,
+        ArrayArg<CubeclCudaRuntime>,
+        ArrayArg<CubeclCudaRuntime>,
+    ),
+) -> crate::Result<TypedTensor<TOut>>
+where
+    TLhs: CubeElement + TensorScalar + Clone,
+    TRhs: CubeElement + TensorScalar + Clone,
+    TOut: CubeElement + TensorScalar + Clone,
+{
+    ensure_same_shape(op, lhs.shape(), out_shape)?;
+    ensure_same_shape(op, rhs.shape(), out_shape)?;
+    for view in [lhs.offset(), rhs.offset()] {
+        if view != 0 {
+            return Err(crate::Error::unsupported(
+                op,
+                "native elementwise read requires a zero-offset compact view",
+            ));
+        }
+    }
+    if !lhs.is_col_major_contiguous()? || !rhs.is_col_major_contiguous()? {
+        return Err(crate::Error::unsupported(
+            op,
+            "native elementwise read requires a zero-offset compact view",
+        ));
+    }
+    let output = alloc_output::<TOut>(rt, out_shape)?;
+    let len = output.n_elements();
+    ensure_view_resident_on_runtime(rt, lhs, op)?;
+    ensure_view_resident_on_runtime(rt, rhs, op)?;
+    // INVARIANT: the zero-offset compact checks above make both raw arrays'
+    // logical order identical to their view element order.
+    let lhs_arg = typed_view_array_arg(lhs, op)?;
+    let rhs_arg = typed_view_array_arg(rhs, op)?;
+    if len == 0 {
+        return Ok(output);
+    }
+    let output_arg = typed_tensor_array_arg(&output, op)?;
+    launch(
+        rt.client(),
         cube_count_for_len(len)?,
         cube_dim_1d(),
         output_arg,

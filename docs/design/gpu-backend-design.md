@@ -394,6 +394,17 @@ tensors before transfer. Device tensors themselves remain column-major. This
 keeps existing CubeCL kernels correct, including raw linear buffer kernels that
 do not consume tensor stride metadata.
 
+Supported CUDA elementwise read paths also consume zero-offset compact
+column-major borrowed views directly with these linear kernels: same-shape
+add/subtract/multiply, float/complex divide, negate, and real analytic unary
+operations. Offset or noncompact views retain explicit same-device
+canonicalization; their logical layout must not be discarded by passing a raw
+allocation as if it were compact. Same-shape owned add/subtract/multiply/negate
+`_read_into` paths write the validated destination directly, retaining overlap,
+runtime-residency and exclusive-write checks. Other layouts and operations keep
+their existing allocating fallback. Nonempty owned reductions read the original
+input for the first axis; empty-axis reductions still return independent storage.
+
 CubeCL kernels that perform logical tensor indexing must receive tensor
 metadata through CubeCL tensor metadata. There is no hidden row-major fallback
 and no implicit global shape state.

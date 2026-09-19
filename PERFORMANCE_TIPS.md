@@ -112,12 +112,31 @@ Audit hints:
 - When an output contiguity contract, backend limitation, or external ABI
   boundary requires a copy or materialization, make that boundary explicit in
   the implementation and cover it with tests.
+- Audit owned, compact borrowed, offset/strided borrowed, and preallocated-output
+  paths together on CPU and GPU. `TensorRead::View` is not a contiguity test:
+  do not pack an already supported layout merely to call an owned-input API.
+  Route owned inputs through borrowed execution where possible; allocating and
+  `_into` operations should share the output-writing kernel, not allocate a
+  temporary result and copy it into the caller's destination.
+- Trace copies across eager/runtime adapters, extension dispatch, and provider
+  preparation. Reuse an existing read hook instead of packing before it, and
+  avoid packing followed by another full copy into vendor work storage. Keep
+  required independent ownership, destructive-input protection, alias checks,
+  and asynchronous storage retention; do not replace these with unsafe aliases.
+- Regression checks for removed materializations must cover data movement as
+  well as numerical results: use existing allocation/copy counters, a dispatch
+  spy, or a focused device trace. Include compact views and a noncompact/offset
+  case, input preservation, and `_into` where supported. CPU-only numerical
+  tests do not establish CUDA copy behavior.
 
 Audit hints:
 
 - Detect: `to_vec`, `collect::<Vec<_>>`, `to_dense`, `clone` of tensor data,
   or a fresh output allocation on a production path whose size is a product
-  of tensor dimensions; `to_host`/`to_device` inside library operations.
+  of tensor dimensions; `to_host`/`to_device` inside library operations;
+  `as_tensor()`/`TensorRead::View` branches that unconditionally materialize;
+  read-into helpers that call allocating operations; repeated canonicalization
+  and work-buffer copies across adjacent layers.
 - Fix: strided views, borrowed slices, metadata-only layout changes, or
   backend-native buffers; make any required copy explicit and tested.
 

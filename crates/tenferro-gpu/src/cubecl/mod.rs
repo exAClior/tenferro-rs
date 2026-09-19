@@ -160,7 +160,8 @@ use dispatch::{
     launch_nullary_into, launch_select_bool, launch_ternary, launch_unary,
     launch_unary_bool_tensor, launch_unary_tensor, launch_unary_tensor_into,
     ternary_dtype_mismatch, typed_tensor_array_arg, typed_tensor_array_arg_as,
-    typed_tensor_binding, typed_view_array_arg, typed_view_binding, typed_view_mut_array_arg,
+    typed_tensor_binding, typed_tensor_mut_array_arg, typed_view_array_arg, typed_view_binding,
+    typed_view_mut_array_arg,
 };
 use error::{unsupported_dtype, unsupported_operation};
 
@@ -2152,8 +2153,13 @@ impl CudaBackend {
         let mut sorted_axes = axes.to_vec();
         sorted_axes.sort_unstable();
 
-        let mut current = self.to_contiguous_view_typed(&input.as_view(), op)?;
-        for axis in sorted_axes {
+        // The first reduction reads the caller-owned input directly. Subsequent
+        // axes consume the fresh keepdims result from the preceding launch.
+        let (first_axis, remaining_axes) = sorted_axes
+            .split_first()
+            .ok_or_else(|| crate::Error::invalid_argument(op, "axes", "axes must not be empty"))?;
+        let mut current = launch_axis(self, input, *first_axis)?;
+        for &axis in remaining_axes {
             current = launch_axis(self, &current, axis)?;
         }
 
@@ -3796,12 +3802,25 @@ where
     Ok(output)
 }
 
+#[derive(Clone, Copy)]
+enum UnaryReadOp {
+    Neg,
+    Exp,
+    Log,
+    Sin,
+    Cos,
+    Tanh,
+    Sqrt,
+    Rsqrt,
+    Expm1,
+    Log1p,
+}
+
 /// Operand accepted by a CUDA `_read` entry point.
 ///
 /// The traced runtime prepares operands as `TensorRead`, which is either an
-/// owned tensor or a borrowed view over another tensor's storage. CUDA kernels
-/// consume owned compact tensors, so a borrowed view is materialized once
-/// through this backend's own `to_contiguous_read`.
+/// owned tensor or a borrowed view over another tensor's storage. Operations
+/// without a native view kernel retain the explicit materialization fallback.
 enum CudaReadInput<'a> {
     /// The caller owns the tensor for the duration of the call.
     Borrowed(&'a Tensor),
@@ -3818,12 +3837,374 @@ impl CudaReadInput<'_> {
     }
 }
 
+fn launch_elementwise_binary_into<T>(
+    backend: &CudaBackend,
+    lhs: &Tensor,
+    rhs: &Tensor,
+    out: &mut Tensor,
+    op: &'static str,
+    launch: impl FnOnce(
+        &ComputeClient<CubeclCudaRuntime>,
+        CubeCount,
+        CubeDim,
+        ArrayArg<CubeclCudaRuntime>,
+        ArrayArg<CubeclCudaRuntime>,
+        ArrayArg<CubeclCudaRuntime>,
+    ),
+) -> crate::Result<()>
+where
+    T: CubeElement + TensorScalar + Clone,
+{
+    let lhs = lhs.as_typed::<T>().ok_or_else(|| {
+        crate::Error::unsupported(op, "the GPU dispatch requires a preset scalar")
+    })?;
+    let rhs = rhs.as_typed::<T>().ok_or_else(|| {
+        crate::Error::unsupported(op, "the GPU dispatch requires a preset scalar")
+    })?;
+    let out = out.as_typed_mut::<T>().ok_or_else(|| {
+        crate::Error::unsupported(op, "the GPU dispatch requires a preset scalar")
+    })?;
+    ensure_resident_on_runtime(backend.runtime(), lhs, op)?;
+    ensure_resident_on_runtime(backend.runtime(), rhs, op)?;
+    let lhs_arg = typed_tensor_array_arg(lhs, op)?;
+    let rhs_arg = typed_tensor_array_arg(rhs, op)?;
+    let out_len = out.n_elements();
+    ensure_resident_on_runtime(backend.runtime(), out, op)?;
+    let out_arg = typed_tensor_mut_array_arg(out, op)?;
+    if out_len == 0 {
+        return Ok(());
+    }
+    launch(
+        backend.runtime().client(),
+        cube_count_for_len(out_len)?,
+        cube_dim_1d(),
+        out_arg,
+        lhs_arg,
+        rhs_arg,
+    );
+    Ok(())
+}
+
+fn launch_elementwise_unary_into<T>(
+    backend: &CudaBackend,
+    input: &Tensor,
+    out: &mut Tensor,
+    op: &'static str,
+    launch: impl FnOnce(
+        &ComputeClient<CubeclCudaRuntime>,
+        CubeCount,
+        CubeDim,
+        ArrayArg<CubeclCudaRuntime>,
+        ArrayArg<CubeclCudaRuntime>,
+    ),
+) -> crate::Result<()>
+where
+    T: CubeElement + TensorScalar + Clone,
+{
+    let input = input.as_typed::<T>().ok_or_else(|| {
+        crate::Error::unsupported(op, "the GPU dispatch requires a preset scalar")
+    })?;
+    let out = out.as_typed_mut::<T>().ok_or_else(|| {
+        crate::Error::unsupported(op, "the GPU dispatch requires a preset scalar")
+    })?;
+    ensure_resident_on_runtime(backend.runtime(), input, op)?;
+    let input_arg = typed_tensor_array_arg(input, op)?;
+    let out_len = out.n_elements();
+    ensure_resident_on_runtime(backend.runtime(), out, op)?;
+    let out_arg = typed_tensor_mut_array_arg(out, op)?;
+    if out_len == 0 {
+        return Ok(());
+    }
+    launch(
+        backend.runtime().client(),
+        cube_count_for_len(out_len)?,
+        cube_dim_1d(),
+        out_arg,
+        input_arg,
+    );
+    Ok(())
+}
+
 impl CudaBackend {
-    /// Accept a read operand the runtime prepared, materializing a view.
-    ///
-    /// Keeping the materialized tensor inside [`CudaReadInput`] bounds the
-    /// view's device storage to the call that needs it; the traced runtime
-    /// releases it together with the operation result.
+    /// Run the common same-shape elementwise cases directly into the caller's
+    /// owned CUDA output. Views and broadcast/scalar cases retain the existing
+    /// allocating fallback so their layout and ownership contracts are unchanged.
+    fn elementwise_read_into_native(
+        &mut self,
+        op: ElementwiseReadOp,
+        inputs: &[TensorRead<'_>],
+        out: &mut TensorWrite<'_>,
+    ) -> Option<crate::Result<()>> {
+        if inputs.len() != op.arity() || inputs.iter().any(|input| input.as_tensor().is_none()) {
+            return None;
+        }
+        let TensorWrite::Tensor(output) = out else {
+            return None;
+        };
+        if inputs
+            .iter()
+            .any(|input| input.shape() != output.shape() || input.dtype() != output.dtype())
+        {
+            return None;
+        }
+        let first = inputs.first().and_then(|input| input.as_tensor())?;
+        let second = inputs.get(1).and_then(|input| input.as_tensor());
+        let dtype = output.dtype();
+
+        macro_rules! binary {
+            ($ty:ty, $kernel:ident) => {
+                launch_elementwise_binary_into::<$ty>(
+                    self,
+                    first,
+                    second?,
+                    output,
+                    op.label(),
+                    // SAFETY: native dispatch checks matching owned compact shapes/dtypes;
+                    // validate_read_into_destination checks overlap, and the launch helper
+                    // validates runtime residency and prepares the exclusive output write.
+                    |client, count, dim, out, lhs, rhs| unsafe {
+                        elementwise::$kernel::launch_unchecked::<$ty, CubeclCudaRuntime>(
+                            client, count, dim, out, lhs, rhs,
+                        );
+                    },
+                )
+            };
+        }
+        macro_rules! unary {
+            ($ty:ty, $kernel:ident) => {
+                launch_elementwise_unary_into::<$ty>(
+                    self,
+                    first,
+                    output,
+                    op.label(),
+                    // SAFETY: native dispatch checks matching owned compact shapes/dtypes;
+                    // validate_read_into_destination checks overlap, and the launch helper
+                    // validates runtime residency and prepares the exclusive output write.
+                    |client, count, dim, out, input| unsafe {
+                        elementwise::$kernel::launch_unchecked::<$ty, CubeclCudaRuntime>(
+                            client, count, dim, out, input,
+                        );
+                    },
+                )
+            };
+        }
+
+        let result = match op {
+            ElementwiseReadOp::Add => match dtype {
+                DType::F32 => binary!(f32, add_float),
+                DType::F64 => binary!(f64, add_float),
+                DType::I32 => binary!(i32, add_int),
+                DType::I64 => binary!(i64, add_int),
+                DType::C32 => binary!(Complex32, add_complex),
+                DType::C64 => binary!(Complex64, add_complex),
+                _ => return None,
+            },
+            ElementwiseReadOp::Subtract => match dtype {
+                DType::F32 => binary!(f32, sub_float),
+                DType::F64 => binary!(f64, sub_float),
+                DType::I32 => binary!(i32, sub_int),
+                DType::I64 => binary!(i64, sub_int),
+                DType::C32 => binary!(Complex32, sub_complex),
+                DType::C64 => binary!(Complex64, sub_complex),
+                _ => return None,
+            },
+            ElementwiseReadOp::Multiply => match dtype {
+                DType::F32 => binary!(f32, mul_float),
+                DType::F64 => binary!(f64, mul_float),
+                DType::I32 => binary!(i32, mul_int),
+                DType::I64 => binary!(i64, mul_int),
+                DType::C32 => binary!(Complex32, mul_complex),
+                DType::C64 => binary!(Complex64, mul_complex),
+                _ => return None,
+            },
+            ElementwiseReadOp::Negate => match dtype {
+                DType::F32 => unary!(f32, neg_float),
+                DType::F64 => unary!(f64, neg_float),
+                DType::I32 => unary!(i32, neg_int),
+                DType::I64 => unary!(i64, neg_int),
+                DType::C32 => unary!(Complex32, neg_complex),
+                DType::C64 => unary!(Complex64, neg_complex),
+                _ => return None,
+            },
+            ElementwiseReadOp::Conj | ElementwiseReadOp::Divide => return None,
+            _ => return None,
+        };
+        Some(result)
+    }
+
+    fn binary_read_native(
+        &self,
+        op: ElementwiseReadOp,
+        lhs: TensorRead<'_>,
+        rhs: TensorRead<'_>,
+    ) -> Option<crate::Result<Tensor>> {
+        let lhs = lhs.tensor_view();
+        let rhs = rhs.tensor_view();
+        if lhs.dtype() != rhs.dtype() || lhs.shape() != rhs.shape() {
+            return None;
+        }
+        let compact = |view: &TensorView| -> crate::Result<bool> {
+            Ok(view.offset() == 0 && view.is_col_major_contiguous()?)
+        };
+        match (compact(&lhs), compact(&rhs)) {
+            (Ok(true), Ok(true)) => {}
+            (Ok(false), _) | (_, Ok(false)) => return None,
+            (Err(error), _) | (_, Err(error)) => return Some(Err(error)),
+        }
+
+        macro_rules! binary {
+            ($ty:ty, $lhs:expr, $rhs:expr, $kernel:ident) => {
+                dispatch::launch_binary_views(
+                    self.runtime(),
+                    $lhs,
+                    $rhs,
+                    lhs.shape(),
+                    op.label(),
+                    // SAFETY: launch_binary_views validates equal shapes, zero-offset
+                    // compact layouts and residency, and allocates an independent output.
+                    |client, count, dim, out, lhs_arg, rhs_arg| unsafe {
+                        elementwise::$kernel::launch_unchecked::<$ty, CubeclCudaRuntime>(
+                            client, count, dim, out, lhs_arg, rhs_arg,
+                        );
+                    },
+                )
+                .map(Tensor::from_typed::<$ty>)
+            };
+        }
+        macro_rules! dispatch_binary {
+            ($variant:ident, $ty:ty, $kernel:ident) => {
+                match (&lhs, &rhs) {
+                    (TensorView::$variant(lhs), TensorView::$variant(rhs)) => {
+                        Some(binary!($ty, lhs, rhs, $kernel))
+                    }
+                    _ => None,
+                }
+            };
+        }
+
+        match op {
+            ElementwiseReadOp::Add => match lhs.dtype() {
+                DType::F32 => dispatch_binary!(F32, f32, add_float),
+                DType::F64 => dispatch_binary!(F64, f64, add_float),
+                DType::I32 => dispatch_binary!(I32, i32, add_int),
+                DType::I64 => dispatch_binary!(I64, i64, add_int),
+                DType::C32 => dispatch_binary!(C32, Complex32, add_complex),
+                DType::C64 => dispatch_binary!(C64, Complex64, add_complex),
+                _ => None,
+            },
+            ElementwiseReadOp::Subtract => match lhs.dtype() {
+                DType::F32 => dispatch_binary!(F32, f32, sub_float),
+                DType::F64 => dispatch_binary!(F64, f64, sub_float),
+                DType::I32 => dispatch_binary!(I32, i32, sub_int),
+                DType::I64 => dispatch_binary!(I64, i64, sub_int),
+                DType::C32 => dispatch_binary!(C32, Complex32, sub_complex),
+                DType::C64 => dispatch_binary!(C64, Complex64, sub_complex),
+                _ => None,
+            },
+            ElementwiseReadOp::Multiply => match lhs.dtype() {
+                DType::F32 => dispatch_binary!(F32, f32, mul_float),
+                DType::F64 => dispatch_binary!(F64, f64, mul_float),
+                DType::I32 => dispatch_binary!(I32, i32, mul_int),
+                DType::I64 => dispatch_binary!(I64, i64, mul_int),
+                DType::C32 => dispatch_binary!(C32, Complex32, mul_complex),
+                DType::C64 => dispatch_binary!(C64, Complex64, mul_complex),
+                _ => None,
+            },
+            ElementwiseReadOp::Divide => match lhs.dtype() {
+                DType::F32 => dispatch_binary!(F32, f32, div_float),
+                DType::F64 => dispatch_binary!(F64, f64, div_float),
+                DType::C32 => dispatch_binary!(C32, Complex32, div_complex),
+                DType::C64 => dispatch_binary!(C64, Complex64, div_complex),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    fn unary_read_native(
+        &self,
+        op: UnaryReadOp,
+        input: TensorRead<'_>,
+    ) -> Option<crate::Result<Tensor>> {
+        let input = input.tensor_view();
+        let compact = if input.offset() != 0 {
+            false
+        } else {
+            match input.is_col_major_contiguous() {
+                Ok(compact) => compact,
+                Err(error) => return Some(Err(error)),
+            }
+        };
+        if !compact {
+            return None;
+        }
+
+        macro_rules! unary {
+            ($variant:ident, $ty:ty, $kernel:ident) => {
+                match &input {
+                    TensorView::$variant(input) => Some(
+                        dispatch::launch_unary_view(
+                            self.runtime(),
+                            input,
+                            input.shape(),
+                            match op {
+                                UnaryReadOp::Neg => "neg",
+                                UnaryReadOp::Exp => "exp",
+                                UnaryReadOp::Log => "log",
+                                UnaryReadOp::Sin => "sin",
+                                UnaryReadOp::Cos => "cos",
+                                UnaryReadOp::Tanh => "tanh",
+                                UnaryReadOp::Sqrt => "sqrt",
+                                UnaryReadOp::Rsqrt => "rsqrt",
+                                UnaryReadOp::Expm1 => "expm1",
+                                UnaryReadOp::Log1p => "log1p",
+                            },
+                            // SAFETY: launch_unary_view validates the shape, zero-offset
+                            // compact layout and residency, and allocates a fresh output.
+                            |client, count, dim, out, input_arg| unsafe {
+                                elementwise::$kernel::launch_unchecked::<$ty, CubeclCudaRuntime>(
+                                    client, count, dim, out, input_arg,
+                                );
+                            },
+                        )
+                        .map(Tensor::from_typed::<$ty>),
+                    ),
+                    _ => None,
+                }
+            };
+        }
+
+        match (input.dtype(), op) {
+            (DType::F32, UnaryReadOp::Neg) => unary!(F32, f32, neg_float),
+            (DType::F64, UnaryReadOp::Neg) => unary!(F64, f64, neg_float),
+            (DType::I32, UnaryReadOp::Neg) => unary!(I32, i32, neg_int),
+            (DType::I64, UnaryReadOp::Neg) => unary!(I64, i64, neg_int),
+            (DType::C32, UnaryReadOp::Neg) => unary!(C32, Complex32, neg_complex),
+            (DType::C64, UnaryReadOp::Neg) => unary!(C64, Complex64, neg_complex),
+            (DType::F32, UnaryReadOp::Exp) => unary!(F32, f32, exp_float),
+            (DType::F64, UnaryReadOp::Exp) => unary!(F64, f64, exp_float),
+            (DType::F32, UnaryReadOp::Log) => unary!(F32, f32, log_float),
+            (DType::F64, UnaryReadOp::Log) => unary!(F64, f64, log_float),
+            (DType::F32, UnaryReadOp::Sin) => unary!(F32, f32, sin_float),
+            (DType::F64, UnaryReadOp::Sin) => unary!(F64, f64, sin_float),
+            (DType::F32, UnaryReadOp::Cos) => unary!(F32, f32, cos_float),
+            (DType::F64, UnaryReadOp::Cos) => unary!(F64, f64, cos_float),
+            (DType::F32, UnaryReadOp::Tanh) => unary!(F32, f32, tanh_float),
+            (DType::F64, UnaryReadOp::Tanh) => unary!(F64, f64, tanh_float),
+            (DType::F32, UnaryReadOp::Sqrt) => unary!(F32, f32, sqrt_float),
+            (DType::F64, UnaryReadOp::Sqrt) => unary!(F64, f64, sqrt_float),
+            (DType::F32, UnaryReadOp::Rsqrt) => unary!(F32, f32, rsqrt_float),
+            (DType::F64, UnaryReadOp::Rsqrt) => unary!(F64, f64, rsqrt_float),
+            (DType::F32, UnaryReadOp::Expm1) => unary!(F32, f32, expm1_float),
+            (DType::F64, UnaryReadOp::Expm1) => unary!(F64, f64, expm1_float),
+            (DType::F32, UnaryReadOp::Log1p) => unary!(F32, f32, log1p_float),
+            (DType::F64, UnaryReadOp::Log1p) => unary!(F64, f64, log1p_float),
+            _ => None,
+        }
+    }
+
+    /// Accept a read operand the runtime prepared, materializing a view only
+    /// when the operation has no native borrowed implementation.
     fn read_input<'a>(&mut self, input: TensorRead<'a>) -> crate::Result<CudaReadInput<'a>> {
         match input.as_tensor() {
             Some(tensor) => Ok(CudaReadInput::Borrowed(tensor)),
@@ -3835,27 +4216,45 @@ impl CudaBackend {
 }
 
 impl TensorElementwise for CudaBackend {
-    // Borrowed-view entry points. The traced runtime prepares operands as
-    // `TensorRead`; a view is materialized before the CUDA kernel runs.
+    // Borrowed-view entry points. Compact views use the same native kernels as
+    // owned tensors; strided views retain the explicit materialization fallback.
     fn add_read(&mut self, lhs: TensorRead<'_>, rhs: TensorRead<'_>) -> crate::Result<Tensor> {
+        if let Some(result) =
+            self.binary_read_native(ElementwiseReadOp::Add, lhs.clone(), rhs.clone())
+        {
+            return result;
+        }
         let lhs = self.read_input(lhs)?;
         let rhs = self.read_input(rhs)?;
         self.add(lhs.as_tensor(), rhs.as_tensor())
     }
 
     fn sub_read(&mut self, lhs: TensorRead<'_>, rhs: TensorRead<'_>) -> crate::Result<Tensor> {
+        if let Some(result) =
+            self.binary_read_native(ElementwiseReadOp::Subtract, lhs.clone(), rhs.clone())
+        {
+            return result;
+        }
         let lhs = self.read_input(lhs)?;
         let rhs = self.read_input(rhs)?;
         self.sub(lhs.as_tensor(), rhs.as_tensor())
     }
 
     fn mul_read(&mut self, lhs: TensorRead<'_>, rhs: TensorRead<'_>) -> crate::Result<Tensor> {
+        if let Some(result) =
+            self.binary_read_native(ElementwiseReadOp::Multiply, lhs.clone(), rhs.clone())
+        {
+            return result;
+        }
         let lhs = self.read_input(lhs)?;
         let rhs = self.read_input(rhs)?;
         self.mul(lhs.as_tensor(), rhs.as_tensor())
     }
 
     fn neg_read(&mut self, input: TensorRead<'_>) -> crate::Result<Tensor> {
+        if let Some(result) = self.unary_read_native(UnaryReadOp::Neg, input.clone()) {
+            return result;
+        }
         let input = self.read_input(input)?;
         self.neg(input.as_tensor())
     }
@@ -3866,6 +4265,11 @@ impl TensorElementwise for CudaBackend {
     }
 
     fn div_read(&mut self, lhs: TensorRead<'_>, rhs: TensorRead<'_>) -> crate::Result<Tensor> {
+        if let Some(result) =
+            self.binary_read_native(ElementwiseReadOp::Divide, lhs.clone(), rhs.clone())
+        {
+            return result;
+        }
         let lhs = self.read_input(lhs)?;
         let rhs = self.read_input(rhs)?;
         self.div(lhs.as_tensor(), rhs.as_tensor())
@@ -3938,8 +4342,19 @@ impl TensorElementwise for CudaBackend {
         &mut self,
         op: ElementwiseReadOp,
         inputs: &[TensorRead<'_>],
-        out: TensorWrite<'_>,
+        mut out: TensorWrite<'_>,
     ) -> crate::Result<()> {
+        if inputs.len() != op.arity() {
+            return Err(crate::Error::invalid_argument(
+                op.label(),
+                "inputs",
+                format!("expected {} inputs, got {}", op.arity(), inputs.len()),
+            ));
+        }
+        tenferro_tensor::backend::validate_read_into_destination(op.label(), inputs, &out)?;
+        if let Some(result) = self.elementwise_read_into_native(op, inputs, &mut out) {
+            return result;
+        }
         tenferro_tensor::backend::elementwise_read_into_via_allocating_ops(self, op, inputs, out)
     }
 
@@ -4683,39 +5098,60 @@ impl TensorElementwise for CudaBackend {
 }
 
 impl TensorAnalytic for CudaBackend {
-    // Borrowed-view entry points. The traced runtime prepares operands as
-    // `TensorRead`; a view is materialized before the CUDA kernel runs.
+    // Borrowed-view entry points. Compact views use the native elementwise
+    // kernels; unsupported layouts retain the explicit materialization fallback.
     fn exp_read(&mut self, input: TensorRead<'_>) -> crate::Result<Tensor> {
+        if let Some(result) = self.unary_read_native(UnaryReadOp::Exp, input.clone()) {
+            return result;
+        }
         let input = self.read_input(input)?;
         self.exp(input.as_tensor())
     }
 
     fn log_read(&mut self, input: TensorRead<'_>) -> crate::Result<Tensor> {
+        if let Some(result) = self.unary_read_native(UnaryReadOp::Log, input.clone()) {
+            return result;
+        }
         let input = self.read_input(input)?;
         self.log(input.as_tensor())
     }
 
     fn sin_read(&mut self, input: TensorRead<'_>) -> crate::Result<Tensor> {
+        if let Some(result) = self.unary_read_native(UnaryReadOp::Sin, input.clone()) {
+            return result;
+        }
         let input = self.read_input(input)?;
         self.sin(input.as_tensor())
     }
 
     fn cos_read(&mut self, input: TensorRead<'_>) -> crate::Result<Tensor> {
+        if let Some(result) = self.unary_read_native(UnaryReadOp::Cos, input.clone()) {
+            return result;
+        }
         let input = self.read_input(input)?;
         self.cos(input.as_tensor())
     }
 
     fn tanh_read(&mut self, input: TensorRead<'_>) -> crate::Result<Tensor> {
+        if let Some(result) = self.unary_read_native(UnaryReadOp::Tanh, input.clone()) {
+            return result;
+        }
         let input = self.read_input(input)?;
         self.tanh(input.as_tensor())
     }
 
     fn sqrt_read(&mut self, input: TensorRead<'_>) -> crate::Result<Tensor> {
+        if let Some(result) = self.unary_read_native(UnaryReadOp::Sqrt, input.clone()) {
+            return result;
+        }
         let input = self.read_input(input)?;
         self.sqrt(input.as_tensor())
     }
 
     fn rsqrt_read(&mut self, input: TensorRead<'_>) -> crate::Result<Tensor> {
+        if let Some(result) = self.unary_read_native(UnaryReadOp::Rsqrt, input.clone()) {
+            return result;
+        }
         let input = self.read_input(input)?;
         self.rsqrt(input.as_tensor())
     }
@@ -4727,11 +5163,17 @@ impl TensorAnalytic for CudaBackend {
     }
 
     fn expm1_read(&mut self, input: TensorRead<'_>) -> crate::Result<Tensor> {
+        if let Some(result) = self.unary_read_native(UnaryReadOp::Expm1, input.clone()) {
+            return result;
+        }
         let input = self.read_input(input)?;
         self.expm1(input.as_tensor())
     }
 
     fn log1p_read(&mut self, input: TensorRead<'_>) -> crate::Result<Tensor> {
+        if let Some(result) = self.unary_read_native(UnaryReadOp::Log1p, input.clone()) {
+            return result;
+        }
         let input = self.read_input(input)?;
         self.log1p(input.as_tensor())
     }
