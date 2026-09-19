@@ -739,13 +739,13 @@ class WorkflowContractTests(unittest.TestCase):
         reuse = archive_block.index("find_archive_artifact.py")
         build = archive_block.index("Build CUDA test archive")
         self.assertLess(reuse, build)
-        # Every build-path step is skipped when the archives were restored
-        # or reused, so a retry performs no Cargo compilation.
+        # Every build-path step is skipped on restore/reuse; nextest installation
+        # is not a build step and is required to execute the restored archives.
         self.assertEqual(
             archive_block.count(
                 "if: steps.cuda_archive_cache.outputs.cache-hit != 'true' && steps.archive_reuse.outputs.reused != 'true'"
             ),
-            8,
+            7,
         )
         self.assertIn(
             "name: ${{ steps.archive_key.outputs.artifact_name }}", archive_block

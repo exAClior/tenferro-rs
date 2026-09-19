@@ -568,8 +568,8 @@ jobs:
           # Restore-only for the same reason as the archive cache above.
           save-if: false
 
+      # Restored archives still execute hosted tests, so nextest is always needed.
       - uses: taiki-e/install-action@3ad7ed62b9acd4b43f91777bf240fac23e489eac # nextest (resolved 2026-07-07)
-        if: steps.cuda_archive_cache.outputs.cache-hit != 'true' && steps.archive_reuse.outputs.reused != 'true'
         with:
           tool: nextest
 
