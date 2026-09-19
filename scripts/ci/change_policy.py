@@ -89,6 +89,9 @@ _GPU_CONTROL_FILES = frozenset(
         "scripts/ci/runpod_contract.py",
         "scripts/ci/recover_runpod_pr.py",
         "scripts/ci/find_archive_artifact.py",
+        "scripts/ci/gpu_test_partition.py",
+        "scripts/ci/cuda_test_partition.tsv",
+        "scripts/ci/pjrt_test_partition.tsv",
         "scripts/ci/install_cuda_toolkit_hosted.sh",
         "scripts/ci/install_cuda_runtime_tree.sh",
         "scripts/ci/install_cutensor.sh",
@@ -100,6 +103,10 @@ _GPU_CONTROL_FILES = frozenset(
 
 
 def _is_docs_path(path: str) -> bool:
+    # This tree is a workspace member and supplies the CUDA tutorial artifact.
+    # Treat its sources, manifest, and unknown additions as code, not prose.
+    if path.startswith("docs/tutorial-code/"):
+        return False
     return path in _DOC_FILES or path.startswith(_DOC_PREFIXES)
 
 

@@ -11,10 +11,7 @@ macro_rules! cuda_test {
         #[test]
         #[ignore = "requires CUDA 12.8+ GPU"]
         fn $name() {
-            if !gpu_available() {
-                eprintln!("skipping {} — no CUDA device found", stringify!($name));
-                return;
-            }
+            assert!(gpu_available(), "CUDA test requires an available device");
             $body
         }
     };

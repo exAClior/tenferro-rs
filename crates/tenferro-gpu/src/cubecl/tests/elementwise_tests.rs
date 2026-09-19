@@ -71,10 +71,7 @@ fn assert_complex_classes_and_values_match(actual: &Tensor, expected: &Tensor) {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_real_scalar_complex_binary_ops_match_cpu() {
-    if !gpu_available() {
-        eprintln!("skipping real-scalar complex binary parity test - no CUDA device found");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let mut cpu = cpu_backend();
     let mut gpu = gpu_backend();
@@ -346,10 +343,7 @@ fn test_real_scalar_complex_binary_ops_match_cpu() {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_scalar_div_rem_pow_match_cpu() {
-    if !gpu_available() {
-        eprintln!("skipping scalar div/rem/pow parity test - no CUDA device found");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let mut cpu = cpu_backend();
     let mut gpu = gpu_backend();
@@ -624,10 +618,7 @@ fn test_scalar_div_rem_pow_match_cpu() {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_cubecl_complex_abs_matches_cpu() {
-    if !gpu_available() {
-        eprintln!("skipping test_cubecl_complex_abs_matches_cpu - no CUDA device found");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let mut cpu = cpu_backend();
     let mut gpu = gpu_backend();
@@ -709,19 +700,8 @@ fn test_cubecl_complex_abs_matches_cpu() {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_broadcast_multiply_scalar_operands_match_cpu() {
-    if !gpu_available() {
-        eprintln!(
-            "skipping test_broadcast_multiply_scalar_operands_match_cpu - no CUDA device found"
-        );
-        return;
-    }
-    let Ok(mut backend) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(gpu_backend))
-    else {
-        eprintln!(
-            "skipping test_broadcast_multiply_scalar_operands_match_cpu - CUDA runtime could not be initialized"
-        );
-        return;
-    };
+    assert!(gpu_available(), "CUDA test requires an available device");
+    let mut backend = gpu_backend();
     let scalar = tensor_f64(vec![], vec![2.0]);
     let vector = tensor_f64(vec![3], vec![3.0, -4.0, 5.0]);
     let gpu_scalar = upload(&backend, &scalar);
@@ -758,10 +738,7 @@ fn test_broadcast_multiply_scalar_operands_match_cpu() {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_broadcast_multiply_integer_overflow_matches_cpu_wrapping() {
-    if !gpu_available() {
-        eprintln!("skipping integer broadcast multiply parity test - no CUDA device found");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let mut cpu = cpu_backend();
     let mut gpu = gpu_backend();
@@ -797,10 +774,7 @@ fn test_broadcast_multiply_integer_overflow_matches_cpu_wrapping() {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_log1p_small_x_f32_precision() {
-    if !gpu_available() {
-        eprintln!("skipping test_log1p_small_x_f32_precision — no CUDA device found");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = super::gpu_backend();
     let x_values = vec![1e-7_f32, 1e-6, 1e-5, 1e-4, 1e-3];
     let cpu_input = super::tensor_f32(vec![x_values.len()], x_values.clone());
@@ -828,10 +802,7 @@ fn test_log1p_small_x_f32_precision() {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_expm1_small_x_f32_precision() {
-    if !gpu_available() {
-        eprintln!("skipping test_expm1_small_x_f32_precision — no CUDA device found");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = super::gpu_backend();
     let x_values = vec![1e-7_f32, 1e-6, 1e-5, 1e-4, 1e-3];
     let cpu_input = super::tensor_f32(vec![x_values.len()], x_values.clone());
@@ -913,10 +884,7 @@ fn test_cubecl_binary_float_elementwise_matches_cpu() {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_cubecl_maximum_minimum_propagate_nan_independent_of_argument_order() {
-    if !gpu_available() {
-        eprintln!("skipping maximum/minimum NaN propagation parity test - no CUDA device found");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let mut cpu = cpu_backend();
     let mut gpu = gpu_backend();
@@ -1042,12 +1010,7 @@ fn assert_float_classes_and_zero_signs_match(op: &str, actual: &Tensor, expected
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_cubecl_float_div_rem_preserve_ieee_special_values() {
-    if !gpu_available() {
-        eprintln!(
-            "skipping test_cubecl_float_div_rem_preserve_ieee_special_values — no CUDA device found"
-        );
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let mut cpu = cpu_backend();
     let mut gpu = gpu_backend();
@@ -1090,10 +1053,7 @@ fn test_cubecl_float_div_rem_preserve_ieee_special_values() {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_float_unary_special_values_match_cpu() {
-    if !gpu_available() {
-        eprintln!("skipping test_float_unary_special_values_match_cpu — no CUDA device found");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let mut cpu = cpu_backend();
     let mut gpu = gpu_backend();
@@ -1282,12 +1242,7 @@ fn test_cubecl_float_compare_select_and_clamp_match_cpu() {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_cubecl_integer_add_mul_compare_select_match_cpu() {
-    if !gpu_available() {
-        eprintln!(
-            "skipping test_cubecl_integer_add_mul_compare_select_match_cpu — no CUDA device found"
-        );
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let i32_lhs = tensor_i32(vec![2, 3], vec![1, -2, 3, 4, -5, 6]);
     let i32_rhs = tensor_i32(vec![2, 3], vec![6, 5, -4, 3, 2, -1]);
@@ -1407,10 +1362,7 @@ fn nonnegative_integer_exponents_like(tensor: &Tensor) -> Tensor {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_cubecl_integer_domain_errors_match_cpu() {
-    if !gpu_available() {
-        eprintln!("skipping test_cubecl_integer_domain_errors_match_cpu — no CUDA device found");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let mut gpu = gpu_backend();
     let lhs = tensor_i32(vec![2], vec![1, 2]);
@@ -1515,12 +1467,7 @@ fn test_cubecl_complex_elementwise_matches_cpu_and_rejects_unsupported_ops() {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_cubecl_float_to_complex_convert_preserves_resident_device() {
-    if !gpu_available() {
-        eprintln!(
-            "skipping test_cubecl_float_to_complex_convert_preserves_resident_device — no CUDA device found"
-        );
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut gpu = gpu_backend();
     let input = tensor_f64(vec![2], vec![1.0, -2.0]);
     let gpu_input = upload(&gpu, &input);
@@ -1542,12 +1489,7 @@ fn test_cubecl_float_to_complex_convert_preserves_resident_device() {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn test_cubecl_conj_real_clone_rejects_missing_resident_device_metadata() {
-    if !gpu_available() {
-        eprintln!(
-            "skipping test_cubecl_conj_real_clone_rejects_missing_resident_device_metadata — no CUDA device found"
-        );
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut gpu = gpu_backend();
     let input = tensor_f64(vec![2], vec![1.0, -2.0]);
     let mut gpu_input = upload(&gpu, &input)

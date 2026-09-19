@@ -25,10 +25,9 @@ extern "C" __global__ void add_kernel(float* out, const float* a, const float* b
 "#;
 
 #[test]
+#[ignore = "requires CUDA"]
 fn raw_nvrtc_launch_roundtrip() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
 
     // Upload inputs before entering the session (the session borrows backend).
@@ -91,10 +90,9 @@ fn raw_nvrtc_launch_roundtrip() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn raw_ptx_load_launch_roundtrip() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
 
     let a_host = tensor_f32(vec![4], vec![1.0, 2.0, 3.0, 4.0]);
@@ -155,10 +153,9 @@ fn raw_ptx_load_launch_roundtrip() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn raw_launch_rejects_bad_geometry() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     with_cuda_exec(&mut backend, |session| {
         let result: tenferro_tensor::Result<()> =
@@ -186,10 +183,9 @@ fn raw_launch_rejects_bad_geometry() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn raw_load_cubin_rejects_garbage() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     with_cuda_exec(&mut backend, |session| {
         let result: tenferro_tensor::Result<()> = session.with_raw("test.bad_cubin", |sess| {

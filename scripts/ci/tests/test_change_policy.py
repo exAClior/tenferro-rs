@@ -66,6 +66,9 @@ class ChangePolicyTests(unittest.TestCase):
             ".github/workflows/CI_gpu.yml",
             ".github/workflows/ci-cache-publish.yml",
             "scripts/ci/find_archive_artifact.py",
+            "scripts/ci/gpu_test_partition.py",
+            "scripts/ci/cuda_test_partition.tsv",
+            "scripts/ci/pjrt_test_partition.tsv",
             "scripts/ci/install_cuda_toolkit_hosted.sh",
             "scripts/ci/install_cuda_runtime_tree.sh",
             "scripts/ci/install_cutensor.sh",
@@ -84,6 +87,24 @@ class ChangePolicyTests(unittest.TestCase):
         self.assertIs(policy.change_class, ChangeClass.CI_ONLY)
         self.assertTrue(policy.run_ci_config)
         self.assertFalse(policy.run_gpu)
+
+    def test_tutorial_workspace_member_and_shared_dependencies_require_gpu(self) -> None:
+        for path in (
+            "docs/tutorial-code/src/bin/cuda_tutorial.rs",
+            "docs/tutorial-code/Cargo.toml",
+            "docs/tutorial-code/build.rs",
+            "crates/tenferro-tensor/src/types.rs",
+            "crates/tenferro-runtime/src/lib.rs",
+            "crates/tenferro-cpu/src/lib.rs",
+            "crates/tenferro-ad/src/lib.rs",
+            "Cargo.toml",
+            "Cargo.lock",
+        ):
+            with self.subTest(path=path):
+                policy = classify_paths([path])
+                self.assertIs(policy.change_class, ChangeClass.CODE)
+                self.assertTrue(policy.run_rust)
+                self.assertTrue(policy.run_gpu)
 
     def test_unknown_and_empty_diffs_fall_back_to_code(self) -> None:
         for paths in ([], ["new-top-level-policy.toml"]):

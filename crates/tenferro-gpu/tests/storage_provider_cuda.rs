@@ -2,10 +2,9 @@
 
 //! Final P7 CUDA storage-provider evidence.
 //!
-//! These tests are hardware-gated because the contract concerns a real CUDA
-//! allocation root and the provider-native prepared binding. They are no-ops
-//! on machines without an available CUDA device; source-level API contracts
-//! remain covered by the integration contract tests.
+//! Device tests are ignored by default because they need real CUDA allocation
+//! roots and provider-native bindings. Explicit execution fails without a device;
+//! the source-level API contract remains runnable on hosts without CUDA.
 
 use std::fs;
 use std::path::Path;
@@ -25,10 +24,9 @@ fn identity(tensor: &Tensor) -> (Option<AllocationDomainId>, Option<AllocationId
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_tensor_view_keeps_the_single_root_identity() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).unwrap();
     let host = Tensor::from_vec_col_major(vec![2], vec![1.0_f32, 2.0]).unwrap();
@@ -44,10 +42,9 @@ fn cuda_tensor_view_keeps_the_single_root_identity() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_prepared_state_is_consumed_by_the_exact_binding_without_host_mapping() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let mut backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).unwrap();
     let host = Tensor::from_vec_col_major(vec![2], vec![1.0_f32, 2.0]).unwrap();
@@ -79,10 +76,9 @@ fn cuda_prepared_state_is_consumed_by_the_exact_binding_without_host_mapping() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_duplicate_is_explicit_same_placement_allocation() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let mut backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).unwrap();
     let host = Tensor::from_vec_col_major(vec![2], vec![1.0_f32, 2.0]).unwrap();

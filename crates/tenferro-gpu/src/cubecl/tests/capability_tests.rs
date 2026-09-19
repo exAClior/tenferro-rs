@@ -110,10 +110,7 @@ fn cuda_core_capability_table_in_guide_matches_descriptor() {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn cuda_descriptor_supported_entries_match_cpu_smoke_cases() {
-    if !gpu_available() {
-        eprintln!("skipping cuda_descriptor_supported_entries_match_cpu_smoke_cases: no CUDA device found");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let mut cpu = cpu_backend();
     let mut gpu = gpu_backend();

@@ -642,6 +642,19 @@ jobs:
             || du -sh "${CUDA_ARCHIVE}" "${PJRT_ARCHIVE}" "${CUDA_TUTORIAL_ARCHIVE}" || true
           df -h .
 
+      - name: Run device-independent CUDA and PJRT tests
+        working-directory: tenferro-rs
+        env:
+          CUDA_VISIBLE_DEVICES: ""
+          RAYON_NUM_THREADS: "1"
+          OPENBLAS_NUM_THREADS: "1"
+          OMP_NUM_THREADS: "1"
+        run: |
+          set -euo pipefail
+          # Execute the same feature-enabled artifacts, including on cache hits.
+          python3 scripts/ci/gpu_test_partition.py --kind cuda --lane host --archive-file "${CUDA_ARCHIVE}"
+          python3 scripts/ci/gpu_test_partition.py --kind pjrt --lane host --archive-file "${PJRT_ARCHIVE}"
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         # Always publish the per-key archives to this run: the self-hosted
         # RunPod runner downloads them by name, and later GPU allocation

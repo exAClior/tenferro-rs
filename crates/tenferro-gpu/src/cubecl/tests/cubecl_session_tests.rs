@@ -14,10 +14,9 @@ fn first_cuda_backend() -> Option<CudaBackend> {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cubecl_session_exposes_client_and_launch_helpers() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     with_cuda_exec(&mut backend, |session| {
         session
@@ -37,10 +36,9 @@ fn cubecl_session_exposes_client_and_launch_helpers() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cubecl_session_allocates_and_binds_output() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     with_cuda_exec(&mut backend, |session| {
         session
@@ -55,10 +53,9 @@ fn cubecl_session_allocates_and_binds_output() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cubecl_session_allocates_zero_filled_output() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     with_cuda_exec(&mut backend, |session| {
         let output = session
@@ -79,10 +76,9 @@ fn cubecl_session_allocates_zero_filled_output() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cubecl_session_scales_output_in_place() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     with_cuda_exec(&mut backend, |session| {
         // Allocate and seed [1.0, 2.0, 3.0, 4.0] on device, then scale by 3
@@ -141,10 +137,9 @@ fn cubecl_session_scales_output_in_place() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cubecl_session_flushes_on_exit_so_raw_sees_work() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     with_cuda_exec(&mut backend, |session| {
         // Enqueue a trivial cubecl interaction, then immediately enter the raw
@@ -165,10 +160,9 @@ fn cubecl_session_flushes_on_exit_so_raw_sees_work() {
 }
 
 #[test]
+#[ignore = "requires CUDA"]
 fn cubecl_session_flushes_after_error_callback() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     with_cuda_exec(&mut backend, |session| {
         let result: tenferro_tensor::Result<()> =
@@ -192,12 +186,9 @@ fn cubecl_session_flushes_after_error_callback() {
 
 #[cfg(debug_assertions)]
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_with_backend_session_rejects_nested_entry_in_debug_builds() {
-    if !gpu_available() {
-        // Skipped on hosts without a CUDA device: the nested-entry contract
-        // is exercised on the shared helper + default adapter here.
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         backend.with_backend_session(|_session| {
@@ -216,10 +207,9 @@ fn cuda_with_backend_session_rejects_nested_entry_in_debug_builds() {
 
 #[cfg(debug_assertions)]
 #[test]
+#[ignore = "requires CUDA"]
 fn cuda_with_backend_session_restores_the_in_session_flag_after_panic() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let mut backend = first_cuda_backend().expect("CUDA backend should initialize");
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         backend.with_backend_session(|_session| panic!("boom"))

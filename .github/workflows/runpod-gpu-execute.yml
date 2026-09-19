@@ -665,14 +665,9 @@ jobs:
           NEXTEST_TEST_THREADS: "1"
         run: |
           set -euo pipefail
-          # trybuild starts nested Cargo and is compile-only; regular CI owns it.
-          cargo nextest run \
+          python3 scripts/ci/gpu_test_partition.py --kind cuda --lane gpu \
             --archive-file "${CUDA_ARCHIVE}" \
-            --workspace-remap "${GITHUB_WORKSPACE}/tenferro-rs" \
-            --run-ignored all \
-            --no-fail-fast \
-            -E 'not (test(eager_backend_capability_boundary) | test(execution_session_capability_cannot_project_or_escape_owner_borrow) | test(cuda_runtime_copy_into_1522_a100_destination_reuse_benchmark))' \
-            -j 1
+            --workspace-remap "${GITHUB_WORKSPACE}/tenferro-rs"
 
       - name: Run CUDA tutorial artifact
         working-directory: tenferro-rs
@@ -738,13 +733,9 @@ jobs:
           XLA_FLAGS="--xla_gpu_cuda_data_dir=${cuda_nvcc_dir} ${XLA_FLAGS:-}" \
           TENFERRO_PJRT_PLUGIN="${plugin_path}" \
           LD_LIBRARY_PATH="${cudnn_lib}:${LD_LIBRARY_PATH:-}" \
-            cargo nextest run \
+            python3 scripts/ci/gpu_test_partition.py --kind pjrt --lane gpu \
               --archive-file "${PJRT_ARCHIVE}" \
-              --workspace-remap "${GITHUB_WORKSPACE}/tenferro-rs" \
-              --run-ignored all \
-              --no-fail-fast \
-              -j 1 \
-              -E 'test(pjrt_execution)'
+              --workspace-remap "${GITHUB_WORKSPACE}/tenferro-rs"
 
       - name: GPU test complete
         run: echo "RUNPOD_TENFERRO_GPU_TEST_OK"

@@ -1166,10 +1166,7 @@ fn triangular_solve_returns_expected_solution() {
 #[test]
 #[ignore]
 fn cuda_eager_solve_uses_registered_linalg_runtime() {
-    if !gpu_available() {
-        eprintln!("skipping cuda_eager_solve_uses_registered_linalg_runtime: no CUDA device");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let a_host = Tensor::from_vec_col_major(vec![2, 2], vec![3.0_f64, 1.0, 1.0, 2.0]).unwrap();
     let b_host = Tensor::from_vec_col_major(vec![2, 1], vec![5.0_f64, 1.0]).unwrap();
@@ -1192,10 +1189,7 @@ fn cuda_eager_solve_uses_registered_linalg_runtime() {
 #[test]
 #[ignore]
 fn cuda_eager_qr_and_svd_f64_stay_resident_and_reconstruct() {
-    if !gpu_available() {
-        eprintln!("skipping CUDA eager f64 decomposition test: no CUDA device");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let expected = [1.0_f64, 3.0, 2.0, 4.0];
     let host = Tensor::from_vec_col_major(vec![2, 2], expected.to_vec()).unwrap();
@@ -1254,10 +1248,7 @@ fn matmul_2x2_f64(lhs: &[f64], rhs: &[f64]) -> Vec<f64> {
 #[test]
 #[ignore]
 fn cuda_eager_qr_and_svd_c64_stay_resident_and_reconstruct() {
-    if !gpu_available() {
-        eprintln!("skipping CUDA eager c64 decomposition test: no CUDA device");
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let expected = [
         Complex64::new(1.0, 0.5),

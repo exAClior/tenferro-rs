@@ -222,9 +222,7 @@ fn cuda_registration_ingress_rejects_forged_family_and_foreign_inputs() {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn cuda_registration_ingress_accepts_backend_created_tensor() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
     let runtime = CudaRuntime::new(CudaDeviceId::from_ordinal(0)).expect("CUDA runtime");
     let host = Tensor::from_vec_col_major(vec![1], vec![1.0_f32]).expect("host tensor");
     let input = upload_tensor(&runtime, &host).expect("CUDA upload");
@@ -544,9 +542,7 @@ fn cuda_registration_preserves_two_caller_selected_engine_ids_and_devices() {
 #[test]
 #[ignore = "requires CUDA 12.8+ GPU"]
 fn cuda_event_domain_tokens_are_repeatable_and_order_native_dependencies() {
-    if !gpu_available() {
-        return;
-    }
+    assert!(gpu_available(), "CUDA test requires an available device");
 
     let backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA backend");
     let runtime = backend.runtime().clone();

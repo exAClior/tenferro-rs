@@ -19,7 +19,11 @@ Pull requests have one primary class and independent lane flags:
   changes additionally require the GPU gate.
 
 Mixed docs and CI changes are CI-only with both lightweight flags enabled.
-Unknown paths always fall back to code. Pushes to `main` force the
+Unknown paths always fall back to code. `docs/tutorial-code/` is executable
+workspace code, not a docs-only exception. Shared tensor, runtime, AD, CPU,
+and extension dependencies can affect GPU behavior, so source changes retain
+the conservative full policy rather than a GPU-directory allowlist.
+Pushes to `main` force the
 comprehensive Linux and macOS matrix; they do not add a second paid RunPod GPU
 run after the pull-request gate.
 
@@ -100,6 +104,41 @@ individual compilation where needed. Scalar assembly inspection uses the same
 The hosted CUDA toolkit is restored by exact versioned key. Only the existing
 main-only cache publisher saves it; PR builds never publish toolkit contents.
 A miss still installs the same toolkit and all builds remain valid without cache.
+
+## Device-independent and hardware test partitions
+
+PR relevance and physical-device requirements are separate decisions. Hosted
+preparation executes device-independent tests from the **same CUDA/PJRT-feature
+archives** used on RunPod, on both fresh builds and cache hits. This execution
+must succeed before provisioning. It does not substitute default-feature tests
+for CUDA-feature coverage. The paid node executes only the audited single-GPU
+partition, the CUDA tutorial, and the CUDA-plugin PJRT E2E cases.
+
+`scripts/ci/{cuda,pjrt}_test_partition.tsv` records exact binary/test identities.
+`gpu_test_partition.py` checks the real nextest inventory for exhaustive,
+disjoint membership before selecting a lane. New, removed, or renamed tests
+fail until their bodies and helper calls are audited and the inventory updated;
+CUDA names, feature gates, and `#[ignore]` alone are not classifications. Host
+execution also catches an existing host test acquiring a device dependency.
+The archive is extracted once and its build metadata reused without compilation.
+Nextest remains serial; hosted backend thread variables are explicitly one.
+
+Single-GPU CUDA tests are ignored in ordinary runs and fail without a device
+when explicitly selected. Required PJRT execution fails without its configured
+plugin. The single-GPU workflow explicitly reports **NOT RUN**, never PASS, for
+the two-device registration test; a separately provisioned two-GPU run is outside
+this lane. Existing trybuild checks remain in ordinary hosted CI, the dedicated
+A100 benchmark remains outside correctness CI, and the optional `run_hlo_module`
+checks are reported not run because this workflow does not install that external
+tool. These exclusions have separate inventory categories, not host/device
+success results. No test bodies or numerical assertions are removed.
+
+The legacy `CI_gpu.yml` fork/manual fallback retains its existing full archive
+selection; this partition changes the trusted RunPod preparation/execution path.
+Before trust adoption, a PR run using the old default-branch workflow validates
+the test changes, not the new workflow wiring. Validate that wiring locally and
+through a trusted post-merge dispatch, without executing a PR-controlled
+secret-bearing workflow.
 
 ## RunPod trust boundary
 
