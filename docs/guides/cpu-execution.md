@@ -153,6 +153,30 @@ If strict NUMA placement is required, select `CpuBackendKind::Faer`. If an
 application configures and pins a BLAS provider independently, that remains an
 application/provider responsibility outside the tenferro placement guarantee.
 
+### Intel OpenMP worker affinity on Linux
+
+When MKL first creates its workers from a pinned tenferro worker, the new
+threads can inherit that worker's **single-CPU** affinity mask. A reported
+`MKL_Get_Max_Threads() == 4` therefore does not establish four-core execution;
+this can make a 4-thread GEMM slower than a 1-thread GEMM.
+
+For an application that has selected allowed CPUs 1–4, configure Intel OpenMP
+before process startup as well as binding the process:
+
+```sh
+taskset -c 1-4 env RAYON_NUM_THREADS=4 MKL_NUM_THREADS=4 OMP_NUM_THREADS=4 \
+  MKL_DYNAMIC=FALSE \
+  KMP_AFFINITY='granularity=fine,proclist=[1,2,3,4],explicit,norespect' \
+  ./your-program
+```
+
+Replace both CPU lists with CPUs available to your application. `norespect`
+lets Intel OpenMP use the explicit list rather than the initializing worker's
+inherited one-CPU mask; **never list CPUs outside the application's intended
+allocation**. Check `/proc/<pid>/task/<tid>/status` (`Cpus_allowed_list`) during
+execution, not just the requested thread count. This is an Intel OpenMP setting,
+not a portable OpenBLAS/Accelerate prescription or a new tenferro guarantee.
+
 Fallible backend constructors return `CpuBackendError`. Configuration failures
 appear as `CpuBackendError::Tensor`, while topology discovery and engine
 placement failures remain inspectable through `CpuBackendError::placement_error`.
