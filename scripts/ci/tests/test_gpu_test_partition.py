@@ -75,6 +75,10 @@ class GpuTestPartitionTests(unittest.TestCase):
         child = (ROOT / ".github/workflows/runpod-gpu-execute.yml").read_text()
         host_step = parent.split("      - name: Run device-independent CUDA and PJRT tests", 1)[1].split("      - uses:", 1)[0]
         self.assertNotIn("if:", host_step)
+        installer = parent.split("      - uses: taiki-e/install-action@", 1)[1].split("      - name:", 1)[0]
+        self.assertIn("tool: nextest", installer)
+        self.assertNotIn("if:", installer)
+        self.assertLess(parent.index("      - uses: taiki-e/install-action@"), parent.index("      - name: Run device-independent CUDA and PJRT tests"))
         for kind in ("cuda", "pjrt"):
             self.assertIn(f"gpu_test_partition.py --kind {kind} --lane host", host_step)
             self.assertIn(f"gpu_test_partition.py --kind {kind} --lane gpu", child)
