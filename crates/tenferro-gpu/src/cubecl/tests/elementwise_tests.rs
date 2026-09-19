@@ -5,6 +5,7 @@ use crate::{DType, DeviceKind, GpuBackendKind, Tensor};
 use num_complex::{Complex32, Complex64};
 use tenferro_tensor::{
     ErrorKind, TensorAnalytic, TensorElementwise, TensorFusion, TensorRead, TensorStructural,
+    TensorView, TensorWrite,
 };
 
 use super::{
@@ -12,6 +13,122 @@ use super::{
     assert_shape_mismatch, assert_tensor_close, cpu_backend, download, gpu_backend, tensor_c32,
     tensor_c64, tensor_f32, tensor_f64, tensor_i32, tensor_i64, upload,
 };
+
+#[test]
+#[ignore = "requires CUDA 12.8+ GPU"]
+fn elementwise_read_into_writes_owned_output_without_mutating_inputs() {
+    assert!(gpu_available(), "CUDA test requires an available device");
+    let lhs = tensor_f32(vec![2, 2], vec![1.0, 2.0, 3.0, 4.0]);
+    let rhs = tensor_f32(vec![2, 2], vec![5.0, 6.0, 7.0, 8.0]);
+    let expected = lhs
+        .as_typed::<f32>()
+        .unwrap()
+        .as_slice()
+        .unwrap()
+        .iter()
+        .zip(rhs.as_typed::<f32>().unwrap().as_slice().unwrap())
+        .map(|(lhs, rhs)| lhs * rhs)
+        .collect::<Vec<_>>();
+
+    let mut gpu = gpu_backend();
+    let gpu_lhs = upload(&gpu, &lhs);
+    let gpu_rhs = upload(&gpu, &rhs);
+    let mut gpu_out = upload(&gpu, &tensor_f32(vec![2, 2], vec![0.0; 4]));
+    gpu.mul_read_into(
+        TensorRead::from_tensor(&gpu_lhs),
+        TensorRead::from_tensor(&gpu_rhs),
+        TensorWrite::from_tensor(&mut gpu_out),
+    )
+    .unwrap();
+
+    let actual = download(&gpu, &gpu_out);
+    assert_eq!(
+        actual.as_typed::<f32>().unwrap().as_slice().unwrap(),
+        expected
+    );
+    assert_tensor_close(&download(&gpu, &gpu_lhs), &lhs, 0.0);
+    assert_tensor_close(&download(&gpu, &gpu_rhs), &rhs, 0.0);
+}
+
+#[test]
+#[ignore = "requires CUDA 12.8+ GPU"]
+fn elementwise_read_compact_view_chain_uses_native_kernels() {
+    assert!(gpu_available(), "CUDA test requires an available device");
+    let host_lhs = tensor_f32(vec![2, 2], vec![0.5, -1.0, 2.0, 3.5]);
+    let host_rhs = tensor_f32(vec![2, 2], vec![2.0, 4.0, -0.5, 1.5]);
+    let mut cpu = cpu_backend();
+    let sum = cpu.add(&host_lhs, &host_rhs).unwrap();
+    let product = cpu.mul(&sum, &host_rhs).unwrap();
+    let expected = cpu.tanh(&product).unwrap();
+
+    let mut gpu = gpu_backend();
+    let lhs = upload(&gpu, &host_lhs);
+    let rhs = upload(&gpu, &host_rhs);
+    let sum = gpu
+        .add_read(
+            TensorRead::from_view(TensorView::F32(lhs.as_typed::<f32>().unwrap().as_view())),
+            TensorRead::from_view(TensorView::F32(rhs.as_typed::<f32>().unwrap().as_view())),
+        )
+        .unwrap();
+    let product = gpu
+        .mul_read(
+            TensorRead::from_view(TensorView::F32(sum.as_typed::<f32>().unwrap().as_view())),
+            TensorRead::from_view(TensorView::F32(rhs.as_typed::<f32>().unwrap().as_view())),
+        )
+        .unwrap();
+    let actual = gpu
+        .tanh_read(TensorRead::from_view(TensorView::F32(
+            product.as_typed::<f32>().unwrap().as_view(),
+        )))
+        .unwrap();
+
+    assert_tensor_close(&download(&gpu, &actual), &expected, 1e-6);
+    assert_tensor_close(&download(&gpu, &lhs), &host_lhs, 0.0);
+    assert_tensor_close(&download(&gpu, &rhs), &host_rhs, 0.0);
+}
+
+#[test]
+#[ignore = "requires CUDA 12.8+ GPU"]
+fn elementwise_read_preserves_offset_and_strided_layouts() {
+    use tenferro_tensor::StridedSliceSpec;
+    let host = tensor_f64(vec![2, 3], vec![0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
+    let mut gpu = gpu_backend();
+    let mut cpu = cpu_backend();
+    let device = upload(&gpu, &host);
+    let view = device.as_typed::<f64>().unwrap().as_view();
+    let host_view = host.as_typed::<f64>().unwrap().as_view();
+    fn layouts(
+        view: tenferro_tensor::TypedTensorView<'_, f64>,
+    ) -> [tenferro_tensor::TypedTensorView<'_, f64>; 4] {
+        [
+            view.clone(),
+            view.transpose_view([1, 0]).unwrap(),
+            view.try_slice_axis(1, StridedSliceSpec::new(1, None, 1))
+                .unwrap(),
+            view.try_slice_axis(0, StridedSliceSpec::reverse()).unwrap(),
+        ]
+    }
+    for (device_view, host_view) in layouts(view).into_iter().zip(layouts(host_view)) {
+        let read = TensorRead::from_view(TensorView::F64(device_view));
+        let expected_read = TensorRead::from_view(TensorView::F64(host_view));
+        let expected = cpu
+            .add_read(expected_read.clone(), expected_read.clone())
+            .unwrap();
+        let actual = gpu.add_read(read.clone(), read.clone()).unwrap();
+        assert_tensor_close(&download(&gpu, &actual), &expected, 1e-12);
+        let expected = cpu.tanh_read(expected_read).unwrap();
+        let actual = gpu.tanh_read(read).unwrap();
+        assert_tensor_close(&download(&gpu, &actual), &expected, 1e-12);
+    }
+    assert_tensor_close(&download(&gpu, &device), &host, 0.0);
+    let mut host_output = tensor_f64(vec![2, 3], vec![0.; 6]);
+    assert!(gpu
+        .neg_read_into(
+            TensorRead::from_tensor(&device),
+            TensorWrite::from_tensor(&mut host_output)
+        )
+        .is_err());
+}
 
 fn assert_complex_classes_and_values_match(actual: &Tensor, expected: &Tensor) {
     fn component_matches<T: num_traits::Float + std::fmt::Debug>(actual: T, expected: T) {

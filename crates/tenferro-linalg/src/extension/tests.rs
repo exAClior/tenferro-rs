@@ -109,6 +109,80 @@ fn session_support_admits_every_cpu_linear_algebra_op() {
 }
 
 #[test]
+fn extension_reads_preserve_strided_inputs() {
+    use tenferro_cpu::{with_cpu_exec_session, CpuBackend};
+    use tenferro_tensor::{BackendSessionHost, TensorRead, TensorView};
+
+    // Owned, compact, transposed and offset reads describe the same spectrum.
+    let input = Tensor::from_vec_col_major([2, 3], vec![3., 0., 0., 2., 0., 0.]).unwrap();
+    let typed = input.as_typed::<f64>().unwrap();
+    let offset_data = [99., 99., 3., 0., 0., 2., 0., 0.];
+    let offset =
+        tenferro_tensor::TypedTensorView::from_slice([2, 3], [1, 2], 2, &offset_data).unwrap();
+    let reads = [
+        TensorRead::from_tensor(&input),
+        TensorRead::from_view(TensorView::F64(typed.as_view())),
+        TensorRead::from_view(TensorView::F64(
+            typed.as_view().transpose_view([1, 0]).unwrap(),
+        )),
+        TensorRead::from_view(TensorView::F64(offset)),
+    ];
+    let mut backend = CpuBackend::with_threads(1).unwrap();
+    for read in reads {
+        let outputs = backend
+            .with_backend_session(|session| {
+                with_cpu_exec_session(session, |session| {
+                    super::execute_linalg_extension_reads_in_session(
+                        &LinalgExtensionOp::new(LinalgOp::SvdVals {
+                            derivative_eps: 0.0,
+                        }),
+                        &[read],
+                        session,
+                    )
+                })
+                .unwrap()
+            })
+            .unwrap();
+        let values = outputs[0].as_slice::<f64>().unwrap();
+        assert_eq!(values.len(), 2);
+        assert!((values[0] - 3.).abs() < 1e-12);
+        assert!((values[1] - 2.).abs() < 1e-12);
+    }
+    assert_eq!(input.as_slice::<f64>().unwrap(), &[3., 0., 0., 2., 0., 0.]);
+    assert_eq!(offset_data, [99., 99., 3., 0., 0., 2., 0., 0.]);
+}
+
+#[test]
+fn read_capable_extension_ops_dispatch_before_owned_fallback() {
+    let source = include_str!("../extension.rs");
+    let body = source
+        .split("fn execute_linalg_extension_reads_in_session")
+        .nth(1)
+        .unwrap()
+        .split("let materialized_inputs")
+        .next()
+        .unwrap();
+    for hook in [
+        "svd_read",
+        "svd_values_read",
+        "qr_with_options_read",
+        "rank_revealing_qr_read",
+        "eigh_read",
+        "eigh_values_read",
+        "lu_read",
+        "full_piv_lu_read",
+        "eig_read",
+        "cholesky_read",
+        "triangular_solve_read",
+    ] {
+        assert!(
+            body.contains(&format!("session.{hook}(")),
+            "missing direct read hook: {hook}"
+        );
+    }
+}
+
+#[test]
 fn infer_output_meta_returns_error_on_input_count_mismatch() {
     let op = LinalgExtensionOp::new(LinalgOp::Cholesky);
 

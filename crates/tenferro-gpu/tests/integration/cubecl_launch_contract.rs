@@ -17,6 +17,31 @@ fn rust_sources_under(dir: &Path, sources: &mut Vec<(PathBuf, String)>) {
 }
 
 #[test]
+fn reduction_first_axis_reads_input_without_pre_materializing() {
+    let source = std::fs::read_to_string("src/cubecl/mod.rs").unwrap();
+    let body = source_section(
+        &source,
+        "    fn reduce_axes_typed<",
+        "    fn reduce_sum_float_typed<",
+    );
+    assert!(body.contains("launch_axis(self, input, *first_axis)"));
+    // Empty axes must still return independent storage; only nonempty
+    // reductions avoid the preliminary copy.
+    let nonempty = body.split("let final_shape =").nth(1).unwrap();
+    assert!(!nonempty.contains("to_contiguous_view_typed"));
+}
+
+#[test]
+fn cuda_elementwise_read_into_has_native_output_path() {
+    let source = std::fs::read_to_string("src/cubecl/mod.rs").unwrap();
+    let body = source_section(&source, "    fn elementwise_read_into(", "    fn add(");
+    assert!(body.contains("elementwise_read_into_native"));
+    assert!(body.contains("elementwise_read_into_via_allocating_ops"));
+    let dispatch = std::fs::read_to_string("src/cubecl/dispatch.rs").unwrap();
+    assert!(dispatch.contains("typed_tensor_mut_array_arg"));
+}
+
+#[test]
 fn bool_structural_support_uses_copy_kernels_and_scatter_stays_excluded() {
     let source = std::fs::read_to_string("src/cubecl/mod.rs").unwrap();
     for needle in [
