@@ -1406,10 +1406,8 @@ fn reclaim_segment_inputs_exec(
     exec: &mut dyn tenferro_tensor::BackendSession,
 ) {
     for (&slot, &is_last_use) in input_slots.iter().zip(last_use.iter()) {
-        if is_last_use {
-            if let Some(ExecSlot::Owned(tensor)) = slots[slot].take() {
-                exec.reclaim_buffer(tensor);
-            }
+        if is_last_use && let Some(ExecSlot::Owned(tensor)) = slots[slot].take() {
+            exec.reclaim_buffer(tensor);
         }
     }
 }

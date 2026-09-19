@@ -22,6 +22,42 @@ use super::{
 use crate::CpuBackend;
 
 #[test]
+fn managed_ingress_requires_a_registered_matching_allocation_domain() {
+    use tenferro_tensor::{AllocationDomainId, MemoryKind};
+    let own = AllocationDomainId::fresh();
+    let foreign = AllocationDomainId::fresh();
+    let mut placement = Placement {
+        memory_kind: MemoryKind::Managed,
+        device: None,
+        cpu_affinity: None,
+    };
+    assert!(super::cpu_input_signature(
+        &placement,
+        Some("managed"),
+        Some(own),
+        Some(own)
+    ));
+    for (family, input, registered) in [
+        (Some("managed"), Some(foreign), Some(own)),
+        (Some("managed"), None, Some(own)),
+        (Some("managed"), Some(own), None),
+        (None, Some(own), Some(own)),
+        (None, None, Some(own)),
+    ] {
+        assert!(!super::cpu_input_signature(
+            &placement, family, input, registered
+        ));
+    }
+    placement.memory_kind = MemoryKind::Device;
+    assert!(!super::cpu_input_signature(
+        &placement,
+        Some("managed"),
+        Some(own),
+        Some(own)
+    ));
+}
+
+#[test]
 fn cpu_backend_coerces_to_all_runtime_traits() {
     let backend = Arc::new(CpuBackend::new());
 

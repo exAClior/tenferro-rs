@@ -209,10 +209,10 @@ impl ConstraintScopeChain {
             return;
         }
         *visited_nodes += 1;
-        if let Some(scope) = &self.node.scope {
-            if seen_scopes.insert(Arc::as_ptr(scope)) {
-                scopes.push(Arc::clone(scope));
-            }
+        if let Some(scope) = &self.node.scope
+            && seen_scopes.insert(Arc::as_ptr(scope))
+        {
+            scopes.push(Arc::clone(scope));
         }
         for parent in &self.node.parents {
             parent.extend_materialized(scopes, seen_scopes, seen_nodes, visited_nodes);

@@ -427,14 +427,13 @@ fn append_graph_metadata_registrations(
     for op_node in graph.operations() {
         #[cfg(test)]
         test_support::record_operation_visit();
-        if let Some(live_values) = live_values {
-            if !op_node
+        if let Some(live_values) = live_values
+            && !op_node
                 .outputs
                 .iter()
                 .any(|output_id| live_values.contains(output_id))
-            {
-                continue;
-            }
+        {
+            continue;
         }
 
         if !collect_constraints {

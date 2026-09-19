@@ -109,40 +109,41 @@ pub fn dot_decomposer(program: &mut ExecProgram, input_shapes: &[Vec<DimExpr>]) 
             _ => None,
         };
 
-        if let Some((config, lhs_conj, rhs_conj)) = dot_config_and_conj {
-            if instr.input_slots.len() == 2 && !config.lhs_contracting_dims.is_empty() {
-                let lhs_slot = instr.input_slots[0];
-                let rhs_slot = instr.input_slots[1];
-                let lhs_shape = require_slot_shape(&slot_shapes, lhs_slot)?;
-                let rhs_shape = require_slot_shape(&slot_shapes, rhs_slot)?;
-                let lhs_extents = require_slot_extents(&slot_extents, lhs_slot)?;
-                let rhs_extents = require_slot_extents(&slot_extents, rhs_slot)?;
-                if !is_dot_canonical(config, lhs_shape.len(), rhs_shape.len()) {
-                    let mut builder = InstructionBuilder {
-                        n_slots: &mut n_slots,
-                        instructions: &mut new_instructions,
-                    };
-                    decompose_dot(
-                        DotDecomposeInput {
-                            instr,
-                            config,
-                            lhs: OperandMeta {
-                                slot: lhs_slot,
-                                shape: lhs_shape,
-                                extents: lhs_extents,
-                            },
-                            rhs: OperandMeta {
-                                slot: rhs_slot,
-                                shape: rhs_shape,
-                                extents: rhs_extents,
-                            },
-                            lhs_conj,
-                            rhs_conj,
+        if let Some((config, lhs_conj, rhs_conj)) = dot_config_and_conj
+            && instr.input_slots.len() == 2
+            && !config.lhs_contracting_dims.is_empty()
+        {
+            let lhs_slot = instr.input_slots[0];
+            let rhs_slot = instr.input_slots[1];
+            let lhs_shape = require_slot_shape(&slot_shapes, lhs_slot)?;
+            let rhs_shape = require_slot_shape(&slot_shapes, rhs_slot)?;
+            let lhs_extents = require_slot_extents(&slot_extents, lhs_slot)?;
+            let rhs_extents = require_slot_extents(&slot_extents, rhs_slot)?;
+            if !is_dot_canonical(config, lhs_shape.len(), rhs_shape.len()) {
+                let mut builder = InstructionBuilder {
+                    n_slots: &mut n_slots,
+                    instructions: &mut new_instructions,
+                };
+                decompose_dot(
+                    DotDecomposeInput {
+                        instr,
+                        config,
+                        lhs: OperandMeta {
+                            slot: lhs_slot,
+                            shape: lhs_shape,
+                            extents: lhs_extents,
                         },
-                        &mut builder,
-                    )?;
-                    continue;
-                }
+                        rhs: OperandMeta {
+                            slot: rhs_slot,
+                            shape: rhs_shape,
+                            extents: rhs_extents,
+                        },
+                        lhs_conj,
+                        rhs_conj,
+                    },
+                    &mut builder,
+                )?;
+                continue;
             }
         }
         new_instructions.push(instr.clone());

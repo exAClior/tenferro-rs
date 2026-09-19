@@ -62,6 +62,7 @@ class ChangePolicyTests(unittest.TestCase):
             "scripts/ci/runpod_client.py",
             "scripts/ci/runpod_config.json",
             ".github/workflows/runpod-gpu-test.yml",
+            ".github/workflows/runpod-gpu-execute.yml",
             ".github/workflows/CI_gpu.yml",
             ".github/workflows/ci-cache-publish.yml",
             "scripts/ci/find_archive_artifact.py",

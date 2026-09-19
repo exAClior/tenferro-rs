@@ -465,8 +465,12 @@ fn public_cpu_linalg_read_methods_keep_one_operation_entry() {
         .find("self.with_linalg_pool_fresh(")
         .expect("cholesky_read must have one operation entry");
     let managed_dispatch = cholesky
-        .find("tensor_uses_backend_storage")
-        .expect("cholesky_read must retain managed-storage dispatch");
+        .find("input.backend_family().is_some()")
+        .expect("cholesky_read must dispatch managed owned and borrowed descriptors");
+    assert!(
+        !cholesky.contains("input.as_tensor()"),
+        "managed dispatch must not require an owned tensor"
+    );
     assert!(
         entry < managed_dispatch,
         "cholesky_read must enter CPU resources before choosing the managed-storage path"

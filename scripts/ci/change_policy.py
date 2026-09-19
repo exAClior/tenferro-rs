@@ -81,6 +81,7 @@ _GPU_CONTROL_FILES = frozenset(
     {
         ".github/workflows/CI_gpu.yml",
         ".github/workflows/runpod-gpu-test.yml",
+        ".github/workflows/runpod-gpu-execute.yml",
         ".github/workflows/ci-cache-publish.yml",
         "scripts/ci/change_policy.py",
         "scripts/ci/runpod_client.py",

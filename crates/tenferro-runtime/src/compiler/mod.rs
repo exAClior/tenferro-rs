@@ -904,10 +904,11 @@ struct ConjSinkingState<'a> {
 impl ConjSinkingState<'_> {
     fn ensure_conj_slot(&mut self, slot: usize) -> Result<usize> {
         let slot = resolve_slot_redirect(slot, self.redirect)?;
-        if let Some(producer) = producer_for_slot(self.producer_by_slot, slot) {
-            if matches!(producer.op, ExecOp::Conj) && producer.input_slots.len() == 1 {
-                return resolve_slot_redirect(producer.input_slots[0], self.redirect);
-            }
+        if let Some(producer) = producer_for_slot(self.producer_by_slot, slot)
+            && matches!(producer.op, ExecOp::Conj)
+            && producer.input_slots.len() == 1
+        {
+            return resolve_slot_redirect(producer.input_slots[0], self.redirect);
         }
         if let Some(&conj_slot) = self.conj_cache.get(&slot) {
             return Ok(conj_slot);

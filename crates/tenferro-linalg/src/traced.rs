@@ -1538,10 +1538,10 @@ pub fn norm(
     if axes.is_empty() {
         return Ok(a.clone());
     }
-    if reduced_axes_have_zero_extent(&shape, &axes) {
-        if let Some(zero) = zero_norm_for_empty_reduction(a.dtype, &shape, &axes, keepdim, ord)? {
-            return Ok(zero);
-        }
+    if reduced_axes_have_zero_extent(&shape, &axes)
+        && let Some(zero) = zero_norm_for_empty_reduction(a.dtype, &shape, &axes, keepdim, ord)?
+    {
+        return Ok(zero);
     }
 
     let out = if can_square_without_abs(a.dtype, axes.len(), ord) {

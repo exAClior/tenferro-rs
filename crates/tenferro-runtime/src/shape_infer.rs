@@ -900,13 +900,13 @@ fn validate_gather_slice_sizes_within_operand(
     slice_sizes: &[DimExpr],
 ) -> Result<()> {
     for (slice_size, dim_size) in slice_sizes.iter().zip(operand_shape) {
-        if let (DimExpr::Const(slice_size), DimExpr::Const(dim_size)) = (slice_size, dim_size) {
-            if slice_size > dim_size {
-                return Err(shape_infer_validation(ShapeMismatch::ExpectedActual {
-                    expected: ShapeVec::from_vec(vec![*dim_size]),
-                    actual: ShapeVec::from_vec(vec![*slice_size]),
-                }));
-            }
+        if let (DimExpr::Const(slice_size), DimExpr::Const(dim_size)) = (slice_size, dim_size)
+            && slice_size > dim_size
+        {
+            return Err(shape_infer_validation(ShapeMismatch::ExpectedActual {
+                expected: ShapeVec::from_vec(vec![*dim_size]),
+                actual: ShapeVec::from_vec(vec![*slice_size]),
+            }));
         }
     }
     Ok(())

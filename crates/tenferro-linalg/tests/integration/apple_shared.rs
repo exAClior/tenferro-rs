@@ -13,6 +13,10 @@ fn apple_context() -> Option<AppleContext> {
     match AppleContext::new() {
         Ok(context) => Some(context),
         Err(error) => {
+            assert!(
+                std::env::var_os("TENFERRO_REQUIRE_METAL").is_none(),
+                "Apple CI requires Metal: {error}"
+            );
             eprintln!("skipping Apple shared Cholesky test: {error}");
             None
         }
@@ -37,8 +41,14 @@ fn f32_ids(
     (tensor.allocation_domain(), tensor.allocation_id())
 }
 
+fn cpu_cholesky(context: &AppleContext, input: &Tensor) -> tenferro_tensor::Result<Tensor> {
+    support::with_cpu_linalg(&mut context.cpu_backend().clone(), |session| {
+        session.cholesky(input)
+    })
+}
+
 fn assert_cholesky_result(
-    input: &Tensor,
+    input_id: Option<tenferro_tensor::AllocationId>,
     output: &Tensor,
     context: &AppleContext,
     before: tenferro_gpu::apple::AppleTransferStats,
@@ -63,7 +73,6 @@ fn assert_cholesky_result(
         "Cholesky reconstruction residual: {residual}"
     );
     let (output_domain, output_id) = f32_ids(output);
-    let (_, input_id) = f32_ids(input);
     assert_eq!(output_domain, Some(context.domain_id()));
     assert_ne!(output_id, None);
     assert_ne!(output_id, input_id);
@@ -102,10 +111,7 @@ fn managed_cpu_cholesky_supports_all_cpu_float_and_complex_dtypes() {
         .upload_tensor(&Tensor::from_vec_col_major([2, 2], vec![4.0_f64, 2.0, 2.0, 3.0]).unwrap())
         .unwrap();
     let before = context.transfer_stats();
-    let f64_output = context
-        .cpu_backend()
-        .clone()
-        .cholesky(&f64_input)
+    let f64_output = cpu_cholesky(&context, &f64_input)
         .unwrap()
         .into_typed::<f64>()
         .expect("expected F64 output");
@@ -123,10 +129,7 @@ fn managed_cpu_cholesky_supports_all_cpu_float_and_complex_dtypes() {
         )
         .unwrap();
     let before = context.transfer_stats();
-    let c32_output = context
-        .cpu_backend()
-        .clone()
-        .cholesky(&c32_input)
+    let c32_output = cpu_cholesky(&context, &c32_input)
         .unwrap()
         .into_typed::<tenferro_tensor::Complex32>()
         .expect("expected C32 output");
@@ -145,10 +148,7 @@ fn managed_cpu_cholesky_supports_all_cpu_float_and_complex_dtypes() {
         )
         .unwrap();
     let before = context.transfer_stats();
-    let c64_output = context
-        .cpu_backend()
-        .clone()
-        .cholesky(&c64_input)
+    let c64_output = cpu_cholesky(&context, &c64_input)
         .unwrap()
         .into_typed::<tenferro_tensor::Complex64>()
         .expect("expected C64 output");
@@ -161,31 +161,45 @@ fn managed_cpu_cholesky_supports_all_cpu_float_and_complex_dtypes() {
 }
 
 #[test]
-fn public_concrete_eager_and_traced_cholesky_preserve_apple_domain_without_transfers() {
+fn concrete_cholesky_preserves_apple_domain_without_transfers() {
     let Some(context) = apple_context() else {
         return;
     };
 
     let input = managed_spd(&context);
     let before = context.transfer_stats();
-    let direct = context.cpu_backend().clone().cholesky(&input).unwrap();
-    assert_cholesky_result(&input, &direct, &context, before);
+    let direct = cpu_cholesky(&context, &input).unwrap();
+    assert_cholesky_result(f32_ids(&input).1, &direct, &context, before);
+}
 
+#[test]
+fn eager_cholesky_preserves_apple_domain_without_transfers() {
+    let Some(context) = apple_context() else {
+        return;
+    };
     let input = managed_spd(&context);
     let before = context.transfer_stats();
     let runtime = EagerRuntime::with_cpu_backend(context.cpu_backend().clone()).unwrap();
-    let eager_input = EagerTensor::from_tensor_in(input.clone(), runtime).unwrap();
+    let input_id = f32_ids(&input).1;
+    let eager_input = EagerTensor::from_tensor_in(input, runtime).unwrap();
     let eager = eager_input.cholesky().unwrap().to_tensor().unwrap();
-    assert_cholesky_result(&input, eager.as_ref(), &context, before);
+    assert_cholesky_result(input_id, &eager, &context, before);
+}
 
+#[test]
+fn traced_cholesky_preserves_apple_domain_without_transfers() {
+    let Some(context) = apple_context() else {
+        return;
+    };
     let input = managed_spd(&context);
     let before = context.transfer_stats();
-    let traced_input = TracedTensor::from_tensor_concrete_shape(input.clone()).unwrap();
+    let input_id = f32_ids(&input).1;
+    let traced_input = TracedTensor::from_tensor_concrete_shape(input).unwrap();
     let traced_output = traced_input.cholesky().unwrap();
     let program = GraphCompiler::new().compile(&traced_output).unwrap();
     let runtime = support::cpu_runtime_with_linalg(context.cpu_backend()).unwrap();
     let traced = runtime.run_compiled(&program, &[]).unwrap().remove(0);
-    assert_cholesky_result(&input, &traced, &context, before);
+    assert_cholesky_result(input_id, &traced, &context, before);
 }
 
 #[test]
@@ -196,7 +210,7 @@ fn managed_cholesky_rejects_foreign_and_device_local_storage_without_transfers()
     let foreign = managed_spd(&first);
     let first_before = first.transfer_stats();
     let second_before = second.transfer_stats();
-    let error = second.cpu_backend().clone().cholesky(&foreign).unwrap_err();
+    let error = cpu_cholesky(&second, &foreign).unwrap_err();
     assert!(matches!(
         error,
         tenferro_tensor::Error::HostAccess {
@@ -214,11 +228,7 @@ fn managed_cholesky_rejects_foreign_and_device_local_storage_without_transfers()
     let device_local = upload_webgpu_tensor(&runtime, &host).unwrap();
     runtime.synchronize().unwrap();
     let before = first.transfer_stats();
-    let error = first
-        .cpu_backend()
-        .clone()
-        .cholesky(&device_local)
-        .unwrap_err();
+    let error = cpu_cholesky(&first, &device_local).unwrap_err();
     assert!(matches!(
         error,
         tenferro_tensor::Error::HostAccess {
@@ -240,11 +250,7 @@ fn managed_cholesky_validates_rank_shape_and_positive_definiteness_before_output
     ] {
         let managed = context.upload_tensor(&host).unwrap();
         let before = context.transfer_stats();
-        let error = context
-            .cpu_backend()
-            .clone()
-            .cholesky(&managed)
-            .unwrap_err();
+        let error = cpu_cholesky(&context, &managed).unwrap_err();
         assert!(matches!(error, tenferro_tensor::Error::Validation { .. }));
         assert_eq!(context.transfer_stats(), before);
     }
@@ -253,11 +259,7 @@ fn managed_cholesky_validates_rank_shape_and_positive_definiteness_before_output
         .upload_tensor(&Tensor::from_vec_col_major([2, 2], vec![1.0_f32, 2.0, 2.0, 1.0]).unwrap())
         .unwrap();
     let before = context.transfer_stats();
-    let error = context
-        .cpu_backend()
-        .clone()
-        .cholesky(&not_positive_definite)
-        .unwrap_err();
+    let error = cpu_cholesky(&context, &not_positive_definite).unwrap_err();
     assert!(matches!(error, tenferro_tensor::Error::Extension { .. }));
     assert_eq!(context.transfer_stats(), before);
 }

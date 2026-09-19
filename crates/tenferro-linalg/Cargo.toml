@@ -2,7 +2,7 @@
 name = "tenferro-linalg"
 autotests = false
 version.workspace = true
-edition.workspace = true
+edition = "2024"
 license.workspace = true
 authors.workspace = true
 publish.workspace = true
@@ -39,16 +39,19 @@ cpu-blas = [
     "tenferro-cpu/cpu-blas",
 ]
 blas-openblas = [
+    "cpu-blas",
     "tenferro-ad?/blas-openblas",
     "tenferro-cpu/blas-openblas",
     "tenferro-gpu?/blas-openblas",
 ]
 blas-accelerate = [
+    "cpu-blas",
     "tenferro-ad?/blas-accelerate",
     "tenferro-cpu/blas-accelerate",
     "tenferro-gpu?/blas-accelerate",
 ]
 blas-mkl = [
+    "cpu-blas",
     "tenferro-ad?/blas-mkl",
     "tenferro-cpu/blas-mkl",
     "tenferro-gpu?/blas-mkl",
@@ -71,7 +74,7 @@ cuda = [
     "tenferro-gpu/cuda",
 ]
 rocm = ["tenferro-ad?/rocm", "tenferro-internal-ops/rocm"]
-webgpu = ["dep:tenferro-gpu", "tenferro-gpu/webgpu"]
+webgpu = ["tenferro-ad?/webgpu", "dep:tenferro-gpu", "tenferro-gpu/webgpu"]
 
 [dependencies]
 tenferro-runtime = { path = "../tenferro-runtime", version = "0.5.0", default-features = false }
@@ -132,3 +135,8 @@ path = "tests/integration.rs"
 [[test]]
 name = "prelude"
 path = "tests/prelude.rs"
+
+[[test]]
+name = "apple_accelerate"
+path = "tests/apple_accelerate.rs"
+required-features = ["blas-accelerate", "webgpu", "autodiff"]

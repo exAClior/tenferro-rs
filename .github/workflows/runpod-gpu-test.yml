@@ -84,9 +84,7 @@ on:
     # pre-runpod gate still waits for rustfmt and clippy before any paid pod.
     types: [in_progress]
 
-concurrency:
-  group: runpod-tenferro-gpu-${{ github.ref }}
-  cancel-in-progress: false
+# Preparation is independent; only the reusable paid lifecycle is serialized.
 
 permissions:
   checks: read
@@ -127,6 +125,8 @@ jobs:
       gpu_required: ${{ steps.resolve_ref.outputs.run_gpu }}
       policy_reason: ${{ steps.resolve_ref.outputs.reason }}
       target_head_sha: ${{ steps.resolve_ref.outputs.target_head_sha }}
+      target_base_sha: ${{ steps.resolve_ref.outputs.target_base_sha }}
+      pr_number: ${{ steps.resolve_ref.outputs.pr_number }}
 
     steps:
       # workflow_run resolves this checkout to trusted default-branch content.
@@ -244,6 +244,8 @@ jobs:
             {
               echo "tenferro_ref=${merge_sha}"
               echo "target_head_sha=${pr_head_sha}"
+              echo "target_base_sha=${pr_base_sha}"
+              echo "pr_number=${pr_number}"
             } >> "${GITHUB_OUTPUT}"
             classify_pr_paths "${pr_number}"
           else
@@ -290,12 +292,15 @@ jobs:
               {
                 echo "tenferro_ref=${pr_head_sha}"
                 echo "target_head_sha=${pr_head_sha}"
+                echo "pr_number=${MANUAL_PR_NUMBER}"
               } >> "${GITHUB_OUTPUT}"
               classify_pr_paths "${MANUAL_PR_NUMBER}"
             else
               manual_ref="${MANUAL_TENFERRO_REF:-main}"
+              manual_sha="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${manual_ref}" --jq .sha)"
               {
-                echo "tenferro_ref=${manual_ref}"
+                echo "tenferro_ref=${manual_sha}"
+                echo "pr_number=0"
                 echo "target_head_sha=${MANUAL_GATE_HEAD_SHA}"
                 echo "run_gpu=true"
                 echo "reason=trusted manual revision validation"
@@ -470,7 +475,7 @@ jobs:
           # archive build commands or toolkit selection change; unrelated
           # workflow edits must not invalidate the key (#1403).
           rustc_version="$(rustc -V | awk '{print $2}')"
-          key="cuda-pjrt-archive-v15-ci-ubuntu22.04-rust${rustc_version}-cuda${CUDARC_CUDA_VERSION}-ptx${CUDA_RUNTIME_VERSION}-${{ hashFiles('tenferro-rs/Cargo.lock', 'tenferro-rs/**/Cargo.toml', 'tenferro-rs/**/src/**', 'tenferro-rs/**/tests/**', 'tenferro-rs/**/examples/**', 'tenferro-rs/**/benches/**', 'tenferro-rs/**/build.rs', 'tenferro-rs/scripts/ci/**', 'tenferro-rs/.cargo/**', 'tenferro-rs/rust-toolchain*', 'tenferro-rs/REPOSITORY_RULES.md', 'tenferro-rs/PERFORMANCE_TIPS.md', 'tenferro-rs/docs/tutorial-code/**', 'tenferro-rs/docs/guides/devices-and-gpu.md', 'tenferro-rs/docs/performance/tt-inner-product-overhead.md') }}"
+          key="cuda-pjrt-archive-v16-ci-ubuntu22.04-rust${rustc_version}-cuda${CUDARC_CUDA_VERSION}-ptx${CUDA_RUNTIME_VERSION}-${{ hashFiles('tenferro-rs/Cargo.lock', 'tenferro-rs/**/Cargo.toml', 'tenferro-rs/**/src/**', 'tenferro-rs/**/tests/**', 'tenferro-rs/**/examples/**', 'tenferro-rs/**/benches/**', 'tenferro-rs/**/build.rs', 'tenferro-rs/scripts/ci/**', 'tenferro-rs/.cargo/**', 'tenferro-rs/rust-toolchain*', 'tenferro-rs/REPOSITORY_RULES.md', 'tenferro-rs/PERFORMANCE_TIPS.md', 'tenferro-rs/docs/tutorial-code/**', 'tenferro-rs/docs/guides/devices-and-gpu.md', 'tenferro-rs/docs/performance/tt-inner-product-overhead.md') }}"
           {
             echo "key=${key}"
             echo "artifact_name=${key}"
@@ -534,9 +539,20 @@ jobs:
             echo "CUDA/PJRT archive cache and artifact miss; building CUDA ${CUDA_RUNTIME_VERSION} PTX and PJRT archives."
           fi
 
+      - name: Prepare CUDA toolkit cache directory
+        if: steps.cuda_archive_cache.outputs.cache-hit != 'true' && steps.archive_reuse.outputs.reused != 'true'
+        run: |
+          sudo mkdir -p "${TENFERRO_CI_CACHE_ROOT}/cuda-toolkit-${CUDA_RUNTIME_VERSION}"
+          sudo chown "$(id -u):$(id -g)" "${TENFERRO_CI_CACHE_ROOT}/cuda-toolkit-${CUDA_RUNTIME_VERSION}"
+      - name: Restore trusted CUDA toolkit
+        if: steps.cuda_archive_cache.outputs.cache-hit != 'true' && steps.archive_reuse.outputs.reused != 'true'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.TENFERRO_CI_CACHE_ROOT }}/cuda-toolkit-${{ env.CUDA_RUNTIME_VERSION }}
+          key: cuda-toolkit-${{ runner.os }}-ubuntu22-x86_64-${{ env.CUDA_RUNTIME_VERSION }}-v1-${{ hashFiles('tenferro-rs/scripts/ci/install_cuda_toolkit_hosted.sh') }}
       - name: Install CUDA toolkit for archive PTX
         if: steps.cuda_archive_cache.outputs.cache-hit != 'true' && steps.archive_reuse.outputs.reused != 'true'
-        run: bash tenferro-rs/scripts/ci/install_cuda_toolkit_hosted.sh "${CUDA_RUNTIME_VERSION}"
+        run: bash tenferro-rs/scripts/ci/install_cuda_toolkit_hosted.sh "${CUDA_RUNTIME_VERSION}" "${TENFERRO_CI_CACHE_ROOT}/cuda-toolkit-${CUDA_RUNTIME_VERSION}"
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         if: steps.cuda_archive_cache.outputs.cache-hit != 'true' && steps.archive_reuse.outputs.reused != 'true'
@@ -640,754 +656,23 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  start-runpod:
-    name: Start RunPod org runner
-    needs:
-      - authorize
-      - runpod-contract
-      - pre-runpod-gate
-      - cuda-archive
+  gpu-execution:
+    name: Paid GPU lifecycle
+    needs: [authorize, runpod-contract, pre-runpod-gate, cuda-archive]
     if: needs.authorize.outputs.gpu_required == 'true'
-    runs-on: ubuntu-latest
-    # Bounded provision attempts may create, smoke-test, and delete several
-    # candidate pods before one is accepted. Must exceed the worst case of
-    # max_provision_attempts x (create_deadline_seconds +
-    # startup_timeout_seconds + deletion) plus setup, so the loop reaches
-    # its explicit exhaustion error instead of being cancelled mid-attempt
-    # (contract-tested).
-    timeout-minutes: 70
-
-    outputs:
-      pod_id: ${{ steps.create_pod.outputs.pod_id }}
-      # Per-attempt label of the ACCEPTED runner: each provision candidate
-      # mints its own single-use JIT config under a fresh label so a stale
-      # online record from a rejected pod can never satisfy the wait.
-      runner_label: ${{ steps.create_pod.outputs.runner_label }}
-      gpu_type_id: ${{ steps.create_pod.outputs.gpu_type_id }}
-      gpu_tier: ${{ steps.create_pod.outputs.gpu_tier }}
-      gpu_cost_per_hr: ${{ steps.create_pod.outputs.gpu_cost_per_hr }}
-
-    steps:
-      - name: Checkout trusted RunPod client
-        uses: actions/checkout@v5
-
-      - name: Define runner label
-        id: vars
-        run: |
-          set -euo pipefail
-          echo "runner_label=runpod-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" >> "$GITHUB_OUTPUT"
-
-      - name: Create GitHub App token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          client-id: ${{ secrets.GH_APP_CLIENT_ID }}
-          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
-          owner: ${{ env.ORG_NAME }}
-
-      # JIT (just-in-time) runner configs replace the old org-level
-      # registration-token + `config.sh` flow (see issue #1, finding 1). A JIT
-      # config is single-runner, single-job, cannot be replayed, and is scoped
-      # to the runner group below, so a leaked config has far smaller blast
-      # radius than the old org-wide reusable registration token.
-      #
-      # The provision loop mints one JIT config PER CANDIDATE ATTEMPT under a
-      # fresh per-attempt label: a JIT config cannot be replayed after an
-      # earlier candidate registered with it, and a shared label would let a
-      # stale online record from a rejected pod satisfy the wait for a new
-      # pod that never passed the smoke proof (#1404).
-      #
-      # runner_group_id defaults to 1 (the org's "Default" runner group, which
-      # every repo in the org can use). To actually restrict which repos may
-      # consume these runners, create a dedicated restricted runner group in
-      # the organization settings and set the `RUNPOD_RUNNER_GROUP_ID` repo
-      # variable to its id.
-      - name: Provision cheapest compatible RunPod pod
-        id: create_pod
-        env:
-          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
-          RUNPOD_IMAGE: ${{ env.RUNPOD_IMAGE }}
-          PROVISION_GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          PROVISION_ORG: ${{ env.ORG_NAME }}
-          PROVISION_RUNNER_LABEL: ${{ steps.vars.outputs.runner_label }}
-          PROVISION_RUNNER_GROUP_ID: ${{ vars.RUNPOD_RUNNER_GROUP_ID || '1' }}
-          PROVISION_KEEP_FAILED_PODS: ${{ inputs.keep_failed_pods || 'false' }}
-        run: |
-          set -euo pipefail
-
-          smoke_min_vram_gb="$(jq -r '.min_vram_gb' scripts/ci/runpod_config.json)"
-          cat > /tmp/runpod-startup.sh <<'EOS'
-          set -euo pipefail
-
-          export DEBIAN_FRONTEND=noninteractive
-          export RUNNER_ALLOW_RUNASROOT=1
-
-          apt-get update
-          # zstd must be present BEFORE any actions/cache restore step runs
-          # on this pod: the cache version hash includes the available
-          # compression tool, so a pod without zstd can never hit entries
-          # saved by the zstd-equipped hosted publisher (observed as
-          # "Cache not found" for exact-match keys).
-          apt-get install -y \
-            curl \
-            jq \
-            tar \
-            gzip \
-            zstd \
-            ca-certificates \
-            build-essential \
-            pkg-config \
-            libssl-dev \
-            git \
-            python3 \
-            python3-pip
-
-          nvidia-smi
-          df -h
-          free -h
-          nproc
-
-          cat > /tmp/cuda_smoke_test.py <<'EMBEDDED_SMOKE_PY'
-          EOS
-          # Embed the smoke script from the trusted checkout between the
-          # startup-script halves so the pod needs no network fetch for it.
-          cat scripts/ci/cuda_smoke_test.py >> /tmp/runpod-startup.sh
-          cat >> /tmp/runpod-startup.sh <<'EOS'
-          EMBEDDED_SMOKE_PY
-
-          # CUDA compatibility smoke proof (#1404): NVRTC-compile a tiny
-          # kernel, load its PTX through the driver, launch, and synchronize
-          # BEFORE registering the runner. On an incompatible host this
-          # exits nonzero, the container stops without ever becoming a
-          # runner, and the trusted provision loop deletes the pod and
-          # retries the next candidate with the same immutable archive.
-          # The smoke script is EMBEDDED below by the trusted start-runpod
-          # job from its own checkout — no runtime network fetch, so pod-side
-          # rate limiting or DNS cannot break the proof. The long-lived
-          # RunPod/GitHub App credentials never reach the pod; the
-          # single-use JIT runner config necessarily does, so strip it from
-          # the smoke child's environment.
-          env -u RUNNER_JIT_CONFIG python3 /tmp/cuda_smoke_test.py \
-            --min-runtime-version "${SMOKE_MIN_RUNTIME_VERSION}" \
-            --full-runtime-version "${SMOKE_FULL_RUNTIME_VERSION}" \
-            --min-vram-gb "${SMOKE_MIN_VRAM_GB}"
-
-          cd /tmp
-          rm -rf actions-runner
-          mkdir actions-runner
-          cd actions-runner
-
-          # Pinned actions/runner release (see issue #1, finding 5): resolving
-          # "latest" at pod-startup time means an attacker who can publish (or
-          # a bad actor who can compromise) a runner release gets to run code
-          # on every pod we create the moment it lands. Bump both values
-          # together after checking the new release's published SHA-256:
-          #   gh api repos/actions/runner/releases/latest \
-          #     --jq '.tag_name, .body' | less
-          # (the sha256 for actions-runner-linux-x64-<version>.tar.gz is in
-          # the "SHA-256 Checksums" section of the release body).
-          RUNNER_VERSION="2.335.1"
-          RUNNER_SHA256="4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf"
-          RUNNER_TARBALL="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
-
-          curl -fsSL -o "${RUNNER_TARBALL}" \
-            "https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${RUNNER_TARBALL}"
-
-          echo "${RUNNER_SHA256}  ${RUNNER_TARBALL}" | sha256sum -c
-
-          tar xzf "${RUNNER_TARBALL}"
-
-          ./run.sh --jitconfig "${RUNNER_JIT_CONFIG}"
-          EOS
-
-          # The provision loop orders reviewed candidates by live Secure
-          # Cloud price, creates one pod at a time, waits for the smoke
-          # proof (runner online) or startup failure (pod exited), deletes
-          # incompatible pods immediately, and stops after the bounded
-          # attempt budget with an explicit error.
-          python3 -m scripts.ci.runpod_provision \
-            --config scripts/ci/runpod_config.json \
-            --startup-script /tmp/runpod-startup.sh \
-            --image-name "${RUNPOD_IMAGE}" \
-            --response-file /tmp/runpod-response.json \
-            --pod-env "SMOKE_MIN_RUNTIME_VERSION=${CUDA_MIN_RUNTIME_VERSION}" \
-            --pod-env "SMOKE_FULL_RUNTIME_VERSION=${CUDA_RUNTIME_VERSION}" \
-            --pod-env "SMOKE_MIN_VRAM_GB=${smoke_min_vram_gb}"
-
-      - name: Delete pod if runner startup failed
-        # keep_failed_pods debug dispatches preserve the last failed pod so
-        # its console logs stay readable in the RunPod dashboard.
-        if: failure() && steps.create_pod.outputs.pod_id != '' && inputs.keep_failed_pods != true
-        env:
-          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
-          POD_ID: ${{ steps.create_pod.outputs.pod_id }}
-        run: |
-          set -euo pipefail
-
-          echo "Deleting RunPod pod after startup failure: ${POD_ID}"
-
-          response_file=/tmp/runpod-delete-response.json
-          status="$(
-            curl -sS \
-              --request DELETE \
-              --url "https://rest.runpod.io/v1/pods/${POD_ID}" \
-              --header "Authorization: Bearer ${RUNPOD_API_KEY}" \
-              --output "$response_file" \
-              --write-out "%{http_code}"
-          )"
-
-          echo "RunPod delete HTTP status: ${status}"
-          jq . "$response_file" || cat "$response_file" || true
-
-          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
-            echo "Warning: failed to delete RunPod pod after startup failure" >&2
-            exit 0
-          fi
-
-  run-gpu-tests:
-    name: CUDA GPU tests on RunPod
-    needs:
-      - authorize
-      - cuda-archive
-      - start-runpod
-    if: needs.authorize.outputs.gpu_required == 'true'
-
-    env:
-      TENFERRO_REF: ${{ needs.authorize.outputs.tenferro_ref }}
-
-    runs-on:
-      - self-hosted
-      - ${{ needs.start-runpod.outputs.runner_label }}
-
-    timeout-minutes: 45
-
-    steps:
-      - name: Checkout tenferro-rs
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          repository: ${{ env.TENFERRO_REPO }}
-          ref: ${{ env.TENFERRO_REF }}
-          path: tenferro-rs
-
-      - uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # master (2026-07-07)
-        with:
-          toolchain: stable
-
-      - name: Restore CUDA/PJRT test archives
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: cuda_archive_restore
-        with:
-          path: |
-            tenferro-rs/${{ env.CUDA_ARCHIVE }}
-            tenferro-rs/${{ env.PJRT_ARCHIVE }}
-            tenferro-rs/${{ env.CUDA_TUTORIAL_ARCHIVE }}
-          key: ${{ needs.cuda-archive.outputs.archive_cache_key }}
-
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: steps.cuda_archive_restore.outputs.cache-hit != 'true'
-        with:
-          name: ${{ needs.cuda-archive.outputs.archive_artifact_name }}
-          path: tenferro-rs
-
-      - name: Log CUDA/PJRT archive source
-        run: |
-          if [ "${{ steps.cuda_archive_restore.outputs.cache-hit }}" = "true" ]; then
-            echo "Using CUDA/PJRT test archives restored from GitHub Actions cache."
-          else
-            echo "Using CUDA/PJRT test archives downloaded from workflow artifact."
-          fi
-          ls -lh "tenferro-rs/${CUDA_ARCHIVE}" "tenferro-rs/${PJRT_ARCHIVE}" "tenferro-rs/${CUDA_TUTORIAL_ARCHIVE}"
-
-      - uses: taiki-e/install-action@3ad7ed62b9acd4b43f91777bf240fac23e489eac # nextest (resolved 2026-07-07)
-        with:
-          tool: nextest
-
-      - name: Check machine
-        env:
-          RUNPOD_GPU_TIER: ${{ needs.start-runpod.outputs.gpu_tier }}
-          RUNPOD_GPU_TYPE_ID: ${{ needs.start-runpod.outputs.gpu_type_id }}
-          RUNPOD_GPU_COST_PER_HR: ${{ needs.start-runpod.outputs.gpu_cost_per_hr }}
-        run: |
-          set -euxo pipefail
-          echo "tenferro-rs ref: ${TENFERRO_REF}"
-          echo "RunPod price tier: ${RUNPOD_GPU_TIER}"
-          echo "RunPod hourly price: \$${RUNPOD_GPU_COST_PER_HR:-unknown}/hr"
-          echo "RunPod gpu_type_id (from pod create): ${RUNPOD_GPU_TYPE_ID}"
-          echo "=== GPU (nvidia-smi) ==="
-          nvidia-smi --query-gpu=index,name,memory.total,driver_version --format=csv
-          nvidia-smi
-          df -h
-          free -h
-          nproc
-
-      - name: Select CUDA runtime for driver
-        id: select_cuda_runtime
-        run: |
-          set -euo pipefail
-          driver_version="$(nvidia-smi | sed -n 's/.*CUDA Version: \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1)"
-          if [ -z "${driver_version}" ]; then
-            echo "Could not determine the CUDA driver API version from nvidia-smi." >&2
-            exit 1
-          fi
-
-          cuda_version_ge() {
-            local version="$1"
-            local min_version="$2"
-            local ver_major="${version%%.*}"
-            local ver_minor="${version#*.}"
-            local min_major="${min_version%%.*}"
-            local min_minor="${min_version#*.}"
-            if [ "${ver_major}" -gt "${min_major}" ]; then
-              return 0
-            fi
-            if [ "${ver_major}" -lt "${min_major}" ]; then
-              return 1
-            fi
-            [ "${ver_minor}" -ge "${min_minor}" ]
-          }
-
-          if ! cuda_version_ge "${driver_version}" "${CUDA_MIN_RUNTIME_VERSION}"; then
-            echo "CUDA driver API ${driver_version} is below the ${CUDA_MIN_RUNTIME_VERSION} minimum." >&2
-            exit 1
-          fi
-          if cuda_version_ge "${driver_version}" "${CUDA_RUNTIME_VERSION}"; then
-            runtime_version="${CUDA_RUNTIME_VERSION}"
-            capability_tier="full"
-          else
-            runtime_version="${CUDA_MIN_RUNTIME_VERSION}"
-            capability_tier="baseline"
-          fi
-
-          {
-            echo "driver_version=${driver_version}"
-            echo "runtime_version=${runtime_version}"
-            echo "capability_tier=${capability_tier}"
-          } >> "${GITHUB_OUTPUT}"
-          echo "Driver CUDA API: ${driver_version}"
-          echo "Selected CUDA runtime: ${runtime_version} (${capability_tier} CubeCL capabilities)"
-
-      # Restore-only on the self-hosted pod: a cache-write credential must
-      # never be exposed to the RunPod runner (#1403). The trusted
-      # ci-cache-publish workflow on main owns publication of these caches.
-      - name: Restore cuTENSOR redistributable
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: cutensor_cache
-        with:
-          path: ${{ env.TENFERRO_CI_CACHE_ROOT }}/cutensor-${{ env.CUTENSOR_VERSION }}
-          key: cutensor-${{ runner.os }}-x86_64-${{ env.CUTENSOR_VERSION }}-cuda12-v2
-
-      - name: Restore CUDA minimal runtime tree
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: cuda_runtime_cache
-        with:
-          path: ${{ env.TENFERRO_CI_CACHE_ROOT }}/cuda-runtime-${{ steps.select_cuda_runtime.outputs.runtime_version }}
-          key: cuda-runtime-${{ runner.os }}-x86_64-${{ steps.select_cuda_runtime.outputs.runtime_version }}-minimal-v6
-
-      - name: Log pod cache restore status
-        env:
-          CUTENSOR_HIT: ${{ steps.cutensor_cache.outputs.cache-hit }}
-          CUDA_RUNTIME_HIT: ${{ steps.cuda_runtime_cache.outputs.cache-hit }}
-        run: |
-          echo "cuTENSOR cache hit: ${CUTENSOR_HIT:-false}"
-          echo "CUDA runtime tree cache hit: ${CUDA_RUNTIME_HIT:-false}"
-          echo "Misses fall back to direct downloads on the pod; publication is owned by ci-cache-publish on main."
-
-      - name: Configure CUDA runtime libraries
-        env:
-          CUDA_DRIVER_VERSION: ${{ steps.select_cuda_runtime.outputs.driver_version }}
-          CUDA_RUNTIME_VERSION: ${{ steps.select_cuda_runtime.outputs.runtime_version }}
-        run: |
-          set -euo pipefail
-          if ! command -v nvidia-smi >/dev/null 2>&1; then
-            echo "nvidia-smi not found; the RunPod GPU image should include NVIDIA drivers."
-            exit 1
-          fi
-          nvidia-smi
-
-          cuda_toolkit_version() {
-            local root="$1"
-            if [ -f "${root}/version.json" ]; then
-              python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['cuda']['version'].rsplit('.', 1)[0])" "${root}/version.json" 2>/dev/null || true
-            elif [ -f "${root}/version.txt" ]; then
-              sed -n 's/.*CUDA Version \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' "${root}/version.txt" | head -1
-            else
-              basename "${root}" | sed -n 's/^cuda-\([0-9][0-9]*\.[0-9][0-9]*\)$/\1/p'
-            fi
-          }
-
-          # A candidate tree must carry the full runtime library set the
-          # archived tests load, not just NVRTC: the pre-registration smoke
-          # proof (#1404) installs only cuda-nvrtc, which leaves a partial
-          # /usr/local/cuda-X.Y tree that must not shadow the full install.
-          cuda_tree_has_runtime_libs() {
-            local candidate="$1"
-            local lib
-            for lib in libcublas.so libcusolver.so libcusparse.so libnvrtc.so; do
-              if ! ls "${candidate}/lib64/${lib}"* >/dev/null 2>&1 \
-                && ! ls "${candidate}/targets/x86_64-linux/lib/${lib}"* >/dev/null 2>&1; then
-                echo "Skipping CUDA toolkit at ${candidate} (missing ${lib}; partial tree)."
-                return 1
-              fi
-            done
-            return 0
-          }
-
-          accept_cuda_toolkit() {
-            local candidate="$1"
-            if [ ! -d "${candidate}" ]; then
-              return 1
-            fi
-            if [ ! -d "${candidate}/lib64" ] && [ ! -d "${candidate}/targets/x86_64-linux/lib" ]; then
-              echo "Skipping CUDA toolkit at ${candidate} (library directory not found)."
-              return 1
-            fi
-            local version
-            version="$(cuda_toolkit_version "${candidate}")"
-            if [ "${version}" = "${CUDA_RUNTIME_VERSION}" ]; then
-              if ! cuda_tree_has_runtime_libs "${candidate}"; then
-                return 1
-              fi
-              cuda_path="${candidate}"
-              echo "Using CUDA toolkit at ${candidate} (version ${version})."
-              return 0
-            fi
-            if [ -n "${version}" ]; then
-              echo "Skipping CUDA toolkit at ${candidate} (found ${version}, need exactly ${CUDA_RUNTIME_VERSION})."
-            else
-              echo "Skipping CUDA toolkit at ${candidate} (version metadata not found, need exactly ${CUDA_RUNTIME_VERSION})."
-            fi
-            return 1
-          }
-
-          cuda_runtime_cache="${TENFERRO_CI_CACHE_ROOT}/cuda-runtime-${CUDA_RUNTIME_VERSION}"
-          cuda_path=""
-          if [ -n "${CUDA_PATH:-}" ]; then
-            accept_cuda_toolkit "${CUDA_PATH}" || cuda_path=""
-          fi
-          if [ -z "${cuda_path}" ] && command -v nvcc >/dev/null 2>&1; then
-            accept_cuda_toolkit "$(dirname "$(dirname "$(command -v nvcc)")")" || true
-          fi
-          if [ -z "${cuda_path}" ]; then
-            for candidate in \
-              "/usr/local/cuda-${CUDA_RUNTIME_VERSION}" \
-              /usr/local/cuda \
-              /usr/local/cuda-13.1 \
-              /usr/local/cuda-13 \
-              /usr/local/cuda-12; do
-              if accept_cuda_toolkit "${candidate}"; then
-                break
-              fi
-            done
-          fi
-
-          if [ -z "${cuda_path}" ] && [ -f "${cuda_runtime_cache}/.seed-complete" ] && [ -d "${cuda_runtime_cache}/lib64" ] \
-            && cuda_tree_has_runtime_libs "${cuda_runtime_cache}"; then
-            echo "Using cached CUDA ${CUDA_RUNTIME_VERSION} minimal runtime tree from ${cuda_runtime_cache}."
-            cuda_path="${cuda_runtime_cache}"
-          fi
-
-          if [ -z "${cuda_path}" ]; then
-            # Cache miss fallback: install and seed the local tree. The
-            # seeded tree is NOT published from the pod; ci-cache-publish on
-            # main owns publication of the shared cache (#1403).
-            bash tenferro-rs/scripts/ci/install_cuda_runtime_tree.sh \
-              "${CUDA_RUNTIME_VERSION}" "${cuda_runtime_cache}"
-            cuda_path="${cuda_runtime_cache}"
-          fi
-
-          if [ -z "${cuda_path}" ]; then
-            echo "CUDA toolkit path not found after minimal CUDA ${CUDA_RUNTIME_VERSION} runtime package install on RunPod."
-            exit 1
-          fi
-
-          cuda_library_path="${cuda_path}/lib64"
-          if [ -d "${cuda_path}/targets/x86_64-linux/lib" ]; then
-            cuda_library_path="${cuda_library_path}:${cuda_path}/targets/x86_64-linux/lib"
-          fi
-
-          cutensor_root="${TENFERRO_CI_CACHE_ROOT}/cutensor-${CUTENSOR_VERSION}"
-          cutensor_lib="${cutensor_root}/lib"
-
-          cutensor_path=""
-          for candidate in \
-            "${cuda_path}/lib64/libcutensor.so.2" \
-            "/usr/lib/x86_64-linux-gnu/libcutensor/12/libcutensor.so.2" \
-            "${cutensor_lib}/libcutensor.so.2" \
-            "${cutensor_lib}/libcutensor.so.2.6.0"; do
-            if [ -e "${candidate}" ]; then
-              cutensor_path="${candidate}"
-              break
-            fi
-          done
-
-          if [ -z "${cutensor_path}" ]; then
-            # Cache miss fallback: download on the pod without publishing;
-            # ci-cache-publish on main owns the shared cache (#1403).
-            bash tenferro-rs/scripts/ci/install_cutensor.sh \
-              "${CUTENSOR_VERSION}" "${cutensor_root}"
-            for candidate in \
-              "${cutensor_lib}/libcutensor.so.2" \
-              "${cutensor_lib}/libcutensor.so.2.6.0"; do
-              if [ -e "${candidate}" ]; then
-                cutensor_path="${candidate}"
-                break
-              fi
-            done
-          fi
-
-          if [ -z "${cutensor_path}" ]; then
-            echo "cuTENSOR shared library not found after redistributable install."
-            echo "Expected ${cutensor_lib}/libcutensor.so.2 under ${TENFERRO_CI_CACHE_ROOT}."
-            if [ -d "${cutensor_lib}" ]; then
-              ls -la "${cutensor_lib}" || true
-            else
-              echo "Missing directory: ${cutensor_lib}"
-            fi
-            exit 1
-          fi
-
-          echo "CUDA_PATH=${cuda_path}" >> "${GITHUB_ENV}"
-          echo "${cuda_path}/bin" >> "${GITHUB_PATH}"
-          echo "LD_LIBRARY_PATH=${cuda_library_path}:$(dirname "${cutensor_path}"):${LD_LIBRARY_PATH:-}" >> "${GITHUB_ENV}"
-          echo "TENFERRO_CUTENSOR_PATH=${cutensor_path}" >> "${GITHUB_ENV}"
-
-      - name: Verify loaded NVRTC version
-        env:
-          CUDA_DRIVER_VERSION: ${{ steps.select_cuda_runtime.outputs.driver_version }}
-          CUDA_RUNTIME_VERSION: ${{ steps.select_cuda_runtime.outputs.runtime_version }}
-        run: |
-          set -euo pipefail
-          python3 - <<'PY'
-          import ctypes
-          import os
-
-          nvrtc = ctypes.CDLL("libnvrtc.so")
-          major = ctypes.c_int()
-          minor = ctypes.c_int()
-          status = nvrtc.nvrtcVersion(ctypes.byref(major), ctypes.byref(minor))
-          if status != 0:
-              raise SystemExit(f"nvrtcVersion failed with status {status}")
-          loaded = (major.value, minor.value)
-          driver = tuple(
-              int(part) for part in os.environ["CUDA_DRIVER_VERSION"].split(".")
-          )
-          selected = tuple(
-              int(part) for part in os.environ["CUDA_RUNTIME_VERSION"].split(".")
-          )
-          minimum = tuple(
-              int(part)
-              for part in os.environ["CUDA_MIN_RUNTIME_VERSION"].split(".")
-          )
-          full = (12, 8)
-          print(f"Driver CUDA API version: {driver[0]}.{driver[1]}")
-          print(f"Loaded NVRTC version: {loaded[0]}.{loaded[1]}")
-          if driver < minimum:
-              raise SystemExit(
-                  f"CUDA driver API {driver[0]}.{driver[1]} is older than minimum "
-                  f"CUDA {minimum[0]}.{minimum[1]}"
-              )
-          if loaded < minimum:
-              raise SystemExit(
-                  f"NVRTC {loaded[0]}.{loaded[1]} is older than minimum "
-                  f"CUDA {minimum[0]}.{minimum[1]}"
-              )
-          if loaded > driver:
-              raise SystemExit(
-                  f"NVRTC {loaded[0]}.{loaded[1]} is newer than driver API "
-                  f"{driver[0]}.{driver[1]}"
-              )
-          if loaded != selected:
-              raise SystemExit(
-                  f"Loaded NVRTC {loaded[0]}.{loaded[1]} does not match selected "
-                  f"CUDA runtime {selected[0]}.{selected[1]}"
-              )
-          tier = "full" if loaded >= full and driver >= full else "baseline"
-          print(f"Expected CubeCL CUDA capability tier: {tier}")
-          PY
-
-      - name: Link archive build workspace path
-        run: |
-          set -euo pipefail
-          archive_root="${ARCHIVE_WORKSPACE_ROOT}"
-          mkdir -p "$(dirname "${archive_root}")"
-          if [ -e "${archive_root}" ] && [ ! -L "${archive_root}" ]; then
-            echo "Archive workspace path exists and is not a symlink: ${archive_root}" >&2
-            exit 1
-          fi
-          ln -sfn "${GITHUB_WORKSPACE}" "${archive_root}"
-          echo "Linked ${archive_root} -> ${GITHUB_WORKSPACE}"
-          test -f "${archive_root}/tenferro-rs/crates/tenferro-ad/src/context.rs"
-
-      - name: Run CUDA tests from archive
-        working-directory: tenferro-rs
-        env:
-          NEXTEST_TEST_THREADS: "1"
-        run: |
-          set -euo pipefail
-          # trybuild starts nested Cargo and is compile-only; regular CI owns it.
-          cargo nextest run \
-            --archive-file "${CUDA_ARCHIVE}" \
-            --workspace-remap "${GITHUB_WORKSPACE}/tenferro-rs" \
-            --run-ignored all \
-            --no-fail-fast \
-            -E 'not (test(eager_backend_capability_boundary) | test(execution_session_capability_cannot_project_or_escape_owner_borrow) | test(cuda_runtime_copy_into_1522_a100_destination_reuse_benchmark))' \
-            -j 1
-
-      - name: Run CUDA tutorial artifact
-        working-directory: tenferro-rs
-        run: |
-          set -euo pipefail
-          tutorial_dir="${RUNNER_TEMP}/cuda-tutorial"
-          rm -rf "${tutorial_dir}"
-          mkdir -p "${tutorial_dir}"
-          tar --zstd -xf "${CUDA_TUTORIAL_ARCHIVE}" -C "${tutorial_dir}"
-          TENFERRO_REQUIRE_CUDA=1 "${tutorial_dir}/cuda_tutorial"
-
-      - name: Run OpenXLA PJRT E2E tests from archive
-        working-directory: tenferro-rs
-        env:
-          NEXTEST_TEST_THREADS: "1"
-        run: |
-          set -euo pipefail
-          if [ ! -f "${PJRT_ARCHIVE}" ]; then
-            echo "Missing PJRT archive: ${PJRT_ARCHIVE}"
-            exit 1
-          fi
-          wheel_dir="${RUNNER_TEMP}/openxla-pjrt-wheels"
-          unpack_dir="${RUNNER_TEMP}/openxla-pjrt"
-          rm -rf "${wheel_dir}" "${unpack_dir}"
-          mkdir -p "${wheel_dir}" "${unpack_dir}"
-          python3 -m pip download --only-binary=:all: --no-deps \
-            --dest "${wheel_dir}" \
-            "jax-cuda12-pjrt==${JAX_CUDA12_PJRT_VERSION}" \
-            "nvidia-cudnn-cu12==${NVIDIA_CUDNN_CU12_VERSION}" \
-            "nvidia-cuda-nvcc-cu12==${NVIDIA_CUDA_NVCC_CU12_VERSION}"
-          python3 - <<'PY'
-          import os
-          import pathlib
-          import zipfile
-
-          wheel_dir = pathlib.Path(os.environ["RUNNER_TEMP"]) / "openxla-pjrt-wheels"
-          unpack_dir = pathlib.Path(os.environ["RUNNER_TEMP"]) / "openxla-pjrt"
-          for wheel in wheel_dir.glob("*.whl"):
-              target = unpack_dir / wheel.stem
-              with zipfile.ZipFile(wheel) as archive:
-                  archive.extractall(target)
-          PY
-          plugin_path="$(find "${unpack_dir}" -path '*/jax_plugins/xla_cuda12/xla_cuda_plugin.so' -print -quit)"
-          cudnn_lib="$(find "${unpack_dir}" -path '*/nvidia/cudnn/lib' -type d -print -quit)"
-          cuda_nvcc_dir="$(find "${unpack_dir}" -path '*/nvidia/cuda_nvcc' -type d -print -quit)"
-          if [ -z "${plugin_path}" ]; then
-            echo "xla_cuda_plugin.so not found under ${unpack_dir}"
-            exit 1
-          fi
-          if [ -z "${cudnn_lib}" ]; then
-            echo "cuDNN lib directory not found under ${unpack_dir}"
-            exit 1
-          fi
-          if [ -z "${cuda_nvcc_dir}" ]; then
-            echo "CUDA NVCC directory not found under ${unpack_dir}"
-            exit 1
-          fi
-          chmod +x "${cuda_nvcc_dir}/bin/"*
-          test -x "${cuda_nvcc_dir}/bin/ptxas"
-          test -f "${cuda_nvcc_dir}/nvvm/libdevice/libdevice.10.bc"
-          nm -D "${plugin_path}" | grep -q GetPjrtApi
-          # Runtime-only plugin setup; Rust binaries come from the hosted PJRT archive.
-          XLA_FLAGS="--xla_gpu_cuda_data_dir=${cuda_nvcc_dir} ${XLA_FLAGS:-}" \
-          TENFERRO_PJRT_PLUGIN="${plugin_path}" \
-          LD_LIBRARY_PATH="${cudnn_lib}:${LD_LIBRARY_PATH:-}" \
-            cargo nextest run \
-              --archive-file "${PJRT_ARCHIVE}" \
-              --workspace-remap "${GITHUB_WORKSPACE}/tenferro-rs" \
-              --run-ignored all \
-              --no-fail-fast \
-              -j 1 \
-              -E 'test(pjrt_execution)'
-
-      - name: GPU test complete
-        run: echo "RUNPOD_TENFERRO_GPU_TEST_OK"
-
-  cleanup-runpod:
-    name: Delete RunPod pod
-    needs:
-      - authorize
-      - start-runpod
-      - run-gpu-tests
-
-    if: always() && needs.authorize.outputs.gpu_required == 'true'
-
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-
-    steps:
-      - name: Delete RunPod pod
-        # In a keep_failed_pods debug dispatch, a failed provision keeps its
-        # rejected pods for console-log triage; only an ACCEPTED pod (the
-        # start-runpod job succeeded) is still cleaned up unconditionally.
-        if: inputs.keep_failed_pods != true || needs.start-runpod.result == 'success'
-        env:
-          RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
-          POD_ID: ${{ needs.start-runpod.outputs.pod_id }}
-        run: |
-          set -euo pipefail
-
-          if [ -z "${POD_ID}" ] || [ "${POD_ID}" = "null" ]; then
-            echo "No POD_ID; nothing to delete"
-            exit 0
-          fi
-
-          # Estimated paid cost observability (#1404): read hourly price and
-          # uptime from the pod record before deleting it.
-          pod_file=/tmp/runpod-pod.json
-          get_status="$(
-            curl -sS \
-              --url "https://rest.runpod.io/v1/pods/${POD_ID}" \
-              --header "Authorization: Bearer ${RUNPOD_API_KEY}" \
-              --output "$pod_file" \
-              --write-out "%{http_code}"
-          )" || get_status=000
-          if [ "$get_status" -ge 200 ] && [ "$get_status" -lt 300 ]; then
-            python3 - "$pod_file" <<'PY' || true
-          import datetime, json, sys
-          pod = json.load(open(sys.argv[1]))
-          cost = pod.get("adjustedCostPerHr") or pod.get("costPerHr")
-          started = pod.get("lastStartedAt")
-          if isinstance(cost, (int, float)) and isinstance(started, str):
-              begin = datetime.datetime.fromisoformat(started.replace("Z", "+00:00"))
-              hours = max(
-                  0.0,
-                  (datetime.datetime.now(datetime.timezone.utc) - begin).total_seconds()
-                  / 3600.0,
-              )
-              print(f"RunPod paid time: {hours:.2f}h at ${cost:.2f}/hr")
-              print(f"RunPod estimated paid cost: ${hours * cost:.2f}")
-          else:
-              print("RunPod cost data unavailable in pod record")
-          PY
-          fi
-
-          echo "Deleting RunPod pod: ${POD_ID}"
-
-          response_file=/tmp/runpod-delete-response.json
-          status="$(
-            curl -sS \
-              --request DELETE \
-              --url "https://rest.runpod.io/v1/pods/${POD_ID}" \
-              --header "Authorization: Bearer ${RUNPOD_API_KEY}" \
-              --output "$response_file" \
-              --write-out "%{http_code}"
-          )"
-
-          echo "RunPod delete HTTP status: ${status}"
-          jq . "$response_file" || cat "$response_file" || true
-
-          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
-            echo "Warning: failed to delete RunPod pod" >&2
-            exit 0
-          fi
-
-          echo "Deleted RunPod pod: ${POD_ID}"
+    uses: ./.github/workflows/runpod-gpu-execute.yml
+    with:
+      tenferro_ref: ${{ needs.authorize.outputs.tenferro_ref }}
+      target_head_sha: ${{ needs.authorize.outputs.target_head_sha }}
+      target_base_sha: ${{ needs.authorize.outputs.target_base_sha }}
+      pr_number: ${{ needs.authorize.outputs.pr_number }}
+      archive_cache_key: ${{ needs.cuda-archive.outputs.archive_cache_key }}
+      archive_artifact_name: ${{ needs.cuda-archive.outputs.archive_artifact_name }}
+      keep_failed_pods: ${{ inputs.keep_failed_pods || false }}
+    secrets:
+      RUNPOD_API_KEY: ${{ secrets.RUNPOD_API_KEY }}
+      GH_APP_CLIENT_ID: ${{ secrets.GH_APP_CLIENT_ID }}
+      GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
 
   ci-gpu-gate:
     name: Publish CI GPU gate
@@ -1396,9 +681,7 @@ jobs:
       - runpod-contract
       - pre-runpod-gate
       - cuda-archive
-      - start-runpod
-      - run-gpu-tests
-      - cleanup-runpod
+      - gpu-execution
 
     if: >-
       always() &&
@@ -1431,9 +714,7 @@ jobs:
           CONTRACT_RESULT: ${{ needs.runpod-contract.result }}
           PRE_RUNPOD_RESULT: ${{ needs.pre-runpod-gate.result }}
           ARCHIVE_RESULT: ${{ needs.cuda-archive.result }}
-          START_RUNPOD_RESULT: ${{ needs.start-runpod.result }}
-          RUN_GPU_TESTS_RESULT: ${{ needs.run-gpu-tests.result }}
-          CLEANUP_RUNPOD_RESULT: ${{ needs.cleanup-runpod.result }}
+          GPU_EXECUTION_RESULT: ${{ needs.gpu-execution.result }}
         run: |
           set -euo pipefail
 
@@ -1453,9 +734,7 @@ jobs:
             record_result "runpod-contract" "${CONTRACT_RESULT}"
             record_result "pre-runpod-gate" "${PRE_RUNPOD_RESULT}"
             record_result "cuda-archive" "${ARCHIVE_RESULT}"
-            record_result "start-runpod" "${START_RUNPOD_RESULT}"
-            record_result "run-gpu-tests" "${RUN_GPU_TESTS_RESULT}"
-            record_result "cleanup-runpod" "${CLEANUP_RUNPOD_RESULT}"
+            record_result "gpu-execution (including cleanup)" "${GPU_EXECUTION_RESULT}"
           elif [ "${GPU_REQUIRED}" = false ]; then
             echo "GPU validation not required: ${POLICY_REASON}"
           else

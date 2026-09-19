@@ -26,7 +26,8 @@ name = "tenferro_cpu"
 default = ["cpu-faer"]
 cpu-faer = ["dep:faer"]
 cpu-blas = ["dep:cblas-sys", "dep:lapack"]
-provider-src = ["cpu-blas", "dep:blas-src", "dep:cblas-src", "dep:lapack-src"]
+# Each supported provider exports CBLAS; no separate Netlib CBLAS build is needed.
+provider-src = ["cpu-blas", "dep:blas-src", "dep:lapack-src"]
 provider-inject = ["cpu-blas", "dep:cblas-inject", "dep:lapack-inject"]
 blas-openblas = [
     "provider-src",
@@ -61,7 +62,6 @@ faer = { workspace = true, optional = true }
 cblas-sys = { workspace = true, optional = true }
 cblas-inject = { workspace = true, optional = true }
 lapack-inject = { workspace = true, optional = true }
-cblas-src = { workspace = true, optional = true }
 blas-src = { workspace = true, optional = true }
 lapack = { workspace = true, optional = true }
 lapack-src = { workspace = true, optional = true }

@@ -127,7 +127,10 @@ pub fn runtime_engine_registration_with_id(
     )?;
     let ingress = InputIngressContract::new(
         InputPlacementContract::new(move |placement, candidate| {
-            cpu_input_placement(placement) && candidate == &placement_storage
+            candidate == &placement_storage
+                && (cpu_input_placement(placement)
+                    || (placement.memory_kind == MemoryKind::Managed
+                        && allocation_domain.is_some()))
         }),
         InputSignatureContract::new(move |placement, family, domain, candidate| {
             candidate == &signature_storage
@@ -163,6 +166,11 @@ fn cpu_input_signature(
     input_domain: Option<tenferro_tensor::AllocationDomainId>,
     allocation_domain: Option<tenferro_tensor::AllocationDomainId>,
 ) -> bool {
+    if placement.memory_kind == MemoryKind::Managed {
+        return backend_family.is_some()
+            && allocation_domain.is_some()
+            && input_domain == allocation_domain;
+    }
     cpu_input_placement(placement)
         && match backend_family {
             None => input_domain.is_none(),
@@ -181,13 +189,12 @@ fn cpu_runtime_input(
     input: &TensorRead<'_>,
     allocation_domain: Option<tenferro_tensor::AllocationDomainId>,
 ) -> bool {
-    cpu_input_placement(input.placement())
-        && match input.backend_family() {
-            None => true,
-            Some(_) => {
-                allocation_domain.is_some() && input.allocation_domain() == allocation_domain
-            }
-        }
+    cpu_input_signature(
+        input.placement(),
+        input.backend_family(),
+        input.allocation_domain(),
+        allocation_domain,
+    )
 }
 
 fn runtime_storage_class() -> Result<StorageClass, RuntimeConfigError> {

@@ -31,19 +31,36 @@ fallback.
 ## Shared command profiles
 
 `scripts/ci/run_profile.py` owns immutable profiles for workspace-faer,
-workspace-blas, provider injection, extensions, documentation, coverage, and
+workspace-blas, macos-accelerate, provider injection, extensions, documentation, coverage, and
 CI configuration. Local and hosted execution call the same profile names.
 `full` is composition rather than another command list, so repeated profiles
 execute once. Hosted Rust compile/test commands use workspace `[profile.ci]`
 (`opt-level=0`, `debug=0`, `incremental=false`, `strip="symbols"`) rather than
-`--release`; local `dev`/`test` profiles stay incremental.
+`--release`; local `dev`/`test` profiles stay incremental. Non-incremental CI
+avoids generating per-crate edit-loop state on ephemeral runners; it does not
+disable Cargo's reuse of unchanged dependency artifacts.
+
+On GitHub Actions, the profile runner logs the detected CPU count and explicitly
+sets Cargo build jobs (CPU count, capped at 16), nextest test concurrency, and
+libtest threads (CPU count). Explicit environment overrides are preserved;
+local execution is unchanged. Test scheduling is separate from backend-internal
+BLAS/Rayon threading. GPU archive execution keeps its independent serial policy.
+Coverage uses `cargo llvm-cov nextest`, allowing tests from different binaries
+to overlap while retaining the existing per-file coverage thresholds. It does
+not replace Linux doctest validation or the external extension fixture.
 
 ## macOS support gate
 
 `macOS workspace tests` is a required Apple Silicon execution gate for code
-changes and `main` pushes. It runs the shared `workspace-faer` profile on
-`macos-15`, covering workspace tests and doctests including macOS-only
-Apple/Metal paths. After change classification, the job starts in parallel with
+changes and `main` pushes. It runs `macos-accelerate` on `macos-15`, disabling
+default features and selecting Accelerate rather than faer. Only the dedicated
+Apple context, CPU/Metal FFT, and Apple shared Cholesky test targets are built;
+the latter also checks Accelerate GEMM and Cholesky independently of Metal.
+Selecting targets rather than runtime test-name filters avoids compiling the
+full integration suites. Common workspace tests, doctests, and scalar codegen
+checks remain in Linux lanes. The profile requires Metal initialization to
+succeed (`TENFERRO_REQUIRE_METAL=1`); an unavailable device is not a passing
+hardware test. After change classification, the job starts in parallel with
 the selected Linux workspace and extension lanes. Linux and macOS remain
 independent required checks, reducing pull-request wall-clock time while still
 failing closed on either platform. The trusted RunPod workflow starts from the
@@ -60,6 +77,29 @@ does not cancel an already-running macOS lane; both results remain visible and
 merge-blocking. The older Linux-hosted Apple cross-target type-check is removed
 because the real macOS workspace run compiles and executes the same
 target-gated code.
+
+## Overlapping preparation without adding paid GPUs
+
+The parent `runpod-gpu-test.yml` authorizes and prepares each request independently.
+Its hosted preparation remains read-only and may overlap other PRs' paid runs.
+After authorization, lint and archive success, it calls the trusted local reusable
+`runpod-gpu-execute.yml`. That workflow holds one repository-wide concurrency
+group from head revalidation through provisioning, execution and cleanup; it
+uses `queue: max` so a third request cannot evict the second pending request.
+No cancellation of an active paid lifecycle is introduced. The parent publishes
+the required check only after the reusable workflow finishes, including cleanup.
+A stale/closed/forked PR fails before provisioning, and manual refs are resolved
+to immutable commits before preparation. Existing debug keep-pod behavior remains
+an explicit maintainer-only exception.
+
+Heavy doctest crates use edition 2024 to combine compatible examples, without
+removing examples or either Linux backend lane. Edition-sensitive tests retain
+individual compilation where needed. Scalar assembly inspection uses the same
+`ci` profile as the tests, including the correct assembly output directory.
+
+The hosted CUDA toolkit is restored by exact versioned key. Only the existing
+main-only cache publisher saves it; PR builds never publish toolkit contents.
+A miss still installs the same toolkit and all builds remain valid without cache.
 
 ## RunPod trust boundary
 

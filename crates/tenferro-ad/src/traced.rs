@@ -750,19 +750,19 @@ fn semantic_jvp_with_cache(
     ad_transform_cache: Option<&AdTransformCache>,
 ) -> Result<SemanticAdProgram> {
     let key = SemanticAdTransformCacheKey::jvp(source, active_inputs);
-    if let Some(cache) = ad_transform_cache {
-        if let Some(cached) = cache.get_semantic(&key, source)? {
-            return cached
-                .as_ref()
-                .with_input_prefix_bindings_from(source)
-                .map_err(|source| {
-                    Error::runtime_state_source(
-                        "semantic traced jvp cache",
-                        ErrorPhase::GraphBuild,
-                        source,
-                    )
-                });
-        }
+    if let Some(cache) = ad_transform_cache
+        && let Some(cached) = cache.get_semantic(&key, source)?
+    {
+        return cached
+            .as_ref()
+            .with_input_prefix_bindings_from(source)
+            .map_err(|source| {
+                Error::runtime_state_source(
+                    "semantic traced jvp cache",
+                    ErrorPhase::GraphBuild,
+                    source,
+                )
+            });
     }
     let derivative =
         semantic_jvp(source, active_inputs, rules).map_err(semantic_transform_error("jvp"))?;
@@ -780,19 +780,19 @@ fn semantic_vjp_with_cache(
     ad_transform_cache: Option<&AdTransformCache>,
 ) -> Result<SemanticAdProgram> {
     let key = SemanticAdTransformCacheKey::vjp(source, active_inputs, active_outputs);
-    if let Some(cache) = ad_transform_cache {
-        if let Some(cached) = cache.get_semantic(&key, source)? {
-            return cached
-                .as_ref()
-                .with_input_prefix_bindings_from(source)
-                .map_err(|source| {
-                    Error::runtime_state_source(
-                        "semantic traced vjp cache",
-                        ErrorPhase::GraphBuild,
-                        source,
-                    )
-                });
-        }
+    if let Some(cache) = ad_transform_cache
+        && let Some(cached) = cache.get_semantic(&key, source)?
+    {
+        return cached
+            .as_ref()
+            .with_input_prefix_bindings_from(source)
+            .map_err(|source| {
+                Error::runtime_state_source(
+                    "semantic traced vjp cache",
+                    ErrorPhase::GraphBuild,
+                    source,
+                )
+            });
     }
     let derivative = semantic_vjp(source, active_inputs, active_outputs, rules)
         .map_err(semantic_transform_error("vjp"))?;
@@ -1217,18 +1217,17 @@ fn validate_seed_tensor(
                 .map(|dim| dim.constant_value().expect("filtered constant shape"))
                 .collect::<Vec<_>>()
         })
+        && expected_shape != actual_shape
     {
-        if expected_shape != actual_shape {
-            return Err(Error::invalid_argument(
-                transform,
-                ErrorPhase::GraphBuild,
-                "seed",
-                format!(
-                    "seed input {input_index} shape mismatch: expected {:?}, got {:?}",
-                    expected_shape, actual_shape
-                ),
-            ));
-        }
+        return Err(Error::invalid_argument(
+            transform,
+            ErrorPhase::GraphBuild,
+            "seed",
+            format!(
+                "seed input {input_index} shape mismatch: expected {:?}, got {:?}",
+                expected_shape, actual_shape
+            ),
+        ));
     }
     Ok(())
 }

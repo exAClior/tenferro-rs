@@ -1,5 +1,9 @@
 import json
 import re
+import os
+import subprocess
+import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -13,10 +17,60 @@ CUDA_ARCHIVE_TEST_FILTER = (
 
 
 def read(path: str) -> str:
-    return (ROOT / path).read_text()
+    text = (ROOT / path).read_text()
+    if path == ".github/workflows/runpod-gpu-test.yml":
+        # Existing execution contracts span the parent and its trusted callee.
+        execution = (ROOT / ".github/workflows/runpod-gpu-execute.yml").read_text()
+        index = text.index("  ci-gpu-gate:")
+        text = text[:index] + execution[execution.index("  start-runpod:"):] + text[index:]
+    return text
 
 
 class WorkflowContractTests(unittest.TestCase):
+    def test_paid_lifecycle_alone_holds_global_queue(self) -> None:
+        parent = (ROOT / ".github/workflows/runpod-gpu-test.yml").read_text()
+        child = (ROOT / ".github/workflows/runpod-gpu-execute.yml").read_text()
+        self.assertEqual(
+            parent.split("\nenv:\n", 1)[1].split("\njobs:\n", 1)[0],
+            child.split("\nenv:\n", 1)[1].split("\njobs:\n", 1)[0],
+        )
+        self.assertNotIn("\nconcurrency:", parent)
+        self.assertIn("group: runpod-tenferro-gpu-refs/heads/main", child)
+        self.assertIn("cancel-in-progress: false\n  queue: max", child)
+        call = parent.split("  gpu-execution:", 1)[1].split("  ci-gpu-gate:", 1)[0]
+        self.assertIn("needs: [authorize, runpod-contract, pre-runpod-gate, cuda-archive]", call)
+        self.assertIn("uses: ./.github/workflows/runpod-gpu-execute.yml", call)
+        self.assertIn("GPU_EXECUTION_RESULT: ${{ needs.gpu-execution.result }}", parent)
+        self.assertIn('record_result "gpu-execution (including cleanup)"', parent)
+        self.assertNotIn("workflow_dispatch:", child)
+        self.assertIn("${GITHUB_REPOSITORY}/.github/workflows/runpod-gpu-test.yml@refs/heads/main", child)
+        self.assertLess(child.index("Revalidate queued PR"), child.index("Create GitHub App token"))
+        self.assertIn("    if: always()", child.split("  cleanup-runpod:", 1)[1])
+        self.assertIn('::error::Failed to delete RunPod pod', child)
+        self.assertNotIn("actions/cache/save", child)
+        gpu = child.split("  run-gpu-tests:", 1)[1].split("  cleanup-runpod:", 1)[0]
+        self.assertNotIn("secrets.", gpu)
+
+    def test_queued_head_guard_rejects_stale_closed_and_forked_prs(self) -> None:
+        child = (ROOT / ".github/workflows/runpod-gpu-execute.yml").read_text()
+        step = child.split("      - name: Revalidate queued PR before provisioning\n", 1)[1].split("      - name:", 1)[0]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        for head, base, state, repo, expected in (
+            ("head", "base", "open", "tensor4all/tenferro-rs", 0),
+            ("new", "base", "open", "tensor4all/tenferro-rs", 1),
+            ("head", "new", "open", "tensor4all/tenferro-rs", 1),
+            ("head", "base", "closed", "tensor4all/tenferro-rs", 1),
+            ("head", "base", "open", "fork/tenferro-rs", 1),
+        ):
+            with self.subTest(head=head, base=base, state=state, repo=repo), tempfile.TemporaryDirectory() as directory:
+                env = dict(os.environ, GITHUB_REPOSITORY="tensor4all/tenferro-rs", PR_NUMBER="1", EXPECTED_HEAD="head", EXPECTED_BASE="base")
+                env["PR_JSON"] = json.dumps({"state": state, "head": {"sha": head, "repo": {"full_name": repo}}, "base": {"sha": base}})
+                result = subprocess.run(
+                    ["bash", "-c", 'gh() { printf "%s\\n" "$PR_JSON"; };\n' + script.replace("/tmp/queued-pr.json", directory + "/pr.json")],
+                    env=env, capture_output=True, text=True,
+                )
+                self.assertEqual(result.returncode, expected, result.stderr)
+
     def test_fast_ci_uses_shared_policy_and_profiles(self) -> None:
         text = read(".github/workflows/ci.yml")
         self.assertIn("python3 scripts/ci/change_policy.py", text)
@@ -35,7 +89,9 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertNotIn("needs: [changes, ci-gate]", block)
         self.assertIn("run_macos: ${{ steps.policy.outputs.run_macos }}", text)
         self.assertIn("'macos-15' || 'ubuntu-latest'", block)
-        self.assertIn("python3 scripts/ci/run_profile.py workspace-faer", block)
+        self.assertIn("python3 scripts/ci/run_profile.py macos-accelerate", block)
+        self.assertIn("shared-key: macos-accelerate-v1", block)
+        self.assertNotIn("run_profile.py workspace-faer", block)
         self.assertIn("needs.changes.result == 'success'", block)
         self.assertIn("Change classification failed", block)
         self.assertNotIn("needs.ci-gate", block)
@@ -43,6 +99,10 @@ class WorkflowContractTests(unittest.TestCase):
 
         fast = read(".github/workflows/ci.yml")
         self.assertNotIn("macOS-gated GPU type-check", fast)
+
+    def test_coverage_installs_nextest(self) -> None:
+        block = read(".github/workflows/ci.yml").split("\n  coverage:\n", 1)[1].split("\n  docs-site:\n", 1)[0]
+        self.assertIn("tool: cargo-llvm-cov,nextest", block)
 
     def test_required_names_remain_stable(self) -> None:
         fast = read(".github/workflows/ci.yml")
@@ -659,6 +719,20 @@ class WorkflowContractTests(unittest.TestCase):
             self.assertIn(env_line, consumer)
             self.assertIn(env_line, publisher)
 
+    def test_toolkit_cache_is_exact_and_main_written_only(self) -> None:
+        parent = (ROOT / ".github/workflows/runpod-gpu-test.yml").read_text()
+        publisher = read(".github/workflows/ci-cache-publish.yml")
+        key = next(line.strip() for line in parent.splitlines() if "key: cuda-toolkit-" in line)
+        self.assertIn(key, publisher)
+        self.assertEqual(publisher.count(key), 2)
+        self.assertIn("hashFiles('tenferro-rs/scripts/ci/install_cuda_toolkit_hosted.sh')", key)
+        restore = parent.split("      - name: Restore trusted CUDA toolkit", 1)[1].split("      - name:", 1)[0]
+        self.assertNotIn("restore-keys:", restore)
+        self.assertNotIn("actions/cache/save", parent)
+        helper = read("scripts/ci/install_cuda_toolkit_hosted.sh")
+        self.assertIn('"${nvcc_bin}" --ptx -arch=sm_75', helper)
+        self.assertIn("entry tenferro_toolkit_smoke", helper)
+
     def test_gpu_retry_reuses_immutable_artifact(self) -> None:
         text = read(".github/workflows/runpod-gpu-test.yml")
         archive_block = text[
@@ -673,7 +747,7 @@ class WorkflowContractTests(unittest.TestCase):
             archive_block.count(
                 "if: steps.cuda_archive_cache.outputs.cache-hit != 'true' && steps.archive_reuse.outputs.reused != 'true'"
             ),
-            6,
+            8,
         )
         self.assertIn(
             "name: ${{ steps.archive_key.outputs.artifact_name }}", archive_block
@@ -682,7 +756,7 @@ class WorkflowContractTests(unittest.TestCase):
             text.index("  run-gpu-tests:") : text.index("  cleanup-runpod:")
         ]
         self.assertIn(
-            "name: ${{ needs.cuda-archive.outputs.archive_artifact_name }}",
+            "name: ${{ inputs.archive_artifact_name }}",
             run_gpu,
         )
 

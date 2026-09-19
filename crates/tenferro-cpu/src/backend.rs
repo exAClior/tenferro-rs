@@ -47,8 +47,8 @@ use tenferro_tensor::{
 
 use super::exec_session::CpuExecSession;
 use super::{
-    analytic, copy_tensor_read_into, elementwise, gemm, indexing, materialize_tensor_read,
-    reduction, structural, CpuContext,
+    analytic, copy_tensor_read_into, elementwise, gemm, indexing,
+    materialize_tensor_read_in_domain, reduction, structural, CpuContext,
 };
 
 pub(crate) fn tag_fresh_output(output: &mut Tensor, domain: CpuDomainId) {
@@ -3198,8 +3198,14 @@ impl TensorAnalytic for CpuBackend {
 
 impl TensorStructural for CpuBackend {
     fn to_contiguous_read(&mut self, input: TensorRead<'_>) -> crate::Result<Tensor> {
+        let domain = self.allocation_domain.clone();
         self.install_with_pool(|buffers| {
-            materialize_tensor_read(buffers, "CpuBackend::to_contiguous_read", input)
+            materialize_tensor_read_in_domain(
+                buffers,
+                "CpuBackend::to_contiguous_read",
+                input,
+                domain.as_deref(),
+            )
         })
     }
 

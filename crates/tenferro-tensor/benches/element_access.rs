@@ -8,7 +8,8 @@ const INDEX_COUNT: usize = 4096;
 /// Panics if the benchmark is called with a non-compact or non-host tensor;
 /// the probe is intentionally restricted to the validated benchmark fixture.
 #[inline(never)]
-#[no_mangle]
+// SAFETY: this benchmark binary uniquely owns this exported probe name.
+#[unsafe(no_mangle)]
 pub extern "C" fn tensor_static_rank_read_probe(tensor: &TypedTensor<f64, Rank<2>>) -> f64 {
     tensor
         .host_col_major_view()
@@ -23,7 +24,8 @@ pub extern "C" fn tensor_static_rank_read_probe(tensor: &TypedTensor<f64, Rank<2
 /// Panics if the benchmark is called with a non-host tensor; the probe is
 /// intentionally restricted to the validated benchmark fixture.
 #[inline(never)]
-#[no_mangle]
+// SAFETY: this benchmark binary uniquely owns this exported probe name.
+#[unsafe(no_mangle)]
 pub extern "C" fn tensor_static_rank_write_probe(tensor: &mut TypedTensor<f64, Rank<2>>) {
     for value in tensor
         .host_col_major_view_mut()

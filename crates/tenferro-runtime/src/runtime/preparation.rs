@@ -1430,10 +1430,10 @@ fn operation_dispatch_candidates(
             continue;
         }
         let Some(provider) = provider_for_operation(snapshot, engine, operation)? else {
-            if let SemanticOpRef::Extension(extension) = operation.op() {
-                if !snapshot.has_extension_family(extension.family_id()) {
-                    missing_extension_family.get_or_insert(extension.family_id());
-                }
+            if let SemanticOpRef::Extension(extension) = operation.op()
+                && !snapshot.has_extension_family(extension.family_id())
+            {
+                missing_extension_family.get_or_insert(extension.family_id());
             }
             continue;
         };

@@ -2,7 +2,8 @@
 # Install (or discover) a CUDA toolkit with nvcc on a GitHub-hosted Ubuntu
 # runner for building the CUDA/PJRT PTX test archives.
 #
-# Usage: install_cuda_toolkit_hosted.sh <cuda-runtime-version>
+# Usage: install_cuda_toolkit_hosted.sh <cuda-runtime-version> [cache-directory]
+# An optional relocated cache tree uses the exact requested major.minor version.
 #
 # Accepts any toolkit whose version is >= the requested version. Exports
 # CUDA_PATH and LD_LIBRARY_PATH through GITHUB_ENV and prepends the toolkit
@@ -10,7 +11,8 @@
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
-CUDA_RUNTIME_VERSION="${1:?usage: install_cuda_toolkit_hosted.sh <cuda-runtime-version>}"
+CUDA_RUNTIME_VERSION="${1:?usage: install_cuda_toolkit_hosted.sh <cuda-runtime-version> [cache-directory]}"
+cache_dir="${2:-}"
 
 cuda_toolkit_version() {
   local root="$1"
@@ -44,7 +46,7 @@ cuda_version_ge() {
 
 accept_cuda_toolkit() {
   local candidate="$1"
-  if [ ! -d "${candidate}" ]; then
+  if [ ! -x "${candidate}/bin/nvcc" ]; then
     return 1
   fi
   if [ ! -d "${candidate}/lib64" ] && [ ! -d "${candidate}/targets/x86_64-linux/lib" ]; then
@@ -53,7 +55,7 @@ accept_cuda_toolkit() {
   fi
   local version
   version="$(cuda_toolkit_version "${candidate}")"
-  if cuda_version_ge "${version}" "${CUDA_RUNTIME_VERSION}"; then
+  if { [ -z "${cache_dir}" ] && cuda_version_ge "${version}" "${CUDA_RUNTIME_VERSION}"; } || [ "${version}" = "${CUDA_RUNTIME_VERSION}" ]; then
     cuda_path="${candidate}"
     echo "Using CUDA toolkit at ${candidate} (version ${version})."
     return 0
@@ -67,7 +69,10 @@ accept_cuda_toolkit() {
 }
 
 cuda_path=""
-if [ -n "${CUDA_PATH:-}" ]; then
+if [ -n "${cache_dir}" ]; then
+  accept_cuda_toolkit "${cache_dir}" || true
+fi
+if [ -z "${cuda_path}" ] && [ -n "${CUDA_PATH:-}" ]; then
   accept_cuda_toolkit "${CUDA_PATH}" || cuda_path=""
 fi
 if [ -z "${cuda_path}" ] && command -v nvcc >/dev/null 2>&1; then
@@ -118,6 +123,14 @@ if [ -z "${cuda_path}" ]; then
   exit 1
 fi
 
+# CUDA's nvcc/include/targets tree is relocatable. Keep the same absolute cache
+# path in publisher and reader; restore never needs to recreate apt's database.
+if [ -n "${cache_dir}" ] && [ "${cuda_path}" != "${cache_dir}" ]; then
+  mkdir -p "${cache_dir}"
+  cp -a "${cuda_path}/." "${cache_dir}/"
+  cuda_path="${cache_dir}"
+fi
+
 nvcc_bin="${cuda_path}/bin/nvcc"
 if [ ! -x "${nvcc_bin}" ]; then
   echo "nvcc not found at ${nvcc_bin}" >&2
@@ -134,3 +147,12 @@ echo "CUDA_PATH=${cuda_path}" >> "${GITHUB_ENV}"
 echo "${cuda_path}/bin" >> "${GITHUB_PATH}"
 echo "LD_LIBRARY_PATH=${cuda_library_path}:${LD_LIBRARY_PATH:-}" >> "${GITHUB_ENV}"
 "${nvcc_bin}" --version
+if [ -n "${cache_dir}" ]; then
+  # Exercise the restored compiler and headers, not just an Actions cache-hit.
+  smoke_dir="$(mktemp -d)"
+  trap 'rm -rf "${smoke_dir}"' EXIT
+  printf 'extern "C" __global__ void tenferro_toolkit_smoke(float *x) { x[0] = 1.0f; }\n' > "${smoke_dir}/smoke.cu"
+  "${nvcc_bin}" --ptx -arch=sm_75 "${smoke_dir}/smoke.cu" -o "${smoke_dir}/smoke.ptx"
+  grep -q 'entry tenferro_toolkit_smoke' "${smoke_dir}/smoke.ptx"
+  du -sh "${cache_dir}"
+fi

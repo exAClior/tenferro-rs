@@ -2724,13 +2724,11 @@ pub(crate) fn retain_instruction_results<'input>(
             if !is_output {
                 staged[slot].take();
             }
-        } else if !is_output {
-            if let Some(value) = staged[slot].take() {
-                located[slot].push(LocatedExecSlot {
-                    location: location.clone(),
-                    value,
-                });
-            }
+        } else if !is_output && let Some(value) = staged[slot].take() {
+            located[slot].push(LocatedExecSlot {
+                location: location.clone(),
+                value,
+            });
         }
     }
 

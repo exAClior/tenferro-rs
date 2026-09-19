@@ -11,7 +11,8 @@ use super::helpers::{
     transpose_col_major_data,
 };
 
-extern "C" {
+// SAFETY: declarations retain the provider's LAPACK LP64 ABI; callers validate buffers.
+unsafe extern "C" {
     #[link_name = "sgetc2_"]
     fn sgetc2_ffi(
         n: *const i32,

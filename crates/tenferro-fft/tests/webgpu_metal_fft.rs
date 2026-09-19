@@ -69,8 +69,16 @@ mod metal {
 
     #[test]
     fn metal_fft_numerical_and_capability_matrix() {
-        let Ok(context) = AppleContext::new() else {
-            return;
+        let context = match AppleContext::new() {
+            Ok(context) => context,
+            Err(error) => {
+                assert!(
+                    std::env::var_os("TENFERRO_REQUIRE_METAL").is_none(),
+                    "Apple CI requires Metal: {error}"
+                );
+                eprintln!("skipping Metal FFT test: {error}");
+                return;
+            }
         };
         cfft_axes_batches_and_normalizations(&context);
         rfft_padding_truncation_and_round_trip(&context);
