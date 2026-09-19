@@ -458,10 +458,8 @@ class WorkflowContractTests(unittest.TestCase):
                     self.assertNotIn("--release", match.group(0))
 
     def test_gpu_archive_run_excludes_compile_only_trybuild_tests(self) -> None:
-        for path in (
-            ".github/workflows/runpod-gpu-test.yml",
-            ".github/workflows/CI_gpu.yml",
-        ):
+        # RunPod's exhaustive inventory is checked by test_gpu_test_partition.
+        for path in (".github/workflows/CI_gpu.yml",):
             text = read(path)
             cuda_tests = text[
                 text.index("      - name: Run CUDA tests from archive") :
@@ -493,10 +491,7 @@ class WorkflowContractTests(unittest.TestCase):
             structural_tests,
             rf"#\[ignore[^\]]*\]\s*fn {benchmark}\(\)",
         )
-        for path in (
-            ".github/workflows/runpod-gpu-test.yml",
-            ".github/workflows/CI_gpu.yml",
-        ):
+        for path in (".github/workflows/CI_gpu.yml",):
             text = read(path)
             cuda_tests = text[
                 text.index("      - name: Run CUDA tests from archive") :
@@ -524,7 +519,10 @@ class WorkflowContractTests(unittest.TestCase):
                 self.assertIn("Build PJRT test archive", text)
                 self.assertIn("Run OpenXLA PJRT E2E tests from archive", text)
                 self.assertIn("--archive-file \"${PJRT_ARCHIVE}\"", text)
-                self.assertIn("-E 'test(pjrt_execution)'", text)
+                if path.endswith("CI_gpu.yml"):
+                    self.assertIn("-E 'test(pjrt_execution)'", text)
+                else:
+                    self.assertIn("gpu_test_partition.py --kind pjrt --lane gpu", text)
                 self.assertNotIn("cargo test -p tenferro-xla", text)
 
     def test_runpod_cuda_runtime_adapts_without_lowering_cudarc_bindings(
