@@ -758,8 +758,44 @@ fn execute_linalg_extension_reads_in_session<S: LinalgBackend>(
         let cotangent = session.to_contiguous_read(inputs[0].clone())?;
         return Ok(vec![session.slice(&cotangent, &config)?]);
     }
-    if op.op() == LinalgOp::Cholesky {
-        return Ok(vec![session.cholesky_read(inputs[0].clone())?]);
+    // Preserve borrowed layouts through the same provider hooks used by the
+    // concrete read API. In particular, CPU Faer can consume strided views;
+    // packing here would defeat that path before provider dispatch.
+    match op.op() {
+        LinalgOp::Cholesky => return Ok(vec![session.cholesky_read(inputs[0].clone())?]),
+        LinalgOp::Lu => return session.lu_read(inputs[0].clone()),
+        LinalgOp::FullPivLu => return session.full_piv_lu_read(inputs[0].clone()),
+        LinalgOp::Svd {
+            derivative_eps,
+            gauge,
+        } => {
+            validate_derivative_eps("svd_with_options", derivative_eps)?;
+            let mut outputs = session.svd_read(inputs[0].clone())?;
+            apply_svd_gauge(gauge, &mut outputs)?;
+            return Ok(outputs);
+        }
+        LinalgOp::SvdVals { .. } => return Ok(vec![session.svd_values_read(inputs[0].clone())?]),
+        LinalgOp::Qr { gauge } => {
+            return session.qr_with_options_read(inputs[0].clone(), QrOptions { gauge });
+        }
+        LinalgOp::RankRevealingQr { gauge, rtol, atol } => {
+            return session.rank_revealing_qr_read(
+                inputs[0].clone(),
+                RankRevealingQrOptions { gauge, rtol, atol },
+            );
+        }
+        LinalgOp::Eigh {
+            derivative_eps,
+            gauge,
+        } => {
+            validate_derivative_eps("eigh_with_options", derivative_eps)?;
+            let mut outputs = session.eigh_read(inputs[0].clone())?;
+            apply_eigh_gauge(gauge, &mut outputs)?;
+            return Ok(outputs);
+        }
+        LinalgOp::EighVals { .. } => return Ok(vec![session.eigh_values_read(inputs[0].clone())?]),
+        LinalgOp::Eig { .. } => return session.eig_read(inputs[0].clone()),
+        _ => {}
     }
     if let LinalgOp::TriangularSolve {
         left_side,
