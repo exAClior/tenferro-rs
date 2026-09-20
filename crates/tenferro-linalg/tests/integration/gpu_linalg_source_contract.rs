@@ -404,8 +404,6 @@ fn cuda_rrqr_has_no_payload_download_or_cpu_fallback() {
 #[test]
 fn cubecl_linalg_overrides_svd_read_with_backend_canonicalization() {
     let source = gpu_mod_source();
-    // `svd_read` and `svd_with_options_read` share one device-side
-    // canonicalization helper that also carries the caller's `SvdDriver`.
     let helper_source = source_section(
         &source,
         "fn svd_read_with_driver",
@@ -435,6 +433,17 @@ fn cubecl_linalg_overrides_svd_read_with_backend_canonicalization() {
         assert!(
             with_options_source.contains(needle),
             "CubeCL svd_with_options_read should forward the driver and apply the gauge: missing {needle}"
+        );
+    }
+
+    let values_read_source = source_section(&source, "fn svd_values_read(", "fn qr(");
+    for needle in [
+        "svd_values_read_with_driver(self, input, SvdDriver::Auto)",
+        "svd_values_read_with_driver(self, input, driver)",
+    ] {
+        assert!(
+            values_read_source.contains(needle),
+            "CubeCL values-only read hooks should share the driver-carrying helper: missing {needle}"
         );
     }
 }
