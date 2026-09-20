@@ -1093,11 +1093,13 @@ pub(crate) fn linearize_eigh_values(
         vec![false, true],
         matrix_rank,
     );
-    // `diag(V^H dA V)` is the rowwise dot of `V^H dA` with the conjugate columns
-    // of `V`. A Hadamard product plus one reduction replaces the second matmul,
-    // and the pullback of that reduction then costs one matmul instead of two.
+    // `diag(V^H dA V)` is the rowwise dot of `V^H dA` with `conj(V^H)`, which is
+    // `V^T`: the Hadamard factor must be conjugated for complex inputs. A
+    // Hadamard product plus one reduction replaces the second matmul, and the
+    // pullback of that reduction then costs one matmul instead of two.
     // This op has no eigenvector output, so the projection is never needed.
-    let scaled = hadamard_fixed_linear(builder, ValueRef::Local(vh), tmp);
+    let vt = transpose_matrix_fixed(builder, v, matrix_rank);
+    let scaled = hadamard_fixed_linear(builder, ValueRef::Local(vt), tmp);
     let reduced = builder.add_operation(
         StdTensorOp::ReduceSum { axes: vec![1] },
         vec![ValueRef::Local(scaled)],

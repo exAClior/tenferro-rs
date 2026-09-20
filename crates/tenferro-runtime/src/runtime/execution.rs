@@ -1336,6 +1336,10 @@ where
             inputs.push(value.as_tensor("elementwise_region")?);
         }
 
+        if !crate::segment::plan_matches_input_dtypes(plan, &inputs) {
+            return Ok(false);
+        }
+
         let mut lease = self.lease_state("Runtime::run_prepared elementwise region")?;
         let backend = &mut lease.state_mut().backend;
         let outputs =
