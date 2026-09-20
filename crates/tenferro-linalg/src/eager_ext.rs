@@ -869,6 +869,7 @@ pub fn svd_with_options(
         LinalgOp::Svd {
             derivative_eps: options.derivative_eps,
             gauge: options.gauge,
+            driver: options.driver,
         },
         &[a],
     )?

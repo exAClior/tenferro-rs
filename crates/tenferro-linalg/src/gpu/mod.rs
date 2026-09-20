@@ -6,7 +6,79 @@ use tenferro_gpu::cuda::CudaExecSession;
 use tenferro_tensor::{Tensor, TensorRead, TensorView};
 
 use crate::backend::{unsupported_dtype, LinalgBackend};
+use crate::extension::{apply_svd_gauge, validate_derivative_eps, SvdDriver, SvdOptions};
 use crate::{QrOptions, RankRevealingQrOptions};
+
+/// Canonicalize a borrowed matrix on the device and run the thin SVD with an
+/// explicit driver. cuSOLVER needs compact column-major device storage, so a
+/// view is made contiguous on the device and never crosses the host boundary.
+fn svd_read_with_driver(
+    session: &mut CudaExecSession<'_>,
+    input: TensorRead<'_>,
+    driver: SvdDriver,
+) -> tenferro_tensor::Result<Vec<Tensor>> {
+    let input = input.tensor_view();
+    match input {
+        TensorView::F32(view) => {
+            let compact = session.to_contiguous(&view)?;
+            let input = Tensor::from_typed::<f32>(compact);
+            linalg::svd(session, &input, driver)
+        }
+        TensorView::F64(view) => {
+            let compact = session.to_contiguous(&view)?;
+            let input = Tensor::from_typed::<f64>(compact);
+            linalg::svd(session, &input, driver)
+        }
+        TensorView::C32(view) => {
+            let compact = session.to_contiguous(&view)?;
+            let input = Tensor::from_typed::<num_complex::Complex32>(compact);
+            linalg::svd(session, &input, driver)
+        }
+        TensorView::C64(view) => {
+            let compact = session.to_contiguous(&view)?;
+            let input = Tensor::from_typed::<num_complex::Complex64>(compact);
+            linalg::svd(session, &input, driver)
+        }
+        TensorView::I32(_) | TensorView::I64(_) | TensorView::Bool(_) => {
+            Err(unsupported_dtype("svd", input.dtype()))
+        }
+    }
+}
+
+/// Borrowed-input singular values with an explicit driver; see
+/// [`svd_read_with_driver`] for the canonicalization contract.
+fn svd_values_read_with_driver(
+    session: &mut CudaExecSession<'_>,
+    input: TensorRead<'_>,
+    driver: SvdDriver,
+) -> tenferro_tensor::Result<Tensor> {
+    let input = input.tensor_view();
+    match input {
+        TensorView::F32(view) => session.to_contiguous(&view).and_then(|input| {
+            linalg::svd_values(session, &Tensor::from_typed::<f32>(input), driver)
+        }),
+        TensorView::F64(view) => session.to_contiguous(&view).and_then(|input| {
+            linalg::svd_values(session, &Tensor::from_typed::<f64>(input), driver)
+        }),
+        TensorView::C32(view) => session.to_contiguous(&view).and_then(|input| {
+            linalg::svd_values(
+                session,
+                &Tensor::from_typed::<num_complex::Complex32>(input),
+                driver,
+            )
+        }),
+        TensorView::C64(view) => session.to_contiguous(&view).and_then(|input| {
+            linalg::svd_values(
+                session,
+                &Tensor::from_typed::<num_complex::Complex64>(input),
+                driver,
+            )
+        }),
+        TensorView::I32(_) | TensorView::I64(_) | TensorView::Bool(_) => {
+            Err(unsupported_dtype("svd_values", input.dtype()))
+        }
+    }
+}
 
 impl LinalgBackend for CudaExecSession<'_> {
     fn cholesky(&mut self, input: &Tensor) -> tenferro_tensor::Result<Tensor> {
@@ -47,7 +119,18 @@ impl LinalgBackend for CudaExecSession<'_> {
     }
 
     fn svd(&mut self, input: &Tensor) -> tenferro_tensor::Result<Vec<Tensor>> {
-        linalg::svd(self, input)
+        linalg::svd(self, input, SvdDriver::Auto)
+    }
+
+    fn svd_with_options(
+        &mut self,
+        input: &Tensor,
+        options: SvdOptions,
+    ) -> tenferro_tensor::Result<Vec<Tensor>> {
+        validate_derivative_eps("svd_with_options", options.derivative_eps)?;
+        let mut outputs = linalg::svd(self, input, options.driver)?;
+        apply_svd_gauge(options.gauge, &mut outputs)?;
+        Ok(outputs)
     }
 
     fn svd_full(&mut self, input: &Tensor) -> tenferro_tensor::Result<Vec<Tensor>> {
@@ -55,7 +138,15 @@ impl LinalgBackend for CudaExecSession<'_> {
     }
 
     fn svd_values(&mut self, input: &Tensor) -> tenferro_tensor::Result<Tensor> {
-        linalg::svd_values(self, input)
+        linalg::svd_values(self, input, SvdDriver::Auto)
+    }
+
+    fn svd_values_with_driver(
+        &mut self,
+        input: &Tensor,
+        driver: SvdDriver,
+    ) -> tenferro_tensor::Result<Tensor> {
+        linalg::svd_values(self, input, driver)
     }
 
     fn svd_full_read(&mut self, input: TensorRead<'_>) -> tenferro_tensor::Result<Vec<Tensor>> {
@@ -91,53 +182,30 @@ impl LinalgBackend for CudaExecSession<'_> {
     }
 
     fn svd_read(&mut self, input: TensorRead<'_>) -> tenferro_tensor::Result<Vec<Tensor>> {
-        let input = input.tensor_view();
-        match input {
-            TensorView::F32(view) => {
-                let compact = self.to_contiguous(&view)?;
-                let input = Tensor::from_typed::<f32>(compact);
-                self.svd(&input)
-            }
-            TensorView::F64(view) => {
-                let compact = self.to_contiguous(&view)?;
-                let input = Tensor::from_typed::<f64>(compact);
-                self.svd(&input)
-            }
-            TensorView::C32(view) => {
-                let compact = self.to_contiguous(&view)?;
-                let input = Tensor::from_typed::<num_complex::Complex32>(compact);
-                self.svd(&input)
-            }
-            TensorView::C64(view) => {
-                let compact = self.to_contiguous(&view)?;
-                let input = Tensor::from_typed::<num_complex::Complex64>(compact);
-                self.svd(&input)
-            }
-            TensorView::I32(_) | TensorView::I64(_) | TensorView::Bool(_) => {
-                Err(unsupported_dtype("svd", input.dtype()))
-            }
-        }
+        svd_read_with_driver(self, input, SvdDriver::Auto)
+    }
+
+    fn svd_with_options_read(
+        &mut self,
+        input: TensorRead<'_>,
+        options: SvdOptions,
+    ) -> tenferro_tensor::Result<Vec<Tensor>> {
+        validate_derivative_eps("svd_with_options_read", options.derivative_eps)?;
+        let mut outputs = svd_read_with_driver(self, input, options.driver)?;
+        apply_svd_gauge(options.gauge, &mut outputs)?;
+        Ok(outputs)
     }
 
     fn svd_values_read(&mut self, input: TensorRead<'_>) -> tenferro_tensor::Result<Tensor> {
-        let input = input.tensor_view();
-        match input {
-            TensorView::F32(view) => self
-                .to_contiguous(&view)
-                .and_then(|input| self.svd_values(&Tensor::from_typed::<f32>(input))),
-            TensorView::F64(view) => self
-                .to_contiguous(&view)
-                .and_then(|input| self.svd_values(&Tensor::from_typed::<f64>(input))),
-            TensorView::C32(view) => self.to_contiguous(&view).and_then(|input| {
-                self.svd_values(&Tensor::from_typed::<num_complex::Complex32>(input))
-            }),
-            TensorView::C64(view) => self.to_contiguous(&view).and_then(|input| {
-                self.svd_values(&Tensor::from_typed::<num_complex::Complex64>(input))
-            }),
-            TensorView::I32(_) | TensorView::I64(_) | TensorView::Bool(_) => {
-                Err(unsupported_dtype("svd_values", input.dtype()))
-            }
-        }
+        svd_values_read_with_driver(self, input, SvdDriver::Auto)
+    }
+
+    fn svd_values_with_driver_read(
+        &mut self,
+        input: TensorRead<'_>,
+        driver: SvdDriver,
+    ) -> tenferro_tensor::Result<Tensor> {
+        svd_values_read_with_driver(self, input, driver)
     }
 
     fn qr(&mut self, input: &Tensor) -> tenferro_tensor::Result<Vec<Tensor>> {

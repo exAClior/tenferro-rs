@@ -13,7 +13,7 @@ use super::ffi::cusolver::{
 };
 use super::kernels as cubecl_linalg;
 use crate::backend::CompactQrResult;
-use crate::extension::{QrGauge, QrOptions};
+use crate::extension::{QrGauge, QrOptions, SvdDriver};
 // validate_nonsingular_gpu uses backend ops (extract_diagonal, magnitude,
 // reduce_min/reduce_max) then downloads scalar summaries — no bulk host
 // roundtrip.
@@ -158,17 +158,29 @@ impl LinalgScalar for Complex64 {
 
 const JAX_COMPATIBLE_GESVDJ_MAX_DIM: usize = 1024;
 
+/// The cuSOLVER routine that actually factors the matrix.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum SvdDriver {
+pub(super) enum CusolverSvdRoutine {
     Gesvdj,
     Gesvd,
 }
 
-fn select_svd_driver(m: usize, n: usize) -> SvdDriver {
-    if m <= JAX_COMPATIBLE_GESVDJ_MAX_DIM && n <= JAX_COMPATIBLE_GESVDJ_MAX_DIM {
-        SvdDriver::Gesvdj
-    } else {
-        SvdDriver::Gesvd
+/// Resolve the caller's [`SvdDriver`] to a cuSOLVER routine.
+///
+/// `Auto` keeps the JAX-compatible policy (`gesvdj` when both dimensions are
+/// at most 1024, otherwise `gesvd`); an explicit driver wins regardless of the
+/// matrix dimensions.
+pub(super) fn select_svd_driver(driver: SvdDriver, m: usize, n: usize) -> CusolverSvdRoutine {
+    match driver {
+        SvdDriver::Gesvdj => CusolverSvdRoutine::Gesvdj,
+        SvdDriver::Gesvd => CusolverSvdRoutine::Gesvd,
+        SvdDriver::Auto => {
+            if m <= JAX_COMPATIBLE_GESVDJ_MAX_DIM && n <= JAX_COMPATIBLE_GESVDJ_MAX_DIM {
+                CusolverSvdRoutine::Gesvdj
+            } else {
+                CusolverSvdRoutine::Gesvd
+            }
+        }
     }
 }
 
@@ -422,69 +434,90 @@ pub(super) fn full_piv_lu_solve(
     ))
 }
 
-pub(super) fn svd(backend: &mut CudaExecSession<'_>, input: &Tensor) -> Result<Vec<Tensor>> {
-    svd_dispatch(backend, input, false)
+pub(super) fn svd(
+    backend: &mut CudaExecSession<'_>,
+    input: &Tensor,
+    driver: SvdDriver,
+) -> Result<Vec<Tensor>> {
+    svd_dispatch(backend, input, false, driver)
 }
 
 /// Full-matrices SVD: `U` is `m x m` and `Vt` is `n x n`.
 pub(super) fn svd_full(backend: &mut CudaExecSession<'_>, input: &Tensor) -> Result<Vec<Tensor>> {
-    svd_dispatch(backend, input, true)
+    svd_dispatch(backend, input, true, SvdDriver::Auto)
 }
 
 fn svd_dispatch(
     backend: &mut CudaExecSession<'_>,
     input: &Tensor,
     full: bool,
+    driver: SvdDriver,
 ) -> Result<Vec<Tensor>> {
     let op: &'static str = if full { "svd_full" } else { "svd" };
     match input.dtype() {
-        DType::F32 => svd_typed(backend, typed_host::<f32>(op, input)?, full).map(|(u, s, vt)| {
-            vec![
-                Tensor::from_typed::<f32>(u),
-                Tensor::from_typed::<f32>(s),
-                Tensor::from_typed::<f32>(vt),
-            ]
-        }),
-        DType::F64 => svd_typed(backend, typed_host::<f64>(op, input)?, full).map(|(u, s, vt)| {
-            vec![
-                Tensor::from_typed::<f64>(u),
-                Tensor::from_typed::<f64>(s),
-                Tensor::from_typed::<f64>(vt),
-            ]
-        }),
-        DType::C32 => {
-            svd_typed(backend, typed_host::<Complex32>(op, input)?, full).map(|(u, s, vt)| {
+        DType::F32 => {
+            svd_typed(backend, typed_host::<f32>(op, input)?, full, driver).map(|(u, s, vt)| {
+                vec![
+                    Tensor::from_typed::<f32>(u),
+                    Tensor::from_typed::<f32>(s),
+                    Tensor::from_typed::<f32>(vt),
+                ]
+            })
+        }
+        DType::F64 => {
+            svd_typed(backend, typed_host::<f64>(op, input)?, full, driver).map(|(u, s, vt)| {
+                vec![
+                    Tensor::from_typed::<f64>(u),
+                    Tensor::from_typed::<f64>(s),
+                    Tensor::from_typed::<f64>(vt),
+                ]
+            })
+        }
+        DType::C32 => svd_typed(backend, typed_host::<Complex32>(op, input)?, full, driver).map(
+            |(u, s, vt)| {
                 vec![
                     Tensor::from_typed::<Complex32>(u),
                     Tensor::from_typed::<f32>(s),
                     Tensor::from_typed::<Complex32>(vt),
                 ]
-            })
-        }
-        DType::C64 => {
-            svd_typed(backend, typed_host::<Complex64>(op, input)?, full).map(|(u, s, vt)| {
+            },
+        ),
+        DType::C64 => svd_typed(backend, typed_host::<Complex64>(op, input)?, full, driver).map(
+            |(u, s, vt)| {
                 vec![
                     Tensor::from_typed::<Complex64>(u),
                     Tensor::from_typed::<f64>(s),
                     Tensor::from_typed::<Complex64>(vt),
                 ]
-            })
-        }
+            },
+        ),
         DType::I32 | DType::I64 | DType::Bool => Err(unsupported_linalg_dtype(op, input)),
         DType::External(_) => Err(unsupported_linalg_dtype(op, input)),
     }
 }
 
-pub(super) fn svd_values(backend: &mut CudaExecSession<'_>, input: &Tensor) -> Result<Tensor> {
+pub(super) fn svd_values(
+    backend: &mut CudaExecSession<'_>,
+    input: &Tensor,
+    driver: SvdDriver,
+) -> Result<Tensor> {
     match input.dtype() {
-        DType::F32 => svd_values_typed(backend, typed_host::<f32>("svd_values", input)?)
+        DType::F32 => svd_values_typed(backend, typed_host::<f32>("svd_values", input)?, driver)
             .map(Tensor::from_typed::<f32>),
-        DType::F64 => svd_values_typed(backend, typed_host::<f64>("svd_values", input)?)
+        DType::F64 => svd_values_typed(backend, typed_host::<f64>("svd_values", input)?, driver)
             .map(Tensor::from_typed::<f64>),
-        DType::C32 => svd_values_typed(backend, typed_host::<Complex32>("svd_values", input)?)
-            .map(Tensor::from_typed::<f32>),
-        DType::C64 => svd_values_typed(backend, typed_host::<Complex64>("svd_values", input)?)
-            .map(Tensor::from_typed::<f64>),
+        DType::C32 => svd_values_typed(
+            backend,
+            typed_host::<Complex32>("svd_values", input)?,
+            driver,
+        )
+        .map(Tensor::from_typed::<f32>),
+        DType::C64 => svd_values_typed(
+            backend,
+            typed_host::<Complex64>("svd_values", input)?,
+            driver,
+        )
+        .map(Tensor::from_typed::<f64>),
         DType::I32 | DType::I64 | DType::Bool => Err(unsupported_linalg_dtype("svd_values", input)),
         DType::External(_) => Err(unsupported_linalg_dtype("svd_values", input)),
     }
@@ -1984,6 +2017,7 @@ fn svd_typed<T>(
     backend: &mut CudaExecSession<'_>,
     input: &TypedTensor<T>,
     full: bool,
+    driver: SvdDriver,
 ) -> Result<(
     TypedTensor<T>,
     TypedTensor<<T as LinalgScalar>::Real>,
@@ -2016,8 +2050,8 @@ where
     let a_stride = checked_mul_usize(op, "svd input stride", m, n)?;
     let s_stride = k;
 
-    match select_svd_driver(m, n) {
-        SvdDriver::Gesvdj => {
+    match select_svd_driver(driver, m, n) {
+        CusolverSvdRoutine::Gesvdj => {
             let mut v_shape = vec![n, vt_rows];
             v_shape.extend_from_slice(batch_shape);
             // `econ = 0` asks gesvdj for the full square factors; `econ = 1`
@@ -2177,7 +2211,7 @@ where
             let vt = T::copy_matrix_adjoint(backend, &v, &vt_shape, op)?;
             Ok((u, s, vt))
         }
-        SvdDriver::Gesvd => {
+        CusolverSvdRoutine::Gesvd => {
             let transpose_for_gesvd = m < n;
             let (gesvd_m, gesvd_n) = if transpose_for_gesvd { (n, m) } else { (m, n) };
             // `jobu = jobvt = 'A'` returns `gesvd_m x gesvd_m` and
@@ -2452,6 +2486,7 @@ where
 fn svd_values_typed<T>(
     backend: &mut CudaExecSession<'_>,
     input: &TypedTensor<T>,
+    driver: SvdDriver,
 ) -> Result<TypedTensor<<T as LinalgScalar>::Real>>
 where
     T: LinalgScalar + TensorScalar,
@@ -2476,8 +2511,8 @@ where
     let a_stride = checked_mul_usize(OP, "svd_values input stride", m, n)?;
     let s_stride = k;
 
-    match select_svd_driver(m, n) {
-        SvdDriver::Gesvdj => {
+    match select_svd_driver(driver, m, n) {
+        CusolverSvdRoutine::Gesvdj => {
             let mut u_shape = vec![m, k];
             u_shape.extend_from_slice(batch_shape);
             let mut v_shape = vec![n, k];
@@ -2634,7 +2669,7 @@ where
             })?;
             Ok(s)
         }
-        SvdDriver::Gesvd => {
+        CusolverSvdRoutine::Gesvd => {
             let (gesvd_m, gesvd_n) = if m < n { (n, m) } else { (m, n) };
             // When `m < n` gesvd factors `adjoint(input)` (n×m); the CubeCL
             // adjoint kernel is flushed before the raw session, so the SVD
@@ -2791,6 +2826,8 @@ where
 
 mod householder_qr;
 mod rank_revealing_qr;
+#[cfg(test)]
+mod tests;
 use householder_qr::*;
 
 fn qr_typed<T>(

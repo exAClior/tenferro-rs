@@ -160,6 +160,33 @@ assert_eq!(vt_rank2.concrete_shape()?, vec![2, 3]);
         Ok(())
     }
 
+    snippet_linear_algebra_svd_driver()?;
+
+    // snippet source: docs/guides/linear-algebra.md:276
+    fn snippet_linear_algebra_svd_driver() -> Result<(), Box<dyn std::error::Error>> {
+        // snippet-start:linear_algebra_svd_driver
+use tenferro_linalg::{SvdDriver, SvdOptions, TracedTensorLinalgExt};
+use tenferro_runtime::TracedTensor;
+
+let a = TracedTensor::from_vec_col_major(
+    vec![3, 2],
+    vec![
+        3.0_f64, 1.0, 0.5,
+        -2.0, 0.25, 1.5,
+    ],
+)?;
+// Forces cuSOLVER `gesvd` on the CUDA backend; CPU providers run their only
+// SVD kernel and return the same factors as `SvdDriver::Auto`.
+let (u, s, vt) = a.svd_with_options(SvdOptions::default().driver(SvdDriver::Gesvd))?;
+
+assert_eq!(SvdOptions::default().driver, SvdDriver::Auto);
+assert_eq!(u.concrete_shape()?, vec![3, 2]);
+assert_eq!(s.concrete_shape()?, vec![2]);
+assert_eq!(vt.concrete_shape()?, vec![2, 2]);
+        // snippet-end:linear_algebra_svd_driver
+        Ok(())
+    }
+
     snippet_linear_algebra_6()?;
 
     // snippet source: docs/guides/linear-algebra.md:244

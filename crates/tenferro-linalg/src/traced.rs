@@ -593,6 +593,7 @@ pub fn svd_with_options(
             Arc::new(LinalgExtensionOp::new(LinalgOp::Svd {
                 derivative_eps: options.derivative_eps,
                 gauge: options.gauge,
+                driver: options.driver,
             })),
             &[a],
         )?,
@@ -1954,6 +1955,7 @@ fn svd_values(a: &TracedTensor) -> Result<TracedTensor> {
             Arc::new(LinalgExtensionOp::new(LinalgOp::Svd {
                 derivative_eps: SvdOptions::default().derivative_eps,
                 gauge: SvdOptions::default().gauge,
+                driver: SvdOptions::default().driver,
             })),
             &[a],
         )?,

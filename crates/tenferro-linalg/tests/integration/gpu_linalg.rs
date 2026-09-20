@@ -8,7 +8,8 @@ use tenferro_gpu::{
     cuda::CudaBackend, cuda::CudaDeviceId, cuda::CudaExecSession,
 };
 use tenferro_linalg::{
-    HouseholderQr, LinalgBackend, QrGauge, QrOptions, RankRevealingQrOptions, TensorLinalgExt,
+    HouseholderQr, LinalgBackend, QrGauge, QrOptions, RankRevealingQrOptions, SvdDriver,
+    SvdOptions, TensorLinalgExt,
 };
 use tenferro_tensor::{BackendSessionHost, DType, Error, Tensor, TensorRead, TypedTensor};
 
@@ -714,6 +715,110 @@ fn test_cubecl_svd_gesvd_tall_f64_retains_direct_route() {
     let expected_values =
         with_cpu_linalg_session(&mut cpu, |session| session.svd_values(&input)).unwrap();
     assert_tensor_close(&s, &expected_values, 1e-9);
+}
+
+/// Patterned `m x n` f64 matrix with a dominant diagonal so every driver
+/// sees a well-separated spectrum.
+fn patterned_f64_matrix(m: usize, n: usize) -> Tensor {
+    let data = (0..n)
+        .flat_map(|col| {
+            (0..m).map(move |row| {
+                let patterned = ((row * 13 + col * 17 + 3) % 31) as f64 / 31.0 - 0.5;
+                patterned + if row == col { 2.0 } else { 0.0 }
+            })
+        })
+        .collect::<Vec<_>>();
+    tensor_f64(vec![m, n], data)
+}
+
+/// Run the thin SVD with an explicit driver through both the owned and the
+/// borrowed `svd_with_options*` entry points plus `svd_values_with_driver`,
+/// and check that the factors reconstruct the input and agree with the CPU
+/// singular values. The driver is forced on the side of the 1024 threshold
+/// where `SvdDriver::Auto` would pick the other routine, so a regression that
+/// drops the override would still pass numerically only if the two cuSOLVER
+/// routines were indistinguishable here; the source contract test guards the
+/// dispatch itself.
+fn check_forced_svd_driver(m: usize, n: usize, driver: SvdDriver) {
+    let input = patterned_f64_matrix(m, n);
+    let k = m.min(n);
+    let options = SvdOptions::default().driver(driver);
+
+    let mut gpu = gpu_backend();
+    let gpu_input = upload(&gpu, &input);
+    let outputs = with_cuda_linalg_session(&mut gpu, |session| {
+        session.svd_with_options(&gpu_input, options)
+    })
+    .unwrap();
+    let u = download(&gpu, &outputs[0]);
+    let s = download(&gpu, &outputs[1]);
+    let vt = download(&gpu, &outputs[2]);
+    assert_eq!(u.shape(), &[m, k]);
+    assert_eq!(s.shape(), &[k]);
+    assert_eq!(vt.shape(), &[k, n]);
+    let u_data = u.as_slice::<f64>().unwrap();
+    let s_data = s.as_slice::<f64>().unwrap();
+    let vt_data = vt.as_slice::<f64>().unwrap();
+    assert_singular_values(s_data);
+
+    let mut scaled_u = u_data.to_vec();
+    for col in 0..k {
+        for row in 0..m {
+            scaled_u[col_major_index(m, row, col)] *= s_data[col];
+        }
+    }
+    let reconstruction = matmul_f64(&scaled_u, vt_data, m, k, n);
+    assert_relative_error_f64(&reconstruction, input.as_slice::<f64>().unwrap(), 1e-10);
+
+    let read_outputs = with_cuda_linalg_session(&mut gpu, |session| {
+        session.svd_with_options_read(TensorRead::from_tensor(&gpu_input), options)
+    })
+    .unwrap();
+    let read_s = download(&gpu, &read_outputs[1]);
+    assert_tensor_close(&read_s, &s, 1e-10);
+
+    let gpu_values = with_cuda_linalg_session(&mut gpu, |session| {
+        session.svd_values_with_driver(&gpu_input, driver)
+    })
+    .unwrap();
+    let values = download(&gpu, &gpu_values);
+    assert_tensor_close(&values, &s, 1e-10);
+
+    let mut cpu = cpu_backend();
+    let expected_values =
+        with_cpu_linalg_session(&mut cpu, |session| session.svd_values(&input)).unwrap();
+    assert_tensor_close(&s, &expected_values, 1e-9);
+}
+
+#[test]
+#[ignore = "requires CUDA 12.8+ GPU and forces legacy gesvd below the 1024 Auto threshold"]
+fn test_cubecl_svd_forced_gesvd_below_threshold_reconstructs() {
+    check_forced_svd_driver(64, 64, SvdDriver::Gesvd);
+    check_forced_svd_driver(8, 64, SvdDriver::Gesvd);
+}
+
+#[test]
+#[ignore = "requires CUDA 12.8+ GPU and forces gesvdj above the 1024 Auto threshold"]
+fn test_cubecl_svd_forced_gesvdj_above_threshold_reconstructs() {
+    check_forced_svd_driver(1025, 8, SvdDriver::Gesvdj);
+    check_forced_svd_driver(8, 1025, SvdDriver::Gesvdj);
+}
+
+#[test]
+#[ignore]
+fn test_cubecl_svd_auto_driver_matches_default_svd() {
+    let input = patterned_f64_matrix(48, 32);
+    let mut gpu = gpu_backend();
+    let gpu_input = upload(&gpu, &input);
+    let default_outputs =
+        with_cuda_linalg_session(&mut gpu, |session| session.svd(&gpu_input)).unwrap();
+    let auto_outputs = with_cuda_linalg_session(&mut gpu, |session| {
+        session.svd_with_options(&gpu_input, SvdOptions::default().driver(SvdDriver::Auto))
+    })
+    .unwrap();
+    for (default, auto) in default_outputs.iter().zip(&auto_outputs) {
+        assert_tensor_close(&download(&gpu, auto), &download(&gpu, default), 0.0);
+    }
 }
 
 #[test]

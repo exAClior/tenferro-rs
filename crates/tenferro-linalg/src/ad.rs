@@ -120,9 +120,17 @@ impl LinalgAdRule {
             // tangent rather than a silent thin-SVD derivative, matching the
             // LuFactor unsupported precedent above.
             LinalgOp::SvdFull => Ok(vec![None; op.output_count()]),
-            LinalgOp::SvdVals { derivative_eps } => {
-                rules::linearize_svd_values(builder, primal_in, tangent_in, derivative_eps, ctx)
-            }
+            LinalgOp::SvdVals {
+                derivative_eps,
+                driver,
+            } => rules::linearize_svd_values(
+                builder,
+                primal_in,
+                tangent_in,
+                derivative_eps,
+                driver,
+                ctx,
+            ),
             LinalgOp::Qr { .. } => {
                 rules::linearize_qr(builder, primal_in, primal_out, tangent_in, ctx)
             }
@@ -387,7 +395,9 @@ fn fixed_transpose_value(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::{EighGauge, QrGauge, SvdGauge, DEFAULT_DECOMPOSITION_DERIVATIVE_EPS};
+    use crate::extension::{
+        EighGauge, QrGauge, SvdDriver, SvdGauge, DEFAULT_DECOMPOSITION_DERIVATIVE_EPS,
+    };
     use computegraph::graph::GraphBuilder;
     use std::collections::HashSet;
     use tenferro_ops::input_key::TensorInputKey;
@@ -645,6 +655,7 @@ mod tests {
                 LinalgOp::Svd {
                     derivative_eps: DEFAULT_DECOMPOSITION_DERIVATIVE_EPS,
                     gauge: SvdGauge::Raw,
+                    driver: SvdDriver::Auto,
                 },
                 svd_context(&[2, 2]),
                 vec![None, None, None],
@@ -707,6 +718,7 @@ mod tests {
         let op = LinalgExtensionOp::new(LinalgOp::Svd {
             derivative_eps: DEFAULT_DECOMPOSITION_DERIVATIVE_EPS,
             gauge: SvdGauge::Raw,
+            driver: SvdDriver::Auto,
         });
 
         let result = LinalgAdRule
@@ -1139,10 +1151,12 @@ mod tests {
             LinalgOp::Svd {
                 derivative_eps: DEFAULT_DECOMPOSITION_DERIVATIVE_EPS,
                 gauge: SvdGauge::Raw,
+                driver: SvdDriver::Auto,
             },
             LinalgOp::SvdFull,
             LinalgOp::SvdVals {
                 derivative_eps: DEFAULT_DECOMPOSITION_DERIVATIVE_EPS,
+                driver: SvdDriver::Auto,
             },
             LinalgOp::Qr {
                 gauge: QrGauge::Raw,
@@ -1436,6 +1450,7 @@ mod tests {
                 op: LinalgOp::Svd {
                     derivative_eps: DEFAULT_DECOMPOSITION_DERIVATIVE_EPS,
                     gauge: SvdGauge::Raw,
+                    driver: SvdDriver::Auto,
                 },
                 active_outputs: &[0, 1, 2],
                 matrix: general,
@@ -1445,6 +1460,7 @@ mod tests {
                 name: "svd_values",
                 op: LinalgOp::SvdVals {
                     derivative_eps: DEFAULT_DECOMPOSITION_DERIVATIVE_EPS,
+                    driver: SvdDriver::Auto,
                 },
                 active_outputs: &[0],
                 matrix: general,
@@ -2109,6 +2125,7 @@ mod tests {
                     Arc::new(LinalgExtensionOp::new(LinalgOp::Svd {
                         derivative_eps: DEFAULT_DECOMPOSITION_DERIVATIVE_EPS,
                         gauge: SvdGauge::Raw,
+                        driver: SvdDriver::Auto,
                     })),
                     &[matrix],
                 )
@@ -2215,6 +2232,7 @@ mod tests {
                 LinalgOp::Svd {
                     derivative_eps: DEFAULT_DECOMPOSITION_DERIVATIVE_EPS,
                     gauge: SvdGauge::Raw,
+                    driver: SvdDriver::Auto,
                 },
                 vec![true, true, true],
                 true,
@@ -2229,6 +2247,7 @@ mod tests {
                 LinalgAdOpKind::SvdVals,
                 LinalgOp::SvdVals {
                     derivative_eps: DEFAULT_DECOMPOSITION_DERIVATIVE_EPS,
+                    driver: SvdDriver::Auto,
                 },
                 vec![true],
                 true,
@@ -2433,12 +2452,14 @@ mod tests {
                 LinalgOp::Svd {
                     derivative_eps: DEFAULT_DECOMPOSITION_DERIVATIVE_EPS,
                     gauge: SvdGauge::Raw,
+                    driver: SvdDriver::Auto,
                 },
                 vec![true, true, true],
             ),
             (
                 LinalgOp::SvdVals {
                     derivative_eps: DEFAULT_DECOMPOSITION_DERIVATIVE_EPS,
+                    driver: SvdDriver::Auto,
                 },
                 vec![true],
             ),
@@ -2521,6 +2542,7 @@ mod tests {
                 LinalgOp::Svd {
                     derivative_eps: DEFAULT_DECOMPOSITION_DERIVATIVE_EPS,
                     gauge: SvdGauge::Raw,
+                    driver: SvdDriver::Auto,
                 },
                 vec![true, true, true],
             ),
@@ -2676,6 +2698,7 @@ mod tests {
                 Arc::new(LinalgExtensionOp::new(LinalgOp::Svd {
                     derivative_eps: DEFAULT_DECOMPOSITION_DERIVATIVE_EPS,
                     gauge: SvdGauge::Raw,
+                    driver: SvdDriver::Auto,
                 })),
                 &[matrix],
             )

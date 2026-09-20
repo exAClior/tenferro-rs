@@ -69,7 +69,7 @@ pub use backend::LinalgBackend;
 pub use eager_ext::EagerTensorLinalgExt;
 pub use error::{Error, Result};
 pub use extension::{
-    extension_module, EighGauge, EighOptions, QrGauge, QrOptions, SvdGauge, SvdOptions,
+    extension_module, EighGauge, EighOptions, QrGauge, QrOptions, SvdDriver, SvdGauge, SvdOptions,
     DEFAULT_DECOMPOSITION_DERIVATIVE_EPS, LINALG_EXTENSION_FAMILY_ID,
 };
 pub use householder::HouseholderQr;
