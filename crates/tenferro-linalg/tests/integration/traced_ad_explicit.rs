@@ -732,6 +732,61 @@ fn eigvalsh_jvp_matches_finite_diff_through_values_only_eigh() {
 }
 
 #[test]
+fn complex_hermitian_eigvalsh_jvp_matches_the_trace_of_the_tangent() {
+    // Regression: the eigenvalue linear rule projects the tangent with
+    // `diag(V^H dA V)`, whose Hadamard form needs `conj(V^H)` and not `V^H`.
+    // A real input cannot see the difference, so this case has to be complex.
+    // The reference is exact for a Hermitian matrix: d(sum of eigenvalues) is
+    // the trace of the self-adjoint tangent.
+    let ad = ad_context();
+    let base = vec![
+        num_complex::Complex64::new(3.0, 0.0),
+        num_complex::Complex64::new(0.2, 0.4),
+        num_complex::Complex64::new(0.2, -0.4),
+        num_complex::Complex64::new(-1.0, 0.0),
+    ];
+    let tangent = vec![
+        num_complex::Complex64::new(0.7, 0.0),
+        num_complex::Complex64::new(-0.3, -0.5),
+        num_complex::Complex64::new(-0.3, 0.5),
+        num_complex::Complex64::new(-0.3, 0.0),
+    ];
+    let matrix =
+        TracedTensor::from_tensor_concrete_shape(c64_tensor(vec![2, 2], base.clone())).unwrap();
+    let direction =
+        TracedTensor::from_tensor_concrete_shape(c64_tensor(vec![2, 2], tangent.clone())).unwrap();
+
+    let values = matrix.eigvalsh().unwrap();
+    let loss = reduce_all(&values);
+    let actual = eval(&ad.jvp(&loss, &matrix, &direction).unwrap());
+
+    assert_close_scalar(
+        "complex Hermitian eigvalsh directional JVP",
+        get_f64_data(&actual)[0],
+        tangent[0].re + tangent[3].re,
+        1.0e-10,
+    );
+
+    // The same JVP must stay real for a purely imaginary Hermitian tangent:
+    // `tr(dA)` is real, so the imaginary part of the tangent may not leak in.
+    let imaginary = vec![
+        num_complex::Complex64::new(0.0, 0.0),
+        num_complex::Complex64::new(0.9, 0.0),
+        num_complex::Complex64::new(0.9, 0.0),
+        num_complex::Complex64::new(0.0, 0.0),
+    ];
+    let direction =
+        TracedTensor::from_tensor_concrete_shape(c64_tensor(vec![2, 2], imaginary)).unwrap();
+    let actual = eval(&ad.jvp(&loss, &matrix, &direction).unwrap());
+    assert_close_scalar(
+        "complex Hermitian eigvalsh JVP with a zero-trace tangent",
+        get_f64_data(&actual)[0],
+        0.0,
+        1.0e-10,
+    );
+}
+
+#[test]
 fn eigvals_jvp_matches_finite_diff() {
     let ad = ad_context();
     let data = vec![2.0, 0.5, 0.25, 3.0];
