@@ -158,18 +158,13 @@ impl LinalgScalar for Complex64 {
 
 const JAX_COMPATIBLE_GESVDJ_MAX_DIM: usize = 1024;
 
-/// The cuSOLVER routine that actually factors the matrix.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum CusolverSvdRoutine {
     Gesvdj,
     Gesvd,
 }
 
-/// Resolve the caller's [`SvdDriver`] to a cuSOLVER routine.
-///
-/// `Auto` keeps the JAX-compatible policy (`gesvdj` when both dimensions are
-/// at most 1024, otherwise `gesvd`); an explicit driver wins regardless of the
-/// matrix dimensions.
+/// `Auto` follows the JAX-compatible size policy; an explicit driver wins.
 pub(super) fn select_svd_driver(driver: SvdDriver, m: usize, n: usize) -> CusolverSvdRoutine {
     match driver {
         SvdDriver::Gesvdj => CusolverSvdRoutine::Gesvdj,
