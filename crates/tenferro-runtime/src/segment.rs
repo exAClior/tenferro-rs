@@ -816,7 +816,9 @@ fn execute_fused_segment(
 ) -> Result<()> {
     if let Some(plan) = build_elementwise_fusion_plan(instructions, input_slots, output_slots) {
         let inputs = collect_segment_inputs(slots, input_slots)?;
-        if let Some(outputs) = exec.execute_elementwise_fusion(&inputs, &plan)? {
+        if plan_matches_input_dtypes(&plan, &inputs)
+            && let Some(outputs) = exec.execute_elementwise_fusion(&inputs, &plan)?
+        {
             if outputs.len() != output_slots.len() {
                 return Err(crate::error::Error::Internal(format!(
                     "fused elementwise kernel produced {} outputs for {} slots",
@@ -865,7 +867,9 @@ fn execute_fused_value_segment(
 ) -> Result<()> {
     if let Some(plan) = build_elementwise_fusion_plan(instructions, input_slots, output_slots) {
         let inputs = collect_segment_inputs(slots, input_slots)?;
-        if let Some(outputs) = exec.execute_elementwise_fusion(&inputs, &plan)? {
+        if plan_matches_input_dtypes(&plan, &inputs)
+            && let Some(outputs) = exec.execute_elementwise_fusion(&inputs, &plan)?
+        {
             if outputs.len() != output_slots.len() {
                 return Err(crate::error::Error::Internal(format!(
                     "fused elementwise kernel produced {} outputs for {} slots",
@@ -1479,6 +1483,19 @@ pub(crate) fn build_elementwise_fusion_plan(
         outputs,
         ops,
     ))
+}
+
+/// Return whether every region input shares the fusion plan's single dtype.
+///
+/// [`build_elementwise_fusion_plan`] can only compare instruction dtypes, and an
+/// instruction records its inferred *output* dtype. An op whose output dtype is
+/// not its input dtype — `Abs` on a complex input, for example — therefore
+/// leaves an all-real instruction chain that still reads a complex region
+/// input. Such a region is a valid per-instruction program but not one
+/// uniform-dtype fused kernel, so the runtime declines the fusion and executes
+/// the region's instructions one by one instead.
+pub(crate) fn plan_matches_input_dtypes(plan: &ElementwiseFusionPlan, inputs: &[&Tensor]) -> bool {
+    inputs.iter().all(|input| input.dtype() == plan.dtype())
 }
 
 fn source_slot_is_used_directly_by_elementwise(

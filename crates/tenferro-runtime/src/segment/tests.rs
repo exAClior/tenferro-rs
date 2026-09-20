@@ -101,6 +101,70 @@ fn multiply(lhs: usize, rhs: usize, output: usize) -> ExecInstruction {
 }
 
 #[test]
+fn fused_segment_with_a_foreign_input_dtype_declines_and_runs_unfused() {
+    // `Abs` on a complex input records the real result dtype, so an all-real
+    // instruction chain can still read a complex region input. One fused kernel
+    // requires every value to share the plan dtype, so the region must fall back
+    // to per-instruction execution instead of reaching the backend.
+    let program = ExecProgram {
+        instructions: vec![
+            ExecInstruction {
+                op: ExecOp::Abs,
+                semantic_operation_index: None,
+                input_slots: vec![0],
+                output_slots: vec![2],
+                dtype: DType::F64,
+                output_shapes: vec![dim_shape(&[2, 2])].into(),
+                output_extents: vec![exact_extents(&[2, 2])].into(),
+                last_use: vec![true],
+            },
+            ExecInstruction {
+                op: ExecOp::BroadcastInDim {
+                    shape: dim_shape(&[]),
+                    dims: vec![],
+                },
+                semantic_operation_index: None,
+                input_slots: vec![1],
+                output_slots: vec![3],
+                dtype: DType::F64,
+                output_shapes: vec![dim_shape(&[])].into(),
+                output_extents: vec![exact_extents(&[])].into(),
+                last_use: vec![true],
+            },
+            multiply_with_shape(3, 2, 4, &[2, 2]),
+        ],
+        input_slots: vec![0, 1],
+        output_slots: vec![4],
+        n_slots: 5,
+        shape_guards: Vec::new(),
+    };
+    let complex = Tensor::from_typed::<tenferro_tensor::Complex64>(
+        tenferro_tensor::TypedTensor::from_vec_col_major(
+            vec![2, 2],
+            vec![
+                num_complex::Complex64::new(3.0, 0.0),
+                num_complex::Complex64::new(0.0, 0.0),
+                num_complex::Complex64::new(0.0, 0.0),
+                num_complex::Complex64::new(4.0, 0.0),
+            ],
+        )
+        .unwrap(),
+    );
+    let scalar = Tensor::from_vec_col_major(vec![], vec![2.0_f64]).unwrap();
+
+    assert!(
+        build_elementwise_fusion_plan(&program.instructions, &[0, 1], &[4]).is_some(),
+        "the mixed-dtype region must still build a plan for this test to cover the fallback"
+    );
+
+    let mut backend = CpuBackend::new();
+    let outputs = eval_exec_segmented(&mut backend, &program, vec![complex, scalar]).unwrap();
+
+    assert_eq!(outputs[0].dtype(), DType::F64);
+    assert_eq!(outputs[0].as_slice::<f64>().unwrap(), &[6.0, 0.0, 0.0, 8.0]);
+}
+
+#[test]
 fn elementwise_fusion_plan_uses_dense_segment_value_ids() {
     let instructions = vec![
         add_with_shape(10, 20, 30, &[4]),
