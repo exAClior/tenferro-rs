@@ -314,6 +314,14 @@ pub(crate) fn prepared_view_access<T: TensorScalar + 'static>(
     downcast_prepared(view.prepare_device_read(op)?, op)
 }
 
+/// Prepare an owned typed tensor for an exclusive provider-native write.
+pub(crate) fn prepared_tensor_mut_access<T: TensorScalar + 'static>(
+    tensor: &mut TypedTensor<T, impl TensorRank>,
+    op: &'static str,
+) -> crate::Result<CubeclPreparedAccess> {
+    downcast_prepared(tensor.prepare_device_write(op)?, op)
+}
+
 pub(crate) fn prepared_view_mut_access<T: TensorScalar + 'static>(
     view: &mut TypedTensorViewMut<'_, T, impl TensorRank>,
     op: &'static str,
