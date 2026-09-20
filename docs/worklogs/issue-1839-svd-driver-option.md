@@ -38,8 +38,9 @@
   reconstruction and CPU agreement through the owned, borrowed, and
   values-only entry points, and check `Auto` matches `svd`. They passed on an
   NVIDIA A100-SXM4-80GB (driver 580.173.02, CUDA 12.8, cuTENSOR 2.6.0,
-  rustc 1.96.0) together with the pre-existing CUDA SVD tests; hosted CI does
-  not run them on every PR.
+  rustc 1.96.0) together with the pre-existing CUDA SVD tests; the borrowed
+  values-only assertion was added after that run and is compile-checked only.
+  Hosted CI does not run these tests on every PR.
 - The issue's acceptance criterion holds through the public API on that host:
   for an 800x800 ComplexF64 matrix whose singular values span ten decades,
   `SvdDriver::Gesvd` takes about 127 ms against about 600 ms for `Auto` and

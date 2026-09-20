@@ -778,6 +778,13 @@ fn check_forced_svd_driver(m: usize, n: usize, driver: SvdDriver) {
     let values = download(&gpu, &gpu_values);
     assert_tensor_close(&values, &s, 1e-10);
 
+    let gpu_read_values = with_cuda_linalg_session(&mut gpu, |session| {
+        session.svd_values_with_driver_read(TensorRead::from_tensor(&gpu_input), driver)
+    })
+    .unwrap();
+    let read_values = download(&gpu, &gpu_read_values);
+    assert_tensor_close(&read_values, &s, 1e-10);
+
     let mut cpu = cpu_backend();
     let expected_values =
         with_cpu_linalg_session(&mut cpu, |session| session.svd_values(&input)).unwrap();
