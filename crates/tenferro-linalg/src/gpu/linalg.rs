@@ -159,13 +159,13 @@ impl LinalgScalar for Complex64 {
 const JAX_COMPATIBLE_GESVDJ_MAX_DIM: usize = 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum CusolverSvdRoutine {
+enum CusolverSvdRoutine {
     Gesvdj,
     Gesvd,
 }
 
 /// `Auto` follows the JAX-compatible size policy; an explicit driver wins.
-pub(super) fn select_svd_driver(driver: SvdDriver, m: usize, n: usize) -> CusolverSvdRoutine {
+fn select_svd_driver(driver: SvdDriver, m: usize, n: usize) -> CusolverSvdRoutine {
     match driver {
         SvdDriver::Gesvdj => CusolverSvdRoutine::Gesvdj,
         SvdDriver::Gesvd => CusolverSvdRoutine::Gesvd,
