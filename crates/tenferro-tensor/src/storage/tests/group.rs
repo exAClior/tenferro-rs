@@ -531,6 +531,33 @@ fn host_group_constructor_retains_typed_layout_and_prepared_access() {
 }
 
 #[test]
+fn set_placement_survives_the_allocation_group_round_trip() {
+    let mut tensor =
+        crate::TypedTensor::<f64>::from_vec_col_major(vec![2, 2], vec![1.0; 4]).unwrap();
+    let placement = crate::Placement {
+        memory_kind: crate::MemoryKind::PinnedHost,
+        device: None,
+        cpu_affinity: Some(crate::CpuDomainId::new(3)),
+    };
+    tensor.set_placement(placement.clone());
+    let tensor = crate::Tensor::from_typed(tensor);
+
+    let (mut group, slots) = AllocationGroup::from_tensors(vec![tensor]).unwrap();
+    assert_eq!(
+        group.read_view(slots[0]).unwrap().placement(),
+        &placement,
+        "read_view must report the placement the tensor entered the group with"
+    );
+    let extracted = group.take_tensor(slots[0]).unwrap();
+    assert_eq!(
+        extracted.placement(),
+        &placement,
+        "take_tensor must restore the placement set before the round trip"
+    );
+    assert_eq!(extracted.as_slice::<f64>().unwrap(), &[1.0; 4]);
+}
+
+#[test]
 fn provider_view_host_mapping_uses_derived_layout_and_releases_guard() {
     let (allocation, reads, _) = ByteAllocation::build(901, 16);
     let mut tensor = crate::TypedTensor::<i32>::from_backend_allocation(

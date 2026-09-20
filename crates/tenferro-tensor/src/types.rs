@@ -4015,7 +4015,16 @@ impl Tensor {
 
     pub(crate) fn into_group_parts(self) -> (AllocationGroup, DescriptorSlot) {
         match self.payload {
-            TensorPayload::Native(core) => core.group.into_parts(),
+            TensorPayload::Native(core) => {
+                let TensorCore {
+                    group, placement, ..
+                } = core;
+                let (mut group, slot) = group.into_parts();
+                // The group round trip rebuilds a tensor from the descriptor, so the
+                // core copy has to reach the descriptor before it is dropped.
+                group.publish_live_descriptor_placement(slot, placement);
+                (group, slot)
+            }
             // INVARIANT: a caller-owned payload has no allocation group.
             TensorPayload::External(..) => {
                 unreachable!("an externally defined payload has no allocation group")

@@ -713,6 +713,27 @@ impl AllocationGroup {
         Ok(())
     }
 
+    /// Publish the placement of a descriptor whose owning tensor still holds it.
+    ///
+    /// The group round trip rebuilds a tensor from this descriptor, so a
+    /// placement that only the tensor core carries has to be published before
+    /// the core copy is dropped.
+    // INVARIANT: an owned tensor keeps the group that carries its descriptor, so a
+    // live descriptor slot always resolves here; callers that may hold a stale slot
+    // use `set_descriptor_placement` and handle the error.
+    pub(crate) fn publish_live_descriptor_placement(
+        &mut self,
+        slot: DescriptorSlot,
+        placement: Placement,
+    ) {
+        let descriptor = self
+            .descriptors
+            .get_mut(slot.index())
+            .and_then(Option::as_mut)
+            .unwrap_or_else(|| unreachable!("an owned group always carries its descriptor"));
+        descriptor.placement = placement;
+    }
+
     pub(crate) fn from_host_vec<T: TensorScalar, R: TensorRank>(
         shape: R::Shape,
         data: Vec<T>,
