@@ -566,11 +566,9 @@ CUDA SVD follows JAX-compatible default driver selection when the caller
 leaves `SvdOptions::driver` at `SvdDriver::Auto`: use cuSOLVER Jacobi `gesvdj`
 when both matrix dimensions are at most 1024, otherwise use QR-based `gesvd`.
 `SvdDriver::Gesvdj` and `SvdDriver::Gesvd` force the routine regardless of
-size, because the better driver depends on the spectrum rather than the
-dimensions alone (issue #1839 measured `gesvdj` several times slower than
-`gesvd` on 400-1024 square matrices with tensor-network singular-value decay).
-The driver is part of the traced op identity and survives pruning to the
-values-only op; CPU providers ignore it. `gesvdj` returns V, so the backend
+size, because the faster driver depends on the spectrum, not the dimensions
+alone. The driver is part of the traced op identity and survives pruning to
+the values-only op; CPU providers ignore it. `gesvdj` returns V, so the backend
 materializes the public `vt` output by copying V to V^H on the device. The
 singular-values-only path still passes scratch U/V buffers to `gesvdj` because
 cuSOLVER rejects null U/V pointers on that path.

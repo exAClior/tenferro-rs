@@ -96,19 +96,11 @@ pub enum QrGauge {
     PositiveDiagonal,
 }
 
-/// CUDA SVD driver selection used by [`SvdOptions`].
+/// cuSOLVER SVD routine selection used by [`SvdOptions`] on the CUDA backend.
 ///
-/// The driver picks which cuSOLVER routine factors the matrix on the CUDA
-/// backend. It changes speed and rounding, not the decomposition itself:
-/// every driver returns `U`, `S`, and `Vt` satisfying the same contract, so
-/// AD rules and gauge handling are unaffected. CPU providers (Faer, LAPACK)
-/// have a single SVD kernel and ignore this setting.
-///
-/// The right driver is workload dependent. The Jacobi routine is fast for
-/// small well-conditioned matrices, while the QR-based routine is several
-/// times faster on matrices whose singular values span many decades, as
-/// tensor-network truncations produce. This corresponds to
-/// `jax.lax.linalg.svd(..., algorithm=...)` and
+/// The driver changes speed and rounding, not the decomposition contract, so
+/// gauges and AD rules are unaffected. CPU providers have a single SVD kernel
+/// and ignore it. Equivalent to `jax.lax.linalg.svd(..., algorithm=...)` and
 /// `torch.linalg.svd(..., driver=...)`.
 ///
 /// # Examples
@@ -362,8 +354,7 @@ pub(crate) enum LinalgOp {
     /// `Vh` rows span the input's right nullspace. Value-only: AD is
     /// intentionally unsupported (see the linalg AD support manifest).
     SvdFull,
-    /// Singular values only. Carries the driver so that pruning an `Svd`
-    /// whose `U`/`Vt` are dead keeps the caller's kernel choice.
+    /// Singular values only.
     SvdVals {
         derivative_eps: f64,
         driver: SvdDriver,

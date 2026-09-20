@@ -731,14 +731,8 @@ fn patterned_f64_matrix(m: usize, n: usize) -> Tensor {
     tensor_f64(vec![m, n], data)
 }
 
-/// Run the thin SVD with an explicit driver through both the owned and the
-/// borrowed `svd_with_options*` entry points plus `svd_values_with_driver`,
-/// and check that the factors reconstruct the input and agree with the CPU
-/// singular values. The driver is forced on the side of the 1024 threshold
-/// where `SvdDriver::Auto` would pick the other routine, so a regression that
-/// drops the override would still pass numerically only if the two cuSOLVER
-/// routines were indistinguishable here; the source contract test guards the
-/// dispatch itself.
+/// Forced-driver SVD through the owned, borrowed, and values-only entry
+/// points: factors reconstruct the input and match CPU singular values.
 fn check_forced_svd_driver(m: usize, n: usize, driver: SvdDriver) {
     let input = patterned_f64_matrix(m, n);
     let k = m.min(n);

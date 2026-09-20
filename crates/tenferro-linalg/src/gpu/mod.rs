@@ -9,9 +9,8 @@ use crate::backend::{unsupported_dtype, LinalgBackend};
 use crate::extension::{apply_svd_gauge, validate_derivative_eps, SvdDriver, SvdOptions};
 use crate::{QrOptions, RankRevealingQrOptions};
 
-/// Canonicalize a borrowed matrix on the device and run the thin SVD with an
-/// explicit driver. cuSOLVER needs compact column-major device storage, so a
-/// view is made contiguous on the device and never crosses the host boundary.
+/// cuSOLVER needs compact column-major device storage, so a borrowed view is
+/// made contiguous on the device and never crosses the host boundary.
 fn svd_read_with_driver(
     session: &mut CudaExecSession<'_>,
     input: TensorRead<'_>,
@@ -45,8 +44,6 @@ fn svd_read_with_driver(
     }
 }
 
-/// Borrowed-input singular values with an explicit driver; see
-/// [`svd_read_with_driver`] for the canonicalization contract.
 fn svd_values_read_with_driver(
     session: &mut CudaExecSession<'_>,
     input: TensorRead<'_>,

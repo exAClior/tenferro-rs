@@ -175,11 +175,9 @@ let a = TracedTensor::from_vec_col_major(
         -2.0, 0.25, 1.5,
     ],
 )?;
-// Forces cuSOLVER `gesvd` on the CUDA backend; CPU providers run their only
-// SVD kernel and return the same factors as `SvdDriver::Auto`.
+// Forces cuSOLVER `gesvd` on CUDA; CPU providers ignore the driver.
 let (u, s, vt) = a.svd_with_options(SvdOptions::default().driver(SvdDriver::Gesvd))?;
 
-assert_eq!(SvdOptions::default().driver, SvdDriver::Auto);
 assert_eq!(u.concrete_shape()?, vec![3, 2]);
 assert_eq!(s.concrete_shape()?, vec![2]);
 assert_eq!(vt.concrete_shape()?, vec![2, 2]);
