@@ -28,36 +28,27 @@
 
 ## Verification conclusions and constraints
 
-- Host-only: `cargo test -p tenferro-linalg` (default `cpu-faer`), doctests,
-  `cargo test -p tenferro-linalg --features cuda --lib gpu::linalg::tests`
-  (the `select_svd_driver` policy tests compile and run without a GPU),
-  `cargo check --workspace --tests --benches --examples`, the GPU source
-  contract test, doc snippets, fmt, and clippy.
-- The new `#[ignore]` CUDA integration tests in
-  `tests/integration/gpu_linalg.rs` force `gesvd` at 64x64 / 8x64 and `gesvdj`
-  at 1025x8 / 8x1025, check reconstruction and CPU agreement through the
-  owned, borrowed, and values-only entry points, and check `Auto` matches
-  `svd`.
-- GPU run (2026-09-20, NVIDIA A100-SXM4-80GB, driver 580.173.02, CUDA 12.8
-  toolkit, cuTENSOR 2.6.0, rustc 1.96.0, commit `10083553`):
-  `cargo test -p tenferro-linalg --features cuda --test integration --
-  --ignored --test-threads=1 test_cubecl_svd` → 8 passed, 0 failed (the three
-  new tests plus the five existing `gesvd`/SVD CUDA tests);
-  `cargo test -p tenferro-linalg --features cuda --lib gpu::linalg::tests` →
-  2 passed.
-- Same host, a standalone reproducer calling
-  `svd_with_options_read(SvdOptions::default().driver(d), session)` on an
-  `m x m` ComplexF64 matrix with singular values spanning ten decades
-  (1 warmup, 5 timed repetitions, spread < 1 %), medians in ms:
-
-  | m | Auto | Gesvdj | Gesvd | max abs Δs / s₁ (Gesvdj / Gesvd) |
-  |---:|---:|---:|---:|---|
-  | 400 | 205.1 | 205.3 | 53.5 | 3.1e-13 / 4.6e-15 |
-  | 800 | 600.3 | 600.2 | 126.7 | 6.1e-13 / 1.0e-14 |
-  | 1024 | 866.4 | 866.5 | 203.4 | 8.4e-13 / 9.8e-15 |
-  | 1200 | 269.4 | 1260.4 | 269.5 | 9.4e-13 / 1.3e-14 |
-
-  `Auto` matches `Gesvdj` at m ≤ 1024 and `Gesvd` at 1200, so the default is
-  unchanged; both overrides take effect on either side of the threshold. On
-  Gaussian inputs `Gesvd` was 1.8x faster at every size. These reproduce the
-  issue's patched-constant numbers through the public API.
+- The `select_svd_driver` policy is unit-tested without a GPU: an explicit
+  driver wins at every size, and `Auto` reproduces the 1024 threshold on both
+  sides. The GPU source-contract test pins that `svd_read`,
+  `svd_with_options_read`, and the values-only hooks all reach the same
+  cuSOLVER dispatch with the caller's driver.
+- The `#[ignore]` CUDA integration tests in `tests/integration/gpu_linalg.rs`
+  force `gesvd` at 64x64 / 8x64 and `gesvdj` at 1025x8 / 8x1025, check
+  reconstruction and CPU agreement through the owned, borrowed, and
+  values-only entry points, and check `Auto` matches `svd`. They passed on an
+  NVIDIA A100-SXM4-80GB (driver 580.173.02, CUDA 12.8, cuTENSOR 2.6.0,
+  rustc 1.96.0) together with the pre-existing CUDA SVD tests; hosted CI does
+  not run them on every PR.
+- The issue's acceptance criterion holds through the public API on that host:
+  for an 800x800 ComplexF64 matrix whose singular values span ten decades,
+  `SvdDriver::Gesvd` takes about 127 ms against about 600 ms for `Auto` and
+  `Gesvdj`, with singular-value error near 1e-14 (Jacobi: near 1e-12).
+  `Auto` timings coincide with `Gesvdj` up to 1024 and with `Gesvd` at 1200,
+  so the default is unchanged. Complete timings and the reproducer are in
+  [issue #1839](https://github.com/tensor4all/tenferro-rs/issues/1839); the
+  gain is spectrum dependent (about 1.8x on Gaussian inputs), so no default
+  change is proposed.
+- Constraints: `tenferro-linalg` compiles GPU linear algebra only under the
+  `cuda` feature, so the driver has no other device backend to reach;
+  `Xgesvdp` was not implemented.
