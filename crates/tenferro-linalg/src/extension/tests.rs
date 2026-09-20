@@ -8,7 +8,8 @@ use tenferro_tensor::{DType, Error, Tensor, TypedTensor};
 
 use super::{
     apply_eigh_gauge, apply_qr_gauge, apply_svd_gauge, canonical_svd_gauge_layout, promote_dtypes,
-    EighGauge, LinalgExtensionOp, LinalgOp, QrGauge, SvdGauge, LINALG_EXTENSION_FAMILY_ID,
+    EighGauge, LinalgExtensionOp, LinalgOp, QrGauge, SvdDriver, SvdGauge,
+    LINALG_EXTENSION_FAMILY_ID,
 };
 
 #[test]
@@ -48,9 +49,11 @@ fn session_support_admits_every_cpu_linear_algebra_op() {
         LinalgOp::Svd {
             derivative_eps: 0.0,
             gauge: SvdGauge::Raw,
+            driver: SvdDriver::Auto,
         },
         LinalgOp::SvdVals {
             derivative_eps: 0.0,
+            driver: SvdDriver::Auto,
         },
         LinalgOp::Qr {
             gauge: QrGauge::Raw,
@@ -136,6 +139,7 @@ fn extension_reads_preserve_strided_inputs() {
                     super::execute_linalg_extension_reads_in_session(
                         &LinalgExtensionOp::new(LinalgOp::SvdVals {
                             derivative_eps: 0.0,
+                            driver: SvdDriver::Auto,
                         }),
                         &[read],
                         session,
@@ -164,9 +168,9 @@ fn read_capable_extension_ops_dispatch_before_owned_fallback() {
         .next()
         .unwrap();
     for hook in [
-        "svd_read",
+        "svd_with_options_read",
         "svd_full_read",
-        "svd_values_read",
+        "svd_values_with_driver_read",
         "qr_with_options_read",
         "rank_revealing_qr_read",
         "eigh_read",
@@ -282,10 +286,65 @@ fn extension_dtype_promotion_delegates_to_canonical_tensor_rules() {
 }
 
 #[test]
+fn svd_driver_is_part_of_op_identity_and_survives_pruning() {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::Hasher;
+
+    fn payload_hash(op: &LinalgExtensionOp) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        op.payload_hash(&mut hasher);
+        hasher.finish()
+    }
+
+    let make = |driver: SvdDriver| {
+        LinalgExtensionOp::new(LinalgOp::Svd {
+            derivative_eps: 1.0e-12,
+            gauge: SvdGauge::Raw,
+            driver,
+        })
+    };
+    let auto = make(SvdDriver::Auto);
+    let gesvd = make(SvdDriver::Gesvd);
+    let gesvdj = make(SvdDriver::Gesvdj);
+
+    // Drivers are part of the traced op identity: a forced-driver SVD must not
+    // be deduplicated against the default policy op.
+    assert!(!auto.payload_eq(&gesvd));
+    assert!(!gesvd.payload_eq(&gesvdj));
+    assert!(gesvd.payload_eq(&make(SvdDriver::Gesvd)));
+    assert_ne!(payload_hash(&auto), payload_hash(&gesvd));
+    assert_ne!(payload_hash(&gesvd), payload_hash(&gesvdj));
+    assert_eq!(payload_hash(&gesvd), payload_hash(&make(SvdDriver::Gesvd)));
+
+    // Pruning `U`/`Vt` keeps the caller's kernel choice on the values-only op.
+    let pruned = gesvd
+        .prune_outputs(&[false, true, false])
+        .expect("S-only SVD should prune to SvdVals");
+    let pruned = pruned
+        .as_any()
+        .downcast_ref::<LinalgExtensionOp>()
+        .expect("pruned SVD op should stay in linalg family");
+    assert_eq!(
+        pruned.op(),
+        LinalgOp::SvdVals {
+            derivative_eps: 1.0e-12,
+            driver: SvdDriver::Gesvd,
+        }
+    );
+    let pruned_auto = LinalgExtensionOp::new(LinalgOp::SvdVals {
+        derivative_eps: 1.0e-12,
+        driver: SvdDriver::Auto,
+    });
+    assert!(!pruned.payload_eq(&pruned_auto));
+    assert_ne!(payload_hash(pruned), payload_hash(&pruned_auto));
+}
+
+#[test]
 fn decomposition_value_outputs_prune_to_values_only_ops() {
     let svd = LinalgExtensionOp::new(LinalgOp::Svd {
         derivative_eps: 1.0e-12,
         gauge: SvdGauge::CanonicalPivot,
+        driver: SvdDriver::Auto,
     });
     let pruned_svd = svd
         .prune_outputs(&[false, true, false])
@@ -297,7 +356,8 @@ fn decomposition_value_outputs_prune_to_values_only_ops() {
     assert_eq!(
         pruned_svd.op(),
         LinalgOp::SvdVals {
-            derivative_eps: 1.0e-12
+            derivative_eps: 1.0e-12,
+            driver: SvdDriver::Auto,
         }
     );
 

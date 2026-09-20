@@ -263,6 +263,39 @@ assert_eq!(vt_rank2.concrete_shape()?, vec![2, 3]);
 ```
 <!-- end-snippet-source -->
 
+`SvdOptions::driver` selects the cuSOLVER routine on the CUDA backend.
+`SvdDriver::Auto` (the default) keeps the JAX-compatible policy: Jacobi
+`gesvdj` when both matrix dimensions are at most 1024, otherwise QR-based
+`gesvd`. `SvdDriver::Gesvd` or `SvdDriver::Gesvdj` forces one routine
+regardless of size; `gesvd` is typically several times faster on matrices
+whose singular values span many decades, as tensor-network truncations
+produce, while `gesvdj` favors small well-conditioned matrices. The driver
+changes speed and rounding, not the decomposition contract, so gauges and AD
+rules are unaffected. CPU providers have a single SVD kernel and ignore it.
+
+<!-- snippet-source: docs/tutorial-code/src/bin/math_snippets.rs#linear_algebra_svd_driver -->
+```rust
+use tenferro_linalg::{SvdDriver, SvdOptions, TracedTensorLinalgExt};
+use tenferro_runtime::TracedTensor;
+
+let a = TracedTensor::from_vec_col_major(
+    vec![3, 2],
+    vec![
+        3.0_f64, 1.0, 0.5,
+        -2.0, 0.25, 1.5,
+    ],
+)?;
+// Forces cuSOLVER `gesvd` on the CUDA backend; CPU providers run their only
+// SVD kernel and return the same factors as `SvdDriver::Auto`.
+let (u, s, vt) = a.svd_with_options(SvdOptions::default().driver(SvdDriver::Gesvd))?;
+
+assert_eq!(SvdOptions::default().driver, SvdDriver::Auto);
+assert_eq!(u.concrete_shape()?, vec![3, 2]);
+assert_eq!(s.concrete_shape()?, vec![2]);
+assert_eq!(vt.concrete_shape()?, vec![2, 2]);
+```
+<!-- end-snippet-source -->
+
 Use `slice_axis` for rank-preserving contiguous ranges and `take_axis` when the
 selected axis needs repeated or reordered indices:
 

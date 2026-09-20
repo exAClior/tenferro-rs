@@ -13,7 +13,7 @@ pub struct CompactQrResult {
 pub(crate) use crate::error::unsupported_dtype;
 use crate::extension::{
     apply_eigh_gauge, apply_qr_gauge, apply_svd_gauge, validate_derivative_eps, EighOptions,
-    QrOptions, SvdOptions,
+    QrOptions, SvdDriver, SvdOptions,
 };
 use crate::RankRevealingQrOptions;
 
@@ -185,7 +185,9 @@ pub trait LinalgBackend: BackendSession {
     ///
     /// `derivative_eps` is validated for API consistency, but concrete backend
     /// execution does not perform AD. `gauge` controls optional singular-vector
-    /// post-processing.
+    /// post-processing. `driver` selects the cuSOLVER routine on the CUDA
+    /// backend; the default implementation ignores it because CPU providers
+    /// have a single SVD kernel.
     ///
     /// # Examples
     ///
@@ -312,6 +314,17 @@ pub trait LinalgBackend: BackendSession {
         ))
     }
 
+    /// Singular values only with an explicit CUDA driver. The default
+    /// implementation ignores the driver, matching [`LinalgBackend::svd_with_options`].
+    #[doc(hidden)]
+    fn svd_values_with_driver(
+        &mut self,
+        input: &Tensor,
+        _driver: SvdDriver,
+    ) -> tenferro_tensor::Result<Tensor> {
+        self.svd_values(input)
+    }
+
     /// Compute a singular value decomposition from a tensor read target.
     ///
     /// Backends may canonicalize the input inside the same placement family, but
@@ -352,12 +365,75 @@ pub trait LinalgBackend: BackendSession {
         ))
     }
 
+    /// Compute public SVD outputs `(U, S, Vt)` from a tensor read target with
+    /// explicit options.
+    ///
+    /// This is the borrowed-input counterpart of
+    /// [`LinalgBackend::svd_with_options`]. The default implementation runs
+    /// [`LinalgBackend::svd_read`] and applies the gauge on the host; it
+    /// ignores `driver` because CPU providers have a single SVD kernel. The
+    /// CUDA backend overrides it so the driver reaches cuSOLVER.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use tenferro_cpu::{with_cpu_exec_session, CpuBackend};
+    /// use tenferro_linalg::{LinalgBackend, SvdDriver, SvdOptions};
+    /// use tenferro_tensor::{BackendSessionHost, TensorRead, TensorView, TypedTensor};
+    ///
+    /// let input = TypedTensor::<f64>::from_vec_col_major(
+    ///     vec![2, 2],
+    ///     vec![1.0, 0.0, 0.0, 2.0],
+    /// )?;
+    /// let mut host = CpuBackend::new();
+    /// let outputs = host.with_backend_session(|session| {
+    ///     with_cpu_exec_session(session, |backend| {
+    ///         backend.svd_with_options_read(
+    ///             TensorRead::from_view(TensorView::F64(input.as_view())),
+    ///             SvdOptions::default().driver(SvdDriver::Gesvd),
+    ///         )
+    ///     })
+    ///     .expect("CpuBackend must expose a CpuExecSession")
+    /// })?;
+    /// assert_eq!(outputs[1].shape(), &[2]);
+    /// # Ok::<(), tenferro_tensor::Error>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`tenferro_tensor::Error::Validation`] containing
+    /// [`tenferro_tensor::ValidationError::InvalidArgument`] when
+    /// `derivative_eps` is non-finite or non-positive, plus the validation,
+    /// unsupported-dtype, numerical, placement, or typed backend/provider
+    /// errors from [`LinalgBackend::svd_read`] and the gauge metadata and
+    /// host-access errors from the default host gauge path.
+    fn svd_with_options_read(
+        &mut self,
+        input: TensorRead<'_>,
+        options: SvdOptions,
+    ) -> tenferro_tensor::Result<Vec<Tensor>> {
+        validate_derivative_eps("svd_with_options_read", options.derivative_eps)?;
+        let mut outputs = self.svd_read(input)?;
+        apply_svd_gauge(options.gauge, &mut outputs)?;
+        Ok(outputs)
+    }
+
     #[doc(hidden)]
     fn svd_values_read(&mut self, _input: TensorRead<'_>) -> tenferro_tensor::Result<Tensor> {
         Err(tenferro_tensor::Error::unsupported(
             "svd_values",
             "backend does not implement borrowed singular-values-only decomposition",
         ))
+    }
+
+    /// Borrowed-input counterpart of [`LinalgBackend::svd_values_with_driver`].
+    #[doc(hidden)]
+    fn svd_values_with_driver_read(
+        &mut self,
+        input: TensorRead<'_>,
+        _driver: SvdDriver,
+    ) -> tenferro_tensor::Result<Tensor> {
+        self.svd_values_read(input)
     }
 
     /// Compute public QR outputs `(Q, R)`.

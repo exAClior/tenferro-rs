@@ -22,7 +22,7 @@ use tenferro_ops::ad::PrimitiveRuleBuilder;
 
 use computegraph::types::{LocalValueId, OperationRole, ValueKey, ValueRef};
 
-use crate::extension::{EighGauge, LinalgExtensionOp, LinalgOp, QrGauge, SvdGauge};
+use crate::extension::{EighGauge, LinalgExtensionOp, LinalgOp, QrGauge, SvdDriver, SvdGauge};
 use tenferro_ops::ad::context::{resolve_and_guard, ShapeGuardContext};
 pub(crate) use tenferro_ops::ad::support::{
     conjugate_linear_if_dtype_complex, conjugate_primal_if_dtype_complex,
@@ -900,6 +900,7 @@ pub(crate) fn linearize_svd_values(
     primal_in: &[ValueKey<StdTensorOp>],
     tangent_in: &[Option<LocalValueId>],
     eps: f64,
+    driver: SvdDriver,
     ctx: &mut ShapeGuardContext,
 ) -> ADRuleResult<Vec<Option<LocalValueId>>> {
     let Some(da) = tangent_in[0] else {
@@ -916,6 +917,7 @@ pub(crate) fn linearize_svd_values(
         linalg_std_op(LinalgOp::Svd {
             derivative_eps: eps,
             gauge: SvdGauge::Raw,
+            driver,
         }),
         vec![ValueRef::External(primal_in[0].clone())],
         OperationRole::Primary,

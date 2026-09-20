@@ -96,18 +96,57 @@ pub enum QrGauge {
     PositiveDiagonal,
 }
 
+/// CUDA SVD driver selection used by [`SvdOptions`].
+///
+/// The driver picks which cuSOLVER routine factors the matrix on the CUDA
+/// backend. It changes speed and rounding, not the decomposition itself:
+/// every driver returns `U`, `S`, and `Vt` satisfying the same contract, so
+/// AD rules and gauge handling are unaffected. CPU providers (Faer, LAPACK)
+/// have a single SVD kernel and ignore this setting.
+///
+/// The right driver is workload dependent. The Jacobi routine is fast for
+/// small well-conditioned matrices, while the QR-based routine is several
+/// times faster on matrices whose singular values span many decades, as
+/// tensor-network truncations produce. This corresponds to
+/// `jax.lax.linalg.svd(..., algorithm=...)` and
+/// `torch.linalg.svd(..., driver=...)`.
+///
+/// # Examples
+///
+/// ```rust
+/// use tenferro_linalg::{SvdDriver, SvdOptions};
+///
+/// let options = SvdOptions::default().driver(SvdDriver::Gesvd);
+/// assert_eq!(options.driver, SvdDriver::Gesvd);
+/// assert_eq!(SvdOptions::default().driver, SvdDriver::Auto);
+/// ```
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SvdDriver {
+    /// The backend's default policy. On CUDA this is the JAX-compatible rule:
+    /// `gesvdj` when both matrix dimensions are at most 1024, otherwise
+    /// `gesvd`.
+    #[default]
+    Auto,
+    /// cuSOLVER's Jacobi driver (`cusolverDn<t>gesvdj`) regardless of size.
+    Gesvdj,
+    /// cuSOLVER's QR-based driver (`cusolverDn<t>gesvd`) regardless of size.
+    Gesvd,
+}
+
 /// Options for singular value decomposition.
 ///
 /// # Examples
 ///
 /// ```rust
-/// use tenferro_linalg::{SvdGauge, SvdOptions};
+/// use tenferro_linalg::{SvdDriver, SvdGauge, SvdOptions};
 ///
 /// let options = SvdOptions::default()
 ///     .gauge(SvdGauge::CanonicalPivot)
-///     .derivative_eps(1.0e-10);
+///     .derivative_eps(1.0e-10)
+///     .driver(SvdDriver::Gesvd);
 /// assert_eq!(options.gauge, SvdGauge::CanonicalPivot);
 /// assert_eq!(options.derivative_eps, 1.0e-10);
+/// assert_eq!(options.driver, SvdDriver::Gesvd);
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SvdOptions {
@@ -115,6 +154,8 @@ pub struct SvdOptions {
     pub gauge: SvdGauge,
     /// AD derivative regularization for repeated or nearly repeated singular values.
     pub derivative_eps: f64,
+    /// CUDA SVD driver; ignored by CPU providers.
+    pub driver: SvdDriver,
 }
 
 impl Default for SvdOptions {
@@ -122,6 +163,7 @@ impl Default for SvdOptions {
         Self {
             gauge: SvdGauge::Raw,
             derivative_eps: DEFAULT_DECOMPOSITION_DERIVATIVE_EPS,
+            driver: SvdDriver::Auto,
         }
     }
 }
@@ -154,6 +196,21 @@ impl SvdOptions {
     /// ```
     pub fn derivative_eps(mut self, derivative_eps: f64) -> Self {
         self.derivative_eps = derivative_eps;
+        self
+    }
+
+    /// Return options with an explicit CUDA SVD driver.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use tenferro_linalg::{SvdDriver, SvdOptions};
+    ///
+    /// let options = SvdOptions::default().driver(SvdDriver::Gesvdj);
+    /// assert_eq!(options.driver, SvdDriver::Gesvdj);
+    /// ```
+    pub fn driver(mut self, driver: SvdDriver) -> Self {
+        self.driver = driver;
         self
     }
 }
@@ -299,13 +356,17 @@ pub(crate) enum LinalgOp {
     Svd {
         derivative_eps: f64,
         gauge: SvdGauge,
+        driver: SvdDriver,
     },
     /// Full-matrices SVD: `U` is `m x m` and `Vh` is `n x n`, so the trailing
     /// `Vh` rows span the input's right nullspace. Value-only: AD is
     /// intentionally unsupported (see the linalg AD support manifest).
     SvdFull,
+    /// Singular values only. Carries the driver so that pruning an `Svd`
+    /// whose `U`/`Vt` are dead keeps the caller's kernel choice.
     SvdVals {
         derivative_eps: f64,
+        driver: SvdDriver,
     },
     Qr {
         gauge: QrGauge,
@@ -466,11 +527,20 @@ impl ExtensionOp for LinalgExtensionOp {
             LinalgOp::Svd {
                 derivative_eps,
                 gauge,
+                driver,
             } => {
                 hasher.write_u64(derivative_eps.to_bits());
                 hash_svd_gauge(hasher, gauge);
+                hash_svd_driver(hasher, driver);
             }
-            LinalgOp::SvdVals { derivative_eps } | LinalgOp::EighVals { derivative_eps } => {
+            LinalgOp::SvdVals {
+                derivative_eps,
+                driver,
+            } => {
+                hasher.write_u64(derivative_eps.to_bits());
+                hash_svd_driver(hasher, driver);
+            }
+            LinalgOp::EighVals { derivative_eps } => {
                 hasher.write_u64(derivative_eps.to_bits());
             }
             LinalgOp::Qr { gauge }
@@ -568,8 +638,15 @@ impl ExtensionOp for LinalgExtensionOp {
 
     fn prune_outputs(&self, live_outputs: &[bool]) -> Option<Arc<dyn ExtensionOp>> {
         match self.op {
-            LinalgOp::Svd { derivative_eps, .. } if live_outputs == [false, true, false] => {
-                Some(Arc::new(Self::new(LinalgOp::SvdVals { derivative_eps })))
+            LinalgOp::Svd {
+                derivative_eps,
+                driver,
+                ..
+            } if live_outputs == [false, true, false] => {
+                Some(Arc::new(Self::new(LinalgOp::SvdVals {
+                    derivative_eps,
+                    driver,
+                })))
             }
             LinalgOp::Eigh { derivative_eps, .. } if live_outputs == [true, false] => {
                 Some(Arc::new(Self::new(LinalgOp::EighVals { derivative_eps })))
@@ -771,14 +848,23 @@ fn execute_linalg_extension_reads_in_session<S: LinalgBackend>(
         LinalgOp::Svd {
             derivative_eps,
             gauge,
+            driver,
         } => {
-            validate_derivative_eps("svd_with_options", derivative_eps)?;
-            let mut outputs = session.svd_read(inputs[0].clone())?;
-            apply_svd_gauge(gauge, &mut outputs)?;
-            return Ok(outputs);
+            return session.svd_with_options_read(
+                inputs[0].clone(),
+                SvdOptions {
+                    derivative_eps,
+                    gauge,
+                    driver,
+                },
+            );
         }
         LinalgOp::SvdFull => return session.svd_full_read(inputs[0].clone()),
-        LinalgOp::SvdVals { .. } => return Ok(vec![session.svd_values_read(inputs[0].clone())?]),
+        LinalgOp::SvdVals { driver, .. } => {
+            return Ok(vec![
+                session.svd_values_with_driver_read(inputs[0].clone(), driver)?
+            ]);
+        }
         LinalgOp::Qr { gauge } => {
             return session.qr_with_options_read(inputs[0].clone(), QrOptions { gauge });
         }
@@ -942,15 +1028,19 @@ fn execute_linalg<B: LinalgBackend>(
         LinalgOp::Svd {
             derivative_eps,
             gauge,
+            driver,
         } => backend.svd_with_options(
             inputs[0],
             SvdOptions {
                 derivative_eps,
                 gauge,
+                driver,
             },
         ),
         LinalgOp::SvdFull => backend.svd_full(inputs[0]),
-        LinalgOp::SvdVals { .. } => Ok(vec![backend.svd_values(inputs[0])?]),
+        LinalgOp::SvdVals { driver, .. } => {
+            Ok(vec![backend.svd_values_with_driver(inputs[0], driver)?])
+        }
         LinalgOp::Qr { gauge } => backend.qr_with_options(inputs[0], QrOptions { gauge }),
         LinalgOp::RankRevealingQr { gauge, rtol, atol } => {
             backend.rank_revealing_qr(inputs[0], RankRevealingQrOptions { gauge, rtol, atol })
@@ -1898,6 +1988,15 @@ fn hash_svd_gauge(hasher: &mut dyn Hasher, gauge: SvdGauge) {
     let tag = match gauge {
         SvdGauge::Raw => 0,
         SvdGauge::CanonicalPivot => 1,
+    };
+    hasher.write_u8(tag);
+}
+
+fn hash_svd_driver(hasher: &mut dyn Hasher, driver: SvdDriver) {
+    let tag = match driver {
+        SvdDriver::Auto => 0,
+        SvdDriver::Gesvdj => 1,
+        SvdDriver::Gesvd => 2,
     };
     hasher.write_u8(tag);
 }

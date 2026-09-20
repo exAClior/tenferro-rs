@@ -18,7 +18,7 @@ use tenferro_tensor::{
 };
 
 use crate::extension::{
-    apply_eigh_gauge, apply_svd_gauge, validate_derivative_eps, EighOptions, QrOptions, SvdOptions,
+    apply_eigh_gauge, validate_derivative_eps, EighOptions, QrOptions, SvdOptions,
 };
 use crate::{LinalgBackend, RankRevealingQrOptions, RankRevealingQrResult};
 
@@ -1912,10 +1912,10 @@ impl TensorReadLinalgExt for TensorRead<'_> {
         session: &mut dyn BackendSession,
     ) -> tenferro_tensor::Result<(Tensor, Tensor, Tensor)> {
         with_linalg_backend(session, "svd_with_options_read", |backend| {
-            validate_derivative_eps("svd_with_options_read", options.derivative_eps)?;
-            let mut out = backend.svd_read(self)?;
-            apply_svd_gauge(options.gauge, &mut out)?;
-            three(out, "svd_with_options_read")
+            three(
+                backend.svd_with_options_read(self, options)?,
+                "svd_with_options_read",
+            )
         })
     }
     fn svd_full_read(

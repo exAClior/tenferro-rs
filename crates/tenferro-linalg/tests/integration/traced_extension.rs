@@ -1,8 +1,8 @@
 use num_complex::{Complex32, Complex64};
 use tenferro_cpu::CpuBackend;
 use tenferro_linalg::{
-    EighGauge, EighOptions, LinalgBackend, QrGauge, QrOptions, RankRevealingQrOptions, SvdGauge,
-    SvdOptions, TracedTensorLinalgExt,
+    EighGauge, EighOptions, LinalgBackend, QrGauge, QrOptions, RankRevealingQrOptions, SvdDriver,
+    SvdGauge, SvdOptions, TracedTensorLinalgExt,
 };
 use tenferro_runtime::{DType, Error, GraphCompiler, Runtime, Tensor, TracedTensor, TypedTensor};
 use tenferro_tensor::Error as TensorError;
@@ -166,6 +166,65 @@ fn traced_decomposition_options_execute_through_registered_runtime() {
     assert_eq!(outputs[4].shape(), &[2, 2]);
     assert_eq!(outputs[5].shape(), &[2, 2]);
     assert_eq!(outputs[6].shape(), &[2, 2]);
+}
+
+#[test]
+fn cpu_ignores_explicit_svd_driver_on_concrete_and_traced_paths() {
+    // `SvdDriver` selects a cuSOLVER routine; CPU providers have one SVD
+    // kernel, so a forced driver must execute and match the default policy
+    // bit-for-bit on the same host.
+    let data = vec![3.0_f64, 1.0, 0.5, -2.0, 0.25, 1.5];
+    let a = Tensor::from_vec_col_major(vec![3, 2], data.clone()).unwrap();
+    let mut backend = CpuBackend::new();
+
+    let (default_outputs, forced_outputs, forced_values) =
+        support::with_cpu_linalg(&mut backend, |backend| {
+            let default_outputs = backend.svd_with_options(&a, SvdOptions::default()).unwrap();
+            let forced_outputs = backend
+                .svd_with_options(&a, SvdOptions::default().driver(SvdDriver::Gesvd))
+                .unwrap();
+            let forced_values = backend
+                .svd_values_with_driver(&a, SvdDriver::Gesvdj)
+                .unwrap();
+            (default_outputs, forced_outputs, forced_values)
+        });
+    for (default, forced) in default_outputs.iter().zip(&forced_outputs) {
+        assert_eq!(
+            default.as_slice::<f64>().unwrap(),
+            forced.as_slice::<f64>().unwrap()
+        );
+    }
+    assert_eq!(
+        forced_values.as_slice::<f64>().unwrap(),
+        default_outputs[1].as_slice::<f64>().unwrap()
+    );
+
+    let traced = TracedTensor::from_tensor_concrete_shape(
+        Tensor::from_vec_col_major(vec![3, 2], data).unwrap(),
+    )
+    .unwrap();
+    let (u, s, vt) = traced
+        .svd_with_options(SvdOptions::default().driver(SvdDriver::Gesvd))
+        .unwrap();
+    // Only `S` is live here, so the op prunes to a values-only op that keeps
+    // the forced driver; the CPU runtime must still execute it.
+    let (_, s_only, _) = traced
+        .svd_with_options(SvdOptions::default().driver(SvdDriver::Gesvdj))
+        .unwrap();
+
+    let mut compiler = GraphCompiler::new();
+    let program = compiler.compile_many(&[&u, &s, &vt, &s_only]).unwrap();
+    let outputs = support::run_all(&program, &[]).unwrap();
+    for (traced, default) in outputs[..3].iter().zip(&default_outputs) {
+        assert_eq!(
+            traced.as_slice::<f64>().unwrap(),
+            default.as_slice::<f64>().unwrap()
+        );
+    }
+    assert_eq!(
+        outputs[3].as_slice::<f64>().unwrap(),
+        default_outputs[1].as_slice::<f64>().unwrap()
+    );
 }
 
 #[test]
