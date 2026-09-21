@@ -203,15 +203,18 @@ impl RootResourceExtent {
 #[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct RootBoundSpan {
-    root_identity: RootResourceIdentity,
+    // The span keeps only the non-reused root-resource id. The root extent stays
+    // owned by the root pin, and this span's own offset/length bound the bytes,
+    // so repeating the 48 B identity in every span was pure duplication (#1823 G).
+    root_resource: RootResourceId,
     byte_offset: usize,
     byte_len: usize,
     guaranteed_alignment: NonZeroUsize,
 }
 
 impl RootBoundSpan {
-    pub(crate) const fn root_identity(self) -> RootResourceIdentity {
-        self.root_identity
+    pub(crate) const fn root_resource(self) -> RootResourceId {
+        self.root_resource
     }
 
     #[doc(hidden)]
@@ -235,7 +238,7 @@ impl RootBoundSpan {
     }
 
     pub(crate) fn overlaps(&self, other: &Self) -> Result<bool, SpanValidationError> {
-        if self.root_identity.root_resource() != other.root_identity.root_resource() {
+        if self.root_resource != other.root_resource {
             return Ok(false);
         }
 
@@ -244,7 +247,7 @@ impl RootBoundSpan {
     }
 
     pub(crate) fn contains(&self, other: &Self) -> Result<bool, SpanValidationError> {
-        if self.root_identity.root_resource() != other.root_identity.root_resource() {
+        if self.root_resource != other.root_resource {
             return Ok(false);
         }
 
@@ -254,13 +257,13 @@ impl RootBoundSpan {
     }
 
     const fn from_parts(
-        root_identity: RootResourceIdentity,
+        root_resource: RootResourceId,
         byte_offset: usize,
         byte_len: usize,
         guaranteed_alignment: NonZeroUsize,
     ) -> Self {
         Self {
-            root_identity,
+            root_resource,
             byte_offset,
             byte_len,
             guaranteed_alignment,
@@ -272,7 +275,7 @@ impl RootResourceIdentity {
     pub(crate) const fn root_span(self) -> RootBoundSpan {
         let extent = self.extent();
         RootBoundSpan::from_parts(
-            self,
+            self.root_resource(),
             extent.byte_offset(),
             extent.byte_len(),
             extent.guaranteed_alignment(),
@@ -285,7 +288,7 @@ impl RootResourceIdentity {
     ) -> Result<RootBoundSpan, SpanValidationError> {
         let (byte_offset, byte_len, alignment) = self.extent().relative_parts(relative)?;
         Ok(RootBoundSpan::from_parts(
-            self,
+            self.root_resource(),
             byte_offset,
             byte_len,
             alignment,

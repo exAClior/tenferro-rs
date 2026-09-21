@@ -5,11 +5,11 @@ use std::ops::{Deref, DerefMut, Range};
 use std::ptr::NonNull;
 
 use crate::{
-    DType, DeviceAccessError, DeviceAccessRequest, PreparedDeviceAccess, TensorLayout, TensorRank,
-    TensorScalar,
+    DType, DeviceAccessError, DeviceAccessRequest, PreparedDeviceAccess, StrideVec, TensorLayout,
+    TensorRank, TensorScalar,
 };
 
-use super::identity::RootResourceIdentity;
+use super::identity::{RootResourceId, RootResourceIdentity};
 use super::root::{StorageMut, StorageRef};
 use super::span::RootBoundSpan;
 
@@ -188,7 +188,9 @@ pub(crate) struct WriteInjectivityProof;
 pub(crate) struct CheckedStrided<R: TensorRank> {
     shape: R::Shape,
     strides: R::Strides,
-    carry: Box<[isize]>,
+    // Inline for rank <= 8, the same capacity `ShapeVec`/`StrideVec` use, so the
+    // boxed strided plan remains exactly one allocation for supported ranks.
+    carry: StrideVec,
     offset: isize,
     element_count: usize,
     _rank: PhantomData<R>,
@@ -204,7 +206,7 @@ impl<R: TensorRank> CheckedStrided<R> {
     }
 
     pub(crate) fn carry(&self) -> &[isize] {
-        &self.carry
+        self.carry.as_ref()
     }
 
     pub(crate) const fn offset(&self) -> isize {
@@ -217,10 +219,14 @@ impl<R: TensorRank> CheckedStrided<R> {
 }
 
 /// Layout state retained by a checked descriptor.
+///
+/// The strided payload is boxed: a `CheckedLayout` lives inline in every
+/// descriptor, and `Contiguous` needs only a range, so an inline strided plan
+/// made every contiguous descriptor carry it too (#1823 F).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CheckedLayout<R: TensorRank> {
     Contiguous { element_range: Range<usize> },
-    Strided(CheckedStrided<R>),
+    Strided(Box<CheckedStrided<R>>),
 }
 
 impl<R: TensorRank> CheckedLayout<R> {
@@ -237,9 +243,9 @@ impl<R: TensorRank> CheckedLayout<R> {
 pub(crate) struct CheckedDescriptor<R: TensorRank> {
     span: RootBoundSpan,
     layout: CheckedLayout<R>,
-    shape: R::Shape,
-    strides: R::Strides,
-    offset: isize,
+    // The one logical layout copy: shape, strides, and offset live here and are
+    // served from it (#1823 B).
+    logical: TensorLayout<R>,
     dtype: DType,
     element_size: usize,
 }
@@ -261,16 +267,21 @@ impl<R: TensorRank> CheckedDescriptor<R> {
         &self.layout
     }
 
+    /// The checked logical layout: shape, strides, and offset in one place.
+    pub(crate) fn logical_layout(&self) -> &TensorLayout<R> {
+        &self.logical
+    }
+
     pub(crate) fn shape(&self) -> &[usize] {
-        self.shape.as_ref()
+        self.logical.shape()
     }
 
     pub(crate) fn strides(&self) -> &[isize] {
-        self.strides.as_ref()
+        self.logical.strides()
     }
 
-    pub(crate) const fn offset(&self) -> isize {
-        self.offset
+    pub(crate) fn offset(&self) -> isize {
+        self.logical.offset()
     }
 }
 
@@ -328,7 +339,7 @@ fn invalid_layout(error: impl fmt::Display) -> AccessError {
 }
 
 fn make_descriptor<T, R>(
-    owner: &RootResourceIdentity,
+    owner: RootResourceId,
     span: RootBoundSpan,
     shape: R::Shape,
     strides: R::Strides,
@@ -402,24 +413,22 @@ where
                     .and_then(isize::checked_neg)
                     .ok_or_else(|| invalid_layout("stride carry overflows"))
             })
-            .collect::<Result<Box<[_]>, AccessError>>()?;
-        CheckedLayout::Strided(CheckedStrided {
+            .collect::<Result<StrideVec, AccessError>>()?;
+        CheckedLayout::Strided(Box::new(CheckedStrided {
             shape: shape.clone(),
             strides: strides.clone(),
             carry,
             offset: layout.offset(),
             element_count,
             _rank: PhantomData,
-        })
+        }))
     };
 
     Ok((
         CheckedDescriptor {
             span,
             layout: checked_layout,
-            shape: shape.clone(),
-            strides: strides.clone(),
-            offset,
+            logical: layout,
             dtype: T::dtype(),
             element_size,
         },
@@ -439,8 +448,8 @@ impl<'a, R: TensorRank> CheckedRead<'a, R> {
         strides: R::Strides,
         offset: isize,
     ) -> Result<Self, AccessError> {
-        let root = owner.root_identity();
-        let (descriptor, _) = make_descriptor::<T, R>(&root, span, shape, strides, offset, false)?;
+        let root = owner.span().root_resource();
+        let (descriptor, _) = make_descriptor::<T, R>(root, span, shape, strides, offset, false)?;
         Ok(Self { owner, descriptor })
     }
 
@@ -468,9 +477,9 @@ impl<'a, R: TensorRank> CheckedWrite<'a, R> {
         strides: R::Strides,
         offset: isize,
     ) -> Result<Self, AccessError> {
-        let root = owner.root_identity();
+        let root = owner.span().root_resource();
         let (descriptor, proof) =
-            make_descriptor::<T, R>(&root, span, shape, strides, offset, true)?;
+            make_descriptor::<T, R>(root, span, shape, strides, offset, true)?;
         Ok(Self {
             owner,
             descriptor: CheckedInjectiveDescriptor {
@@ -487,7 +496,7 @@ impl<'a, R: TensorRank> CheckedWrite<'a, R> {
 
 /// Build the one checked descriptor retained by an allocation-group record.
 pub(crate) fn validate_descriptor<T: TensorScalar, R: TensorRank>(
-    owner: &RootResourceIdentity,
+    owner: RootResourceId,
     span: RootBoundSpan,
     shape: R::Shape,
     strides: R::Strides,
@@ -623,12 +632,12 @@ impl<T: TensorScalar, R: TensorRank> PreparedContiguousWrite<'_, T, R> {
 
 pub(crate) struct PreparedStridedRead<'a, T: TensorScalar, R: TensorRank> {
     access: TypedReadAccess<'a, T>,
-    plan: CheckedStrided<R>,
+    plan: Box<CheckedStrided<R>>,
 }
 
 pub(crate) struct PreparedStridedWrite<'a, T: TensorScalar, R: TensorRank> {
     access: TypedWriteAccess<'a, T>,
-    plan: CheckedStrided<R>,
+    plan: Box<CheckedStrided<R>>,
 }
 
 pub(crate) struct PreparedStridedIter<'i, 'a, T: TensorScalar, R: TensorRank> {

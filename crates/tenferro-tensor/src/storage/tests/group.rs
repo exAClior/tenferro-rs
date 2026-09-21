@@ -3,16 +3,19 @@ use std::ops::{Deref, DerefMut, Range};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use crate::{AllocationDomainId, AllocationId, BackendId, DType, DynRank};
+use crate::{AllocationDomainId, AllocationId, BackendId, DType, DynRank, ShapeVec, StrideVec};
 
 use super::super::group::{
     AllocationGroup, AllocationSlot, DescriptorInput, DescriptorSlot, DisjointViewError,
     ExtractError, GroupError,
 };
-use super::super::prepared::{AccessError, ProviderReadMapping, ProviderWriteMapping};
+use super::super::identity::RootResourceIdentity;
+use super::super::prepared::{
+    validate_descriptor, AccessError, CheckedLayout, ProviderReadMapping, ProviderWriteMapping,
+};
 use super::super::{
-    import_unique_root, BackendAllocation, ByteRange, ProviderCapabilities, ProviderKind,
-    RootResourceExtent,
+    import_unique_root, AllocationKey, BackendAllocation, ByteRange, ProviderCapabilities,
+    ProviderKind, RootResourceExtent,
 };
 
 struct RangeGuard<'a> {
@@ -599,4 +602,112 @@ fn provider_view_host_mapping_uses_derived_layout_and_releases_guard() {
         AllocationGroup::from_tensors(vec![crate::Tensor::from_typed(tensor)]).unwrap();
     assert_eq!(group.read_view(slots[0]).unwrap().placement(), &placement);
     assert_eq!(group.into_tensor(slots[0]).unwrap().placement(), &placement);
+}
+
+/// Allocator used by the descriptor-construction allocation witness.
+///
+/// It forwards every request to the system allocator and counts only while
+/// `count_descriptor_allocations` has the thread-local flag raised, so the rest
+/// of this test binary is unaffected. It is `cfg(test)`-only and matches the
+/// counting-allocator precedent in `tests/borrowed_view_allocation_tests.rs`;
+/// the witness has to live in this crate because `validate_descriptor` is
+/// crate-private. No production path takes an allocator of ours.
+struct DescriptorCountingAllocator;
+
+thread_local! {
+    static DESCRIPTOR_ALLOCATION_COUNTING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static DESCRIPTOR_ALLOCATION_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+unsafe impl std::alloc::GlobalAlloc for DescriptorCountingAllocator {
+    unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+        if DESCRIPTOR_ALLOCATION_COUNTING.with(std::cell::Cell::get) {
+            DESCRIPTOR_ALLOCATION_COUNT.with(|count| count.set(count.get() + 1));
+        }
+        // SAFETY: the unchanged layout is forwarded to the system allocator.
+        unsafe { std::alloc::System.alloc(layout) }
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+        // SAFETY: `ptr` and `layout` came from the matching system allocation.
+        unsafe { std::alloc::System.dealloc(ptr, layout) }
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, new_size: usize) -> *mut u8 {
+        if DESCRIPTOR_ALLOCATION_COUNTING.with(std::cell::Cell::get) {
+            DESCRIPTOR_ALLOCATION_COUNT.with(|count| count.set(count.get() + 1));
+        }
+        // SAFETY: `ptr` and `layout` came from the system allocator and
+        // `new_size` is forwarded unchanged.
+        unsafe { std::alloc::System.realloc(ptr, layout, new_size) }
+    }
+}
+
+#[global_allocator]
+static DESCRIPTOR_COUNTING_ALLOCATOR: DescriptorCountingAllocator = DescriptorCountingAllocator;
+
+fn count_descriptor_allocations(op: impl FnOnce()) -> usize {
+    DESCRIPTOR_ALLOCATION_COUNT.with(|count| count.set(0));
+    DESCRIPTOR_ALLOCATION_COUNTING.with(|flag| flag.set(true));
+    op();
+    DESCRIPTOR_ALLOCATION_COUNTING.with(|flag| flag.set(false));
+    DESCRIPTOR_ALLOCATION_COUNT.with(std::cell::Cell::get)
+}
+
+#[test]
+fn descriptor_plan_allocation_count_separates_contiguous_and_strided() {
+    let extent = RootResourceExtent::try_new(
+        AllocationKey::new(
+            AllocationDomainId::fresh(),
+            AllocationId::from_backend_id(7),
+        ),
+        0,
+        64,
+        8,
+    )
+    .expect("valid root extent");
+    let identity = RootResourceIdentity::try_new(extent).expect("root identity");
+    let span = identity.root_span();
+    let root = identity.root_resource();
+
+    // Both metadata sets are built outside the counted region, and both fit the
+    // inline `SmallVec` capacity, so only the descriptor plan itself is counted.
+    let compact_shape = ShapeVec::from_slice(&[2, 3]);
+    let compact_strides = StrideVec::from_slice(&[1, 2]);
+    let compact = count_descriptor_allocations(|| {
+        let (checked, _) = validate_descriptor::<f64, DynRank>(
+            root,
+            span,
+            compact_shape.clone(),
+            compact_strides.clone(),
+            0,
+            false,
+        )
+        .expect("compact descriptor");
+        assert!(matches!(checked.layout(), CheckedLayout::Contiguous { .. }));
+    });
+
+    let strided_shape = ShapeVec::from_slice(&[2, 3]);
+    let strided_strides = StrideVec::from_slice(&[1, 3]);
+    let strided = count_descriptor_allocations(|| {
+        let (checked, _) = validate_descriptor::<f64, DynRank>(
+            root,
+            span,
+            strided_shape.clone(),
+            strided_strides.clone(),
+            0,
+            false,
+        )
+        .expect("strided descriptor");
+        assert!(matches!(checked.layout(), CheckedLayout::Strided(_)));
+    });
+
+    assert_eq!(
+        compact, 0,
+        "a contiguous descriptor keeps its whole plan inline"
+    );
+    assert_eq!(
+        strided, 1,
+        "a strided descriptor owns exactly one boxed plan"
+    );
 }

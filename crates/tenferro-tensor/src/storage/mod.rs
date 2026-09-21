@@ -10,7 +10,7 @@ mod root;
 mod span;
 
 pub use group::{AllocationGroup, DescriptorSlot, GroupError};
-pub(crate) use group::{GroupReadView, GroupWriteView};
+pub(crate) use group::{AllocationSlot, GroupReadView, GroupWriteView};
 
 #[doc(hidden)]
 pub use identity::{AllocationKey, RootResourceId};

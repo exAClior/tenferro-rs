@@ -1435,8 +1435,16 @@ public-boundary inventory regenerated.
 `#[repr(C, u8)] TensorPayload { Native(TensorCore<DynRank>), External(ErasedHostTensor, Placement) }`,
 the seven preset names are gone from the repository, and the accessor contract is pinned by
 `erased_payload_accessors_cover_every_preset_dtype`, which drives all seven dtypes through the owned
-round-trip, the mismatch refusal, mutable access, `mem::swap`/`mem::replace` and `into_typed`. Measured:
-`size_of::<Tensor>()` = 1464 B and `Tensor::from_typed` = 0 allocations. Focused Miri
+round-trip, the mismatch refusal, mutable access, `mem::swap`/`mem::replace` and `into_typed`. Measured
+at that step: `size_of::<Tensor>()` = 1464 B and `Tensor::from_typed` = 0 allocations.
+
+**Current size (2026-09).** #1823 A-G removed the metadata duplication that inflated that 1464 B: the
+payload is a default-repr enum, spans carry only the root-resource id, the descriptor record serves
+root/span/layout/dtype/element size from its checked descriptor, and the strided plan is boxed.
+`size_of::<Tensor>()` is now 776 B with no per-tensor metadata allocation for contiguous tensors,
+pinned by `erased_tensor_size_stays_within_the_documented_bound` in
+`crates/tenferro-tensor/src/types/tests.rs`. The prototype and step-5 tables above keep their
+as-measured numbers for the decisions they record. Focused Miri
 (`cargo +nightly miri test -j 8 -p tenferro-tensor --lib -- erased_payload_accessors
 an_external_payload`) passes both the accessor test and the external-payload test. The public-boundary
 inventory reports no drift, the repository rules review passes, and `scripts/check-pr-fast.sh
