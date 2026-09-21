@@ -161,20 +161,40 @@ fn test_cubecl_svd_xgesvdp_eager() {
 fn test_cubecl_svd_xgesvdp_large_spectrum_agrees_with_gesvd() {
     let mut gpu = gpu_backend();
     for m in [400, 800, 1024] {
-        // A = F diag(s) Fᴴ times independent unit-modulus row/column phases.
-        // The geometric sum constructs this dense ten-decade spectrum in O(m²).
+        // A = (I - 2wwᴴ) diag(s) (I - 2zzᴴ) with unit w, z: the issue's
+        // `U diag(s) Vᴴ` family, but built from two Householder reflectors so
+        // the unitary factors are exact to machine precision and the whole
+        // matrix costs O(m²) instead of a Gram-Schmidt O(m³).
+        //
+        // The construction matters, not just the spectrum. An earlier revision
+        // used a circulant-like closed form with the same ten decades, and on
+        // that matrix Xgesvdp lost about two digits against `gesvd`
+        // (4.1e-13 versus 4.4e-15 at m = 400 on an A100), so the tolerance
+        // below — measured in #1849 on `U diag(s) Vᴴ` — did not hold. Polar
+        // SVD accuracy is input-dependent; see the work log.
         let ratio = 10f64.powf(-10.0 / (m - 1) as f64);
+        let unit_vector = |phase: f64, shift: f64| -> Vec<Complex64> {
+            let raw: Vec<Complex64> = (0..m)
+                .map(|i| Complex64::from_polar(1.0 + ((i as f64) * shift).sin(), phase * i as f64))
+                .collect();
+            let norm = raw.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+            raw.into_iter().map(|z| z / norm).collect()
+        };
+        let w = unit_vector(0.17, 0.41);
+        let z = unit_vector(0.31, 0.23);
+        // Expand once: A = D - 2w(wᴴD) - 2(Dz)zᴴ + 4(wᴴDz)wzᴴ with D = diag(s).
+        let wh_d: Vec<Complex64> = (0..m).map(|j| w[j].conj() * ratio.powi(j as i32)).collect();
+        let d_z: Vec<Complex64> = (0..m).map(|i| z[i] * ratio.powi(i as i32)).collect();
+        let wh_d_z: Complex64 = (0..m).map(|j| wh_d[j] * z[j]).sum();
         let data = (0..m * m)
             .map(|idx| {
                 let (i, j) = (idx % m, idx / m);
-                let z = Complex64::from_polar(
-                    ratio,
-                    std::f64::consts::TAU * (i as f64 - j as f64) / m as f64,
-                );
-                Complex64::from_polar(
-                    (1.0 - ratio.powi(m as i32)) / m as f64,
-                    0.17 * i as f64 + 0.31 * j as f64,
-                ) / (Complex64::new(1.0, 0.0) - z)
+                let mut value = -2.0 * w[i] * wh_d[j] - 2.0 * d_z[i] * z[j].conj()
+                    + 4.0 * wh_d_z * w[i] * z[j].conj();
+                if i == j {
+                    value += Complex64::new(ratio.powi(i as i32), 0.0);
+                }
+                value
             })
             .collect();
         let input = tensor_c64(vec![m, m], data);

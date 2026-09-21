@@ -130,6 +130,13 @@ pub enum SvdDriver {
     /// inputs may be perturbed by cuSOLVER, shifting small singular values.
     /// The perturbation magnitude (`h_err_sigma`) is discarded, not returned
     /// with the factors. CPU providers accept and ignore this selection.
+    ///
+    /// Accuracy is input-dependent, not uniformly better or worse than
+    /// [`Self::Gesvd`]. On ten-decade spectra built as `U diag(s) Vᴴ` it was
+    /// the most accurate of the three drivers on an A100, but on a
+    /// circulant-like matrix with the same spectrum it lost about two digits
+    /// against `gesvd`. Measure on your own inputs before relying on it for
+    /// small singular values.
     Xgesvdp,
 }
 
