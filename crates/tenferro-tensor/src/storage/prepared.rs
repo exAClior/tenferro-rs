@@ -5,12 +5,11 @@ use std::ops::{Deref, DerefMut, Range};
 use std::ptr::NonNull;
 
 use crate::{
-    DType, DeviceAccessError, DeviceAccessRequest, PreparedDeviceAccess, TensorLayout, TensorRank,
-    TensorScalar,
+    DType, DeviceAccessError, DeviceAccessRequest, PreparedDeviceAccess, StrideVec, TensorLayout,
+    TensorRank, TensorScalar,
 };
 
-use super::identity::RootResourceIdentity;
-use super::identity::RootResourceId;
+use super::identity::{RootResourceId, RootResourceIdentity};
 use super::root::{StorageMut, StorageRef};
 use super::span::RootBoundSpan;
 
@@ -189,7 +188,9 @@ pub(crate) struct WriteInjectivityProof;
 pub(crate) struct CheckedStrided<R: TensorRank> {
     shape: R::Shape,
     strides: R::Strides,
-    carry: Box<[isize]>,
+    // Inline for rank <= 8, the same capacity `ShapeVec`/`StrideVec` use, so the
+    // boxed strided plan remains exactly one allocation for supported ranks.
+    carry: StrideVec,
     offset: isize,
     element_count: usize,
     _rank: PhantomData<R>,
@@ -205,7 +206,7 @@ impl<R: TensorRank> CheckedStrided<R> {
     }
 
     pub(crate) fn carry(&self) -> &[isize] {
-        &self.carry
+        self.carry.as_ref()
     }
 
     pub(crate) const fn offset(&self) -> isize {
@@ -218,10 +219,14 @@ impl<R: TensorRank> CheckedStrided<R> {
 }
 
 /// Layout state retained by a checked descriptor.
+///
+/// The strided payload is boxed: a `CheckedLayout` lives inline in every
+/// descriptor, and `Contiguous` needs only a range, so an inline strided plan
+/// made every contiguous descriptor carry it too (#1823 F).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum CheckedLayout<R: TensorRank> {
     Contiguous { element_range: Range<usize> },
-    Strided(CheckedStrided<R>),
+    Strided(Box<CheckedStrided<R>>),
 }
 
 impl<R: TensorRank> CheckedLayout<R> {
@@ -408,15 +413,15 @@ where
                     .and_then(isize::checked_neg)
                     .ok_or_else(|| invalid_layout("stride carry overflows"))
             })
-            .collect::<Result<Box<[_]>, AccessError>>()?;
-        CheckedLayout::Strided(CheckedStrided {
+            .collect::<Result<StrideVec, AccessError>>()?;
+        CheckedLayout::Strided(Box::new(CheckedStrided {
             shape: shape.clone(),
             strides: strides.clone(),
             carry,
             offset: layout.offset(),
             element_count,
             _rank: PhantomData,
-        })
+        }))
     };
 
     Ok((
@@ -627,12 +632,12 @@ impl<T: TensorScalar, R: TensorRank> PreparedContiguousWrite<'_, T, R> {
 
 pub(crate) struct PreparedStridedRead<'a, T: TensorScalar, R: TensorRank> {
     access: TypedReadAccess<'a, T>,
-    plan: CheckedStrided<R>,
+    plan: Box<CheckedStrided<R>>,
 }
 
 pub(crate) struct PreparedStridedWrite<'a, T: TensorScalar, R: TensorRank> {
     access: TypedWriteAccess<'a, T>,
-    plan: CheckedStrided<R>,
+    plan: Box<CheckedStrided<R>>,
 }
 
 pub(crate) struct PreparedStridedIter<'i, 'a, T: TensorScalar, R: TensorRank> {
