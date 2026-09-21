@@ -98,9 +98,10 @@ pub enum QrGauge {
 
 /// cuSOLVER SVD routine selection used by [`SvdOptions`] on the CUDA backend.
 ///
-/// The driver changes speed and rounding, not the decomposition contract, so
-/// gauges and AD rules are unaffected. CPU providers have a single SVD kernel
-/// and ignore it. Equivalent to `jax.lax.linalg.svd(..., algorithm=...)` and
+/// The driver changes speed and numerical behavior; [`Self::Xgesvdp`] may
+/// perturb near-singular inputs. Gauge handling and AD rule selection are
+/// unchanged. CPU providers have a single SVD kernel and ignore the driver.
+/// Equivalent to `jax.lax.linalg.svd(..., algorithm=...)` and
 /// `torch.linalg.svd(..., driver=...)`.
 ///
 /// # Examples
@@ -123,6 +124,13 @@ pub enum SvdDriver {
     Gesvdj,
     /// cuSOLVER's QR-based driver (`cusolverDn<t>gesvd`) regardless of size.
     Gesvd,
+    /// cuSOLVER's polar-decomposition driver (`cusolverDnXgesvdp`).
+    ///
+    /// Explicit only: [`Self::Auto`] never selects this routine. Near-singular
+    /// inputs may be perturbed by cuSOLVER, shifting small singular values.
+    /// The perturbation magnitude (`h_err_sigma`) is discarded, not returned
+    /// with the factors. CPU providers accept and ignore this selection.
+    Xgesvdp,
 }
 
 /// Options for singular value decomposition.
@@ -2068,6 +2076,7 @@ fn hash_svd_driver(hasher: &mut dyn Hasher, driver: SvdDriver) {
         SvdDriver::Auto => 0,
         SvdDriver::Gesvdj => 1,
         SvdDriver::Gesvd => 2,
+        SvdDriver::Xgesvdp => 3,
     };
     hasher.write_u8(tag);
 }
