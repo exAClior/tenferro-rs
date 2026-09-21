@@ -1,3 +1,6 @@
+// Xgesvdp bindings follow NVIDIA's cuSOLVER API reference (§ cusolverDnXgesvdp),
+// cross-checked against exAClior's standalone harness for issue #1849.
+// Independently written under MIT OR Apache-2.0; no NVIDIA sample code used.
 use std::ffi::c_void;
 use std::fmt;
 use std::os::raw::c_char;
@@ -321,6 +324,54 @@ type GeqrfC64Fn = unsafe extern "C" fn(
 
 type CreateParamsFn = unsafe extern "C" fn(*mut CusolverDnParamsRaw) -> CusolverStatus;
 type DestroyParamsFn = unsafe extern "C" fn(CusolverDnParamsRaw) -> CusolverStatus;
+type XgesvdpBufferSizeFn = unsafe extern "C" fn(
+    CusolverDnHandleRaw,
+    CusolverDnParamsRaw,
+    i32,
+    i32,
+    i64,
+    i64,
+    i32,
+    *const c_void,
+    i64,
+    i32,
+    *const c_void,
+    i32,
+    *const c_void,
+    i64,
+    i32,
+    *const c_void,
+    i64,
+    i32,
+    *mut usize,
+    *mut usize,
+) -> CusolverStatus;
+type XgesvdpFn = unsafe extern "C" fn(
+    CusolverDnHandleRaw,
+    CusolverDnParamsRaw,
+    i32,
+    i32,
+    i64,
+    i64,
+    i32,
+    *mut c_void,
+    i64,
+    i32,
+    *mut c_void,
+    i32,
+    *mut c_void,
+    i64,
+    i32,
+    *mut c_void,
+    i64,
+    i32,
+    *mut c_void,
+    usize,
+    *mut c_void,
+    usize,
+    *mut i32,
+    *mut f64,
+) -> CusolverStatus;
 type XlarftBufferSizeFn = unsafe extern "C" fn(
     CusolverDnHandleRaw,
     CusolverDnParamsRaw,
@@ -1113,6 +1164,8 @@ struct CusolverVtable {
     zgeqrf: GeqrfC64Fn,
     xlarft_buffer_size: XlarftBufferSizeFn,
     xlarft: XlarftFn,
+    xgesvdp_buffer_size: XgesvdpBufferSizeFn,
+    xgesvdp: XgesvdpFn,
     sorgqr_buffer_size: OrgqrBufferSizeF32Fn,
     dorgqr_buffer_size: OrgqrBufferSizeF64Fn,
     cungqr_buffer_size: OrgqrBufferSizeC32Fn,
@@ -1201,6 +1254,12 @@ impl CusolverVtable {
             zgeqrf: load_symbol(lib, b"cusolverDnZgeqrf\0", "cuSOLVER")?,
             xlarft_buffer_size: load_symbol(lib, b"cusolverDnXlarft_bufferSize\0", "cuSOLVER")?,
             xlarft: load_symbol(lib, b"cusolverDnXlarft\0", "cuSOLVER")?,
+            // SAFETY: signatures match the documented cuSOLVER 64-bit API.
+            xgesvdp_buffer_size: unsafe {
+                load_symbol(lib, b"cusolverDnXgesvdp_bufferSize\0", "cuSOLVER")?
+            },
+            // SAFETY: signature matches the documented cuSOLVER 64-bit API.
+            xgesvdp: unsafe { load_symbol(lib, b"cusolverDnXgesvdp\0", "cuSOLVER")? },
             sorgqr_buffer_size: load_symbol(lib, b"cusolverDnSorgqr_bufferSize\0", "cuSOLVER")?,
             dorgqr_buffer_size: load_symbol(lib, b"cusolverDnDorgqr_bufferSize\0", "cuSOLVER")?,
             cungqr_buffer_size: load_symbol(lib, b"cusolverDnCungqr_bufferSize\0", "cuSOLVER")?,
@@ -2040,6 +2099,129 @@ impl CusolverDnHandle {
             ),
         };
         self.lib.check_status(status, op, "cusolverDn*geqrf")
+    }
+
+    /// Query Xgesvdp device and host workspace sizes, in bytes.
+    ///
+    /// # Errors
+    /// Returns `Error::BackendFailure` when cuSOLVER rejects the arguments.
+    // INVARIANT: the arguments mirror the vendor ABI at this private FFI boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::gpu) fn gesvdp_buffer_size(
+        &self,
+        dtype: CudaDataType,
+        jobz: CusolverEigMode,
+        econ: i32,
+        m: i64,
+        n: i64,
+        a: *const c_void,
+        s: *const c_void,
+        u: *const c_void,
+        v: *const c_void,
+        op: &'static str,
+    ) -> Result<(usize, usize)> {
+        let real = match dtype {
+            CudaDataType::F32 | CudaDataType::Complex32 => CudaDataType::F32,
+            CudaDataType::F64 | CudaDataType::Complex64 => CudaDataType::F64,
+        };
+        let dtype = cuda_data_type_abi(dtype);
+        let mut device_bytes = 0;
+        let mut host_bytes = 0;
+        // SAFETY: bufferSize only queries sizes; no device data is accessed.
+        let status = unsafe {
+            (self.lib.vtable.xgesvdp_buffer_size)(
+                self.raw,
+                self.params,
+                jobz as i32,
+                econ,
+                m,
+                n,
+                dtype,
+                a,
+                m,
+                cuda_data_type_abi(real),
+                s,
+                dtype,
+                u,
+                m,
+                dtype,
+                v,
+                n,
+                dtype,
+                &mut device_bytes,
+                &mut host_bytes,
+            )
+        };
+        self.lib
+            .check_status(status, op, "cusolverDnXgesvdp_bufferSize")?;
+        Ok((device_bytes, host_bytes))
+    }
+
+    /// Compute a column-major Xgesvdp SVD, returning V rather than Vᴴ.
+    ///
+    /// # Safety
+    /// Device pointers must cover the requested matrices and real spectrum.
+    /// Workspaces and host diagnostic storage must remain live until completion.
+    /// Sizes must match the preceding `gesvdp_buffer_size` query.
+    ///
+    /// # Errors
+    /// Returns `Error::BackendFailure` when cuSOLVER rejects the arguments.
+    // INVARIANT: the arguments mirror the vendor ABI at this private FFI boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::gpu) unsafe fn gesvdp(
+        &self,
+        dtype: CudaDataType,
+        jobz: CusolverEigMode,
+        econ: i32,
+        m: i64,
+        n: i64,
+        a: *mut c_void,
+        s: *mut c_void,
+        u: *mut c_void,
+        v: *mut c_void,
+        device_workspace: *mut c_void,
+        device_bytes: usize,
+        host_workspace: *mut c_void,
+        host_bytes: usize,
+        info: *mut i32,
+        err_sigma: *mut f64,
+        op: &'static str,
+    ) -> Result<()> {
+        let real = match dtype {
+            CudaDataType::F32 | CudaDataType::Complex32 => CudaDataType::F32,
+            CudaDataType::F64 | CudaDataType::Complex64 => CudaDataType::F64,
+        };
+        let dtype = cuda_data_type_abi(dtype);
+        // SAFETY: caller guarantees all vendor buffer and lifetime requirements.
+        let status = unsafe {
+            (self.lib.vtable.xgesvdp)(
+                self.raw,
+                self.params,
+                jobz as i32,
+                econ,
+                m,
+                n,
+                dtype,
+                a,
+                m,
+                cuda_data_type_abi(real),
+                s,
+                dtype,
+                u,
+                m,
+                dtype,
+                v,
+                n,
+                dtype,
+                device_workspace,
+                device_bytes,
+                host_workspace,
+                host_bytes,
+                info,
+                err_sigma,
+            )
+        };
+        self.lib.check_status(status, op, "cusolverDnXgesvdp")
     }
 
     /// Query device and host workspace required to form a blocked Householder

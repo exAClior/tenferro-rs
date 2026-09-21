@@ -268,8 +268,11 @@ assert_eq!(vt_rank2.concrete_shape()?, vec![2, 3]);
 dimensions are at most 1024 and QR-based `gesvd` otherwise, matching JAX.
 `SvdDriver::Gesvd` or `SvdDriver::Gesvdj` forces one routine regardless of
 size; which one is faster depends on the singular-value spectrum, so measure
-on your workload. The driver changes speed and rounding, not the decomposition
-contract. CPU providers ignore it.
+on your workload. `SvdDriver::Xgesvdp` explicitly selects cuSOLVER's
+polar-decomposition routine; `Auto` never selects it. Xgesvdp may perturb
+near-singular inputs and shift small singular values. The reported perturbation
+magnitude (`h_err_sigma`) is discarded, so use another driver when that
+diagnostic is needed to judge a truncation. CPU providers ignore the driver.
 
 <!-- snippet-source: docs/tutorial-code/src/bin/math_snippets.rs#linear_algebra_svd_driver -->
 ```rust
