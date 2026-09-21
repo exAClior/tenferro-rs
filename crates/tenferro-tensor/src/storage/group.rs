@@ -7,12 +7,12 @@ use crate::types::{tensor_from_group, tensor_view_from_group};
 use crate::{DType, DynRank, Placement, TensorLayout, TensorRank, TensorRead, TensorScalar};
 use smallvec::SmallVec;
 
+use super::identity::RootResourceId;
 use super::prepared::{
     prepare_read, prepare_write, validate_descriptor, AccessError, AccessTarget, CheckedDescriptor,
     CheckedRead, CheckedWrite, PreparedRead, PreparedWrite, ProviderReadMapping,
     ProviderWriteMapping, WriteInjectivityProof,
 };
-use super::identity::RootResourceId;
 use super::root::{BackendAllocation, OwnedStorage, ProviderKind};
 use super::span::{ByteRange, RootBoundSpan};
 
@@ -1183,7 +1183,10 @@ impl AllocationGroup {
             .prepare_device_read_for_layout(layout)
     }
 
-    pub(crate) fn allocation_index(&self, slot: DescriptorSlot) -> Result<AllocationSlot, GroupError> {
+    pub(crate) fn allocation_index(
+        &self,
+        slot: DescriptorSlot,
+    ) -> Result<AllocationSlot, GroupError> {
         Ok(self.resolve_descriptor(slot)?.1.allocation)
     }
 
