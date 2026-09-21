@@ -126,19 +126,31 @@ define_scalar_set! {
         /// 64-bit complex floating point.
         C64 => Complex64 : Complex 1 64,
     }
-    /// Value enum of the scalar set tenferro ships.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use tenferro_tensor_core::{DType, DefaultScalars, HostTensor, ScalarSet};
-    ///
-    /// let value = DefaultScalars::I32(HostTensor::from_vec_col_major(vec![1], vec![7_i32])?);
-    /// assert_eq!(value.tag(), DType::I32);
-    /// # Ok::<(), tenferro_tensor_core::ValidationError>(())
-    /// ```
-    pub enum DefaultScalars;
+    pub(crate) enum DefaultScalarsValue;
     external External(core::any::TypeId);
+}
+
+/// Dynamic host tensor over the crate's preset scalar set.
+///
+/// The payload is a private inline value: a host tensor is one move and a copy
+/// allocates nothing, and the preset variants are not part of the public
+/// surface. Construct through [`DefaultScalars::from_vec_col_major`] and read
+/// through [`DefaultScalars::as_slice`], [`DefaultScalars::as_mut_slice`], or
+/// [`DefaultScalars::into_vec_col_major`].
+///
+/// # Examples
+///
+/// ```rust
+/// use tenferro_tensor_core::{DType, DefaultScalars, ScalarSet};
+///
+/// let value = DefaultScalars::from_vec_col_major(vec![1], vec![7_i32])?;
+/// assert_eq!(value.tag(), DType::I32);
+/// assert_eq!(value.as_slice::<i32>()?, &[7]);
+/// # Ok::<(), tenferro_tensor_core::ValidationError>(())
+/// ```
+#[derive(Clone, Debug, PartialEq)]
+pub struct DefaultScalars {
+    value: DefaultScalarsValue,
 }
 
 /// Sealed trait for scalar types supported by the core tensor data model.
@@ -305,26 +317,27 @@ macro_rules! impl_scalar {
             }
 
             fn into_tensor(shape: ShapeVec, data: Vec<Self>) -> Result<Tensor> {
-                HostTensor::from_vec_col_major(shape, data).map(Tensor::$variant)
+                HostTensor::from_vec_col_major(shape, data)
+                    .map(|host| Tensor::from_payload(DefaultScalarsValue::$variant(host)))
             }
 
             fn tensor_slice(tensor: &Tensor) -> Option<&[Self]> {
-                match tensor {
-                    Tensor::$variant(typed) => Some(typed.as_slice()),
+                match tensor.payload() {
+                    DefaultScalarsValue::$variant(typed) => Some(typed.as_slice()),
                     _ => None,
                 }
             }
 
             fn tensor_mut_slice(tensor: &mut Tensor) -> Option<&mut [Self]> {
-                match tensor {
-                    Tensor::$variant(typed) => Some(typed.as_mut_slice()),
+                match tensor.payload_mut() {
+                    DefaultScalarsValue::$variant(typed) => Some(typed.as_mut_slice()),
                     _ => None,
                 }
             }
 
             fn into_typed(tensor: Tensor) -> Option<HostTensor<Self>> {
-                match tensor {
-                    Tensor::$variant(typed) => Some(typed),
+                match tensor.into_payload() {
+                    DefaultScalarsValue::$variant(typed) => Some(typed),
                     _ => None,
                 }
             }
@@ -1097,31 +1110,7 @@ impl<'a, T> HostTensorView<'a, T> {
     }
 }
 
-impl DefaultScalars {
-    /// Create a dynamic tensor from a column-major host buffer.
-    ///
-    /// # Examples
-    ///
-    /// ```rust
-    /// use tenferro_tensor_core::{DType, Tensor};
-    ///
-    /// let tensor = Tensor::from_vec_col_major(vec![1], vec![2.0_f32])?;
-    /// assert_eq!(tensor.dtype(), DType::F32);
-    /// # Ok::<(), tenferro_tensor_core::ValidationError>(())
-    /// ```
-    ///
-    /// # Errors
-    ///
-    /// Returns [`ValidationError::ShapeDataLengthMismatch`] when the shape
-    /// product differs from `data.len()`, or [`ValidationError::IntegerOverflow`]
-    /// when validating the shape overflows.
-    pub fn from_vec_col_major<T: TensorScalar>(
-        shape: impl Into<ShapeVec>,
-        data: Vec<T>,
-    ) -> Result<Self> {
-        T::into_tensor(shape.into(), data)
-    }
-
+impl DefaultScalarsValue {
     /// Return the tensor dtype tag.
     ///
     /// # Examples
@@ -1206,6 +1195,115 @@ impl DefaultScalars {
         }
     }
 
+    /// Borrow this tensor as a dynamic zero-offset view.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use tenferro_tensor_core::{DType, Tensor};
+    ///
+    /// let tensor = Tensor::from_vec_col_major(vec![1], vec![1_i64])?;
+    /// assert_eq!(tensor.as_view().dtype(), DType::I64);
+    /// # Ok::<(), tenferro_tensor_core::ValidationError>(())
+    /// ```
+    pub fn as_view(&self) -> TensorView<'_> {
+        match self {
+            Self::F32(t) => TensorView::F32(t.as_view()),
+            Self::F64(t) => TensorView::F64(t.as_view()),
+            Self::I32(t) => TensorView::I32(t.as_view()),
+            Self::I64(t) => TensorView::I64(t.as_view()),
+            Self::Bool(t) => TensorView::Bool(t.as_view()),
+            Self::C32(t) => TensorView::C32(t.as_view()),
+            Self::C64(t) => TensorView::C64(t.as_view()),
+        }
+    }
+}
+
+impl DefaultScalars {
+    /// Create a dynamic tensor from a column-major host buffer.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use tenferro_tensor_core::{DType, Tensor};
+    ///
+    /// let tensor = Tensor::from_vec_col_major(vec![1], vec![2.0_f32])?;
+    /// assert_eq!(tensor.dtype(), DType::F32);
+    /// # Ok::<(), tenferro_tensor_core::ValidationError>(())
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ValidationError::ShapeDataLengthMismatch`] when the shape
+    /// product differs from `data.len()`, or [`ValidationError::IntegerOverflow`]
+    /// when validating the shape overflows.
+    pub fn from_vec_col_major<T: TensorScalar>(
+        shape: impl Into<ShapeVec>,
+        data: Vec<T>,
+    ) -> Result<Self> {
+        T::into_tensor(shape.into(), data)
+    }
+
+    /// Return the tensor dtype tag.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use tenferro_tensor_core::{DType, Tensor};
+    ///
+    /// let tensor = Tensor::from_vec_col_major(vec![1], vec![false])?;
+    /// assert_eq!(tensor.dtype(), DType::Bool);
+    /// # Ok::<(), tenferro_tensor_core::ValidationError>(())
+    /// ```
+    pub fn dtype(&self) -> DType {
+        self.value.dtype()
+    }
+
+    /// Borrow the tensor shape.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use tenferro_tensor_core::Tensor;
+    ///
+    /// let tensor = Tensor::from_vec_col_major(vec![2], vec![1_i32, 2])?;
+    /// assert_eq!(tensor.shape(), &[2]);
+    /// # Ok::<(), tenferro_tensor_core::ValidationError>(())
+    /// ```
+    pub fn shape(&self) -> &[usize] {
+        self.value.shape()
+    }
+
+    /// Return the tensor rank.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use tenferro_tensor_core::Tensor;
+    ///
+    /// let tensor = Tensor::from_vec_col_major(vec![1, 1], vec![1_i64])?;
+    /// assert_eq!(tensor.rank(), 2);
+    /// # Ok::<(), tenferro_tensor_core::ValidationError>(())
+    /// ```
+    pub fn rank(&self) -> usize {
+        self.value.rank()
+    }
+
+    /// Return whether the tensor has zero elements.
+    ///
+    /// # Examples
+    ///
+    /// ```rust
+    /// use tenferro_tensor_core::Tensor;
+    ///
+    /// let tensor = Tensor::from_vec_col_major(vec![0], Vec::<f64>::new())?;
+    /// assert!(tensor.is_empty());
+    /// # Ok::<(), tenferro_tensor_core::ValidationError>(())
+    /// ```
+    pub fn is_empty(&self) -> bool {
+        self.value.is_empty()
+    }
+
     /// Borrow the typed host slice when the dtype matches.
     ///
     /// # Examples
@@ -1224,9 +1322,10 @@ impl DefaultScalars {
     /// Returns [`ValidationError::DTypeMismatch`] when `T` does not match the
     /// tensor's runtime dtype.
     pub fn as_slice<T: TensorScalar>(&self) -> Result<&[T]> {
+        let actual = self.dtype();
         T::tensor_slice(self).ok_or(ValidationError::DTypeMismatch {
             expected: T::dtype(),
-            actual: self.dtype(),
+            actual,
         })
     }
 
@@ -1262,20 +1361,12 @@ impl DefaultScalars {
     /// ```rust
     /// use tenferro_tensor_core::{DType, Tensor};
     ///
-    /// let tensor = Tensor::from_vec_col_major(vec![1], vec![1_i64])?;
-    /// assert_eq!(tensor.as_view().dtype(), DType::I64);
+    /// let tensor = Tensor::from_vec_col_major(vec![1], vec![1.0_f32])?;
+    /// assert_eq!(tensor.as_view().dtype(), DType::F32);
     /// # Ok::<(), tenferro_tensor_core::ValidationError>(())
     /// ```
     pub fn as_view(&self) -> TensorView<'_> {
-        match self {
-            Self::F32(t) => TensorView::F32(t.as_view()),
-            Self::F64(t) => TensorView::F64(t.as_view()),
-            Self::I32(t) => TensorView::I32(t.as_view()),
-            Self::I64(t) => TensorView::I64(t.as_view()),
-            Self::Bool(t) => TensorView::Bool(t.as_view()),
-            Self::C32(t) => TensorView::C32(t.as_view()),
-            Self::C64(t) => TensorView::C64(t.as_view()),
-        }
+        self.value.as_view()
     }
 
     /// Consume this tensor and return typed column-major data when the dtype matches.
@@ -1285,8 +1376,10 @@ impl DefaultScalars {
     /// ```rust
     /// use tenferro_tensor_core::Tensor;
     ///
-    /// let tensor = Tensor::from_vec_col_major(vec![1], vec![2.0_f32])?;
-    /// assert_eq!(tensor.into_vec_col_major::<f32>()?.1, vec![2.0]);
+    /// let tensor = Tensor::from_vec_col_major(vec![2], vec![1.0_f64, 2.0])?;
+    /// let (shape, data) = tensor.into_vec_col_major::<f64>()?;
+    /// assert_eq!(shape.as_slice(), &[2]);
+    /// assert_eq!(data, vec![1.0, 2.0]);
     /// # Ok::<(), tenferro_tensor_core::ValidationError>(())
     /// ```
     ///
@@ -1302,6 +1395,36 @@ impl DefaultScalars {
                 expected: T::dtype(),
                 actual,
             })
+    }
+
+    pub(crate) fn from_payload(value: DefaultScalarsValue) -> Self {
+        Self { value }
+    }
+
+    pub(crate) fn payload(&self) -> &DefaultScalarsValue {
+        &self.value
+    }
+
+    pub(crate) fn payload_mut(&mut self) -> &mut DefaultScalarsValue {
+        &mut self.value
+    }
+
+    pub(crate) fn into_payload(self) -> DefaultScalarsValue {
+        self.value
+    }
+}
+
+impl ScalarSet for DefaultScalars {
+    type Tag = DType;
+
+    const TAGS: &'static [Self::Tag] = <DefaultScalarsValue as ScalarSet>::TAGS;
+
+    fn tag(&self) -> Self::Tag {
+        self.value.tag()
+    }
+
+    fn promote(lhs: Self::Tag, rhs: Self::Tag) -> Self::Tag {
+        <DefaultScalarsValue as ScalarSet>::promote(lhs, rhs)
     }
 }
 

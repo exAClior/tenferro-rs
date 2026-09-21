@@ -8,16 +8,16 @@
 
 /// A closed set of scalar types carried by one tensor value type.
 ///
-/// The set is represented by the value enum itself: each of its variants holds a
-/// host tensor of one member type, and [`ScalarSet::tag`] reports which member a
-/// value currently holds.
+/// A set is represented by one value type: the default set's payload is opaque
+/// and a downstream set defines its own value enum, and [`ScalarSet::tag`]
+/// reports which member a value currently holds.
 ///
 /// # Examples
 ///
 /// ```rust
 /// use tenferro_tensor_core::{DefaultScalars, ScalarSet};
 ///
-/// let value = DefaultScalars::F64(tenferro_tensor_core::HostTensor::from_vec_col_major(vec![1], vec![1.0_f64])?);
+/// let value = DefaultScalars::from_vec_col_major(vec![1], vec![1.0_f64])?;
 /// assert_eq!(value.tag(), tenferro_tensor_core::DType::F64);
 /// # Ok::<(), tenferro_tensor_core::ValidationError>(())
 /// ```
@@ -33,11 +33,9 @@ pub trait ScalarSet: Clone + core::fmt::Debug + 'static {
     /// # Examples
     ///
     /// ```rust
-    /// use tenferro_tensor_core::{DType, HostTensor, ScalarSet};
+    /// use tenferro_tensor_core::{DType, DefaultScalars, ScalarSet};
     ///
-    /// let value = tenferro_tensor_core::DefaultScalars::F64(
-    ///     HostTensor::from_vec_col_major(vec![1], vec![1.0_f64])?,
-    /// );
+    /// let value = DefaultScalars::from_vec_col_major(vec![1], vec![1.0_f64])?;
     /// assert_eq!(value.tag(), DType::F64);
     /// # Ok::<(), tenferro_tensor_core::ValidationError>(())
     /// ```
