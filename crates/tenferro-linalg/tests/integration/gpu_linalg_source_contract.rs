@@ -404,16 +404,46 @@ fn cuda_rrqr_has_no_payload_download_or_cpu_fallback() {
 #[test]
 fn cubecl_linalg_overrides_svd_read_with_backend_canonicalization() {
     let source = gpu_mod_source();
-    let svd_read_source = source_section(&source, "fn svd_read", "fn qr");
-
+    let helper_source = source_section(
+        &source,
+        "fn svd_read_with_driver",
+        "fn svd_values_read_with_driver",
+    );
     for needle in [
-        "self.to_contiguous(&view)?",
+        "session.to_contiguous(&view)?",
         "let input = Tensor::from_typed::<f64>(compact);",
-        "self.svd(&input)",
+        "linalg::svd(session, &input, driver)",
     ] {
         assert!(
-            svd_read_source.contains(needle),
+            helper_source.contains(needle),
             "CubeCL svd_read should canonicalize borrowed GPU views on the backend: missing {needle}"
+        );
+    }
+
+    let svd_read_source = source_section(&source, "fn svd_read(", "fn svd_with_options_read");
+    assert!(
+        svd_read_source.contains("svd_read_with_driver(self, input, SvdDriver::Auto)"),
+        "CubeCL svd_read should keep the default driver policy"
+    );
+    let with_options_source = source_section(&source, "fn svd_with_options_read", "fn qr");
+    for needle in [
+        "svd_read_with_driver(self, input, options.driver)",
+        "apply_svd_gauge(options.gauge, &mut outputs)?",
+    ] {
+        assert!(
+            with_options_source.contains(needle),
+            "CubeCL svd_with_options_read should forward the driver and apply the gauge: missing {needle}"
+        );
+    }
+
+    let values_read_source = source_section(&source, "fn svd_values_read(", "fn qr(");
+    for needle in [
+        "svd_values_read_with_driver(self, input, SvdDriver::Auto)",
+        "svd_values_read_with_driver(self, input, driver)",
+    ] {
+        assert!(
+            values_read_source.contains(needle),
+            "CubeCL values-only read hooks should share the driver-carrying helper: missing {needle}"
         );
     }
 }
@@ -582,8 +612,11 @@ fn gpu_svd_uses_jax_compatible_default_driver_selection() {
 
     for needle in [
         "const JAX_COMPATIBLE_GESVDJ_MAX_DIM: usize = 1024",
-        "enum SvdDriver",
-        "fn select_svd_driver",
+        "enum CusolverSvdRoutine",
+        "fn select_svd_driver(driver: SvdDriver, m: usize, n: usize) -> CusolverSvdRoutine",
+        "SvdDriver::Gesvdj => CusolverSvdRoutine::Gesvdj",
+        "SvdDriver::Gesvd => CusolverSvdRoutine::Gesvd",
+        "SvdDriver::Auto => {",
         "m <= JAX_COMPATIBLE_GESVDJ_MAX_DIM && n <= JAX_COMPATIBLE_GESVDJ_MAX_DIM",
     ] {
         assert!(
@@ -594,9 +627,9 @@ fn gpu_svd_uses_jax_compatible_default_driver_selection() {
 
     for (section, op_tag) in [(svd, "op"), (svd_values, "OP")] {
         for needle in [
-            "match select_svd_driver(m, n)".to_string(),
-            "SvdDriver::Gesvdj".to_string(),
-            "SvdDriver::Gesvd".to_string(),
+            "match select_svd_driver(driver, m, n)".to_string(),
+            "CusolverSvdRoutine::Gesvdj".to_string(),
+            "CusolverSvdRoutine::Gesvd".to_string(),
             "handles.cusolver().gesvdj(".to_string(),
             "handles.cusolver().gesvd(".to_string(),
             format!("check_solver_info({op_tag}, \"cusolverDn*gesvdj\""),

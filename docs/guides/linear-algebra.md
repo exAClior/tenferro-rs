@@ -263,6 +263,35 @@ assert_eq!(vt_rank2.concrete_shape()?, vec![2, 3]);
 ```
 <!-- end-snippet-source -->
 
+`SvdOptions::driver` selects the cuSOLVER routine on the CUDA backend.
+`SvdDriver::Auto` (the default) uses Jacobi `gesvdj` when both matrix
+dimensions are at most 1024 and QR-based `gesvd` otherwise, matching JAX.
+`SvdDriver::Gesvd` or `SvdDriver::Gesvdj` forces one routine regardless of
+size; which one is faster depends on the singular-value spectrum, so measure
+on your workload. The driver changes speed and rounding, not the decomposition
+contract. CPU providers ignore it.
+
+<!-- snippet-source: docs/tutorial-code/src/bin/math_snippets.rs#linear_algebra_svd_driver -->
+```rust
+use tenferro_linalg::{SvdDriver, SvdOptions, TracedTensorLinalgExt};
+use tenferro_runtime::TracedTensor;
+
+let a = TracedTensor::from_vec_col_major(
+    vec![3, 2],
+    vec![
+        3.0_f64, 1.0, 0.5,
+        -2.0, 0.25, 1.5,
+    ],
+)?;
+// Forces cuSOLVER `gesvd` on CUDA; CPU providers ignore the driver.
+let (u, s, vt) = a.svd_with_options(SvdOptions::default().driver(SvdDriver::Gesvd))?;
+
+assert_eq!(u.concrete_shape()?, vec![3, 2]);
+assert_eq!(s.concrete_shape()?, vec![2]);
+assert_eq!(vt.concrete_shape()?, vec![2, 2]);
+```
+<!-- end-snippet-source -->
+
 Use `slice_axis` for rank-preserving contiguous ranges and `take_axis` when the
 selected axis needs repeated or reordered indices:
 
