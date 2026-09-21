@@ -593,6 +593,13 @@ pub(crate) fn copy_tensor_read_into(
     }
 }
 
+/// Clone one owned host tensor into a fresh allocation.
+///
+/// The accepted inputs are: host placement and a preset scalar
+/// (`validate_cpu_host_placement` + `typed_host_data`). `tenferro-ad`'s eager
+/// leaf path states the same acceptance in `cpu_host_owned_read` so it can skip
+/// the session, and `host_leaf_materialization_matches_the_cpu_backend_acceptance`
+/// pins the two against each other. Change both together.
 fn clone_host_tensor_read(op: &'static str, tensor: &Tensor) -> crate::Result<Tensor> {
     macro_rules! clone_host {
         ($variant:ident, $tensor:expr) => {{

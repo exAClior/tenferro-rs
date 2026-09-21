@@ -608,7 +608,10 @@ fn provider_view_host_mapping_uses_derived_layout_and_releases_guard() {
 ///
 /// It forwards every request to the system allocator and counts only while
 /// `count_descriptor_allocations` has the thread-local flag raised, so the rest
-/// of this test binary is unaffected.
+/// of this test binary is unaffected. It is `cfg(test)`-only and matches the
+/// counting-allocator precedent in `tests/borrowed_view_allocation_tests.rs`;
+/// the witness has to live in this crate because `validate_descriptor` is
+/// crate-private. No production path takes an allocator of ours.
 struct DescriptorCountingAllocator;
 
 thread_local! {
