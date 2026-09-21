@@ -4,6 +4,7 @@ use std::any::Any;
 use std::fmt::Debug;
 use std::marker::PhantomData;
 use std::mem::{align_of, needs_drop, offset_of, size_of};
+use std::num::NonZeroUsize;
 use std::ops::Deref;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -14,7 +15,7 @@ use tenferro_tensor_core::{ShapeVec, StrideVec};
 use tenferro_tensor_core::{SliceSpec as CoreSliceSpec, ValidationError};
 
 use crate::storage::{
-    AllocationGroup, BackendAllocation, DescriptorSlot, GroupError, GroupReadView, GroupWriteView,
+    AllocationGroup, AllocationSlot, BackendAllocation, DescriptorSlot, GroupError, GroupReadView, GroupWriteView,
 };
 
 mod accessors;
@@ -1056,10 +1057,13 @@ pub struct TypedTensor<T, R: TensorRank = DynRank> {
 pub(crate) struct OwnedTensorGroup<R: TensorRank> {
     group: AllocationGroup,
     slot: DescriptorSlot,
-    allocation_index: usize,
+    allocation_index: AllocationSlot,
     // INVARIANT: this non-owning address points into the group root, whose host
-    // vector cannot resize while the owning tensor is borrowed.
-    host_ptr: Option<usize>,
+    // vector cannot resize while the owning tensor is borrowed. It is stored as
+    // `NonZeroUsize` rather than `NonNull<u8>`: the niche keeps the field at one
+    // word, and unlike `NonNull` it preserves the `Send`/`Sync` auto traits the
+    // typed tensor contract requires.
+    host_ptr: Option<NonZeroUsize>,
     host_byte_len: usize,
     _rank: PhantomData<R>,
 }
@@ -1192,7 +1196,7 @@ impl<R: TensorRank> OwnedTensorGroup<R> {
         };
         // SAFETY: the pointer and byte length were captured from the unique
         // root's full host allocation; the root cannot resize while borrowed.
-        Ok(unsafe { std::slice::from_raw_parts(pointer as *const T, element_count) })
+        Ok(unsafe { std::slice::from_raw_parts(pointer.get() as *const T, element_count) })
     }
 
     fn host_slice_mut<T: 'static>(&mut self) -> crate::Result<&mut [T]> {
@@ -1211,7 +1215,7 @@ impl<R: TensorRank> OwnedTensorGroup<R> {
         };
         // SAFETY: the pointer and byte length were captured from the unique
         // root; this method has the only mutable borrow of that root.
-        Ok(unsafe { std::slice::from_raw_parts_mut(pointer as *mut T, element_count) })
+        Ok(unsafe { std::slice::from_raw_parts_mut(pointer.get() as *mut T, element_count) })
     }
 
     fn backend_buffer<T: 'static>(&self) -> Option<&StorageBuffer<T>> {
@@ -1274,10 +1278,14 @@ impl<R: TensorRank> OwnedTensorGroup<R> {
 fn host_metadata<T: 'static>(
     group: &AllocationGroup,
     slot: DescriptorSlot,
-) -> (Option<usize>, usize) {
+) -> (Option<NonZeroUsize>, usize) {
     group
         .host_root_metadata::<T>(slot)
-        .map_or((None, 0), |(pointer, byte_len)| (Some(pointer), byte_len))
+        .map_or((None, 0), |(pointer, byte_len)| {
+            // INVARIANT: `host_root_metadata` reports the base address of the group's live
+            // host allocation, which is non-null for any slice, empty included.
+            (NonZeroUsize::new(pointer), byte_len)
+        })
 }
 
 fn group_error(op: &'static str, error: GroupError) -> crate::Error {
@@ -3786,9 +3794,11 @@ impl_tensor_scalar!(Complex32, f32, C32, C32);
 // The inline `Native` payload is the point of the representation: it keeps the erased
 // tensor at 1464 B with no per-tensor allocation, so the size gap against `External` is
 // deliberate rather than an accident.
+// No cast depends on the payload layout: the only pointer casts are
+// `TensorCore` <-> `TypedTensor`, and they cast the `TensorCore` field, not
+// `TensorPayload`. The default repr keeps the tag in a niche and is 8 B smaller.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug)]
-#[repr(C, u8)]
 enum TensorPayload {
     Native(TensorCore<DynRank>),
     External(tenferro_tensor_core::ErasedHostTensor, Placement),
@@ -4968,7 +4978,7 @@ pub(crate) fn tensor_view_from_group<'a, T: TensorScalar>(
 pub(crate) fn tensor_from_group(
     group: AllocationGroup,
     slot: DescriptorSlot,
-    allocation_index: usize,
+    allocation_index: AllocationSlot,
     dtype: DType,
     layout: TensorLayout<DynRank>,
     placement: Placement,
@@ -4976,7 +4986,7 @@ pub(crate) fn tensor_from_group(
     fn typed<T: TensorScalar>(
         group: AllocationGroup,
         slot: DescriptorSlot,
-        allocation_index: usize,
+        allocation_index: AllocationSlot,
         layout: TensorLayout<DynRank>,
         placement: Placement,
     ) -> TypedTensor<T> {
@@ -7584,7 +7594,7 @@ impl<T: TensorScalar, R: TensorRank> TypedTensor<T, R> {
             .core
             .group
             .group
-            .set_host_recycler(allocation_index, recycler)
+            .set_host_recycler(allocation_index.index(), recycler)
             .map_err(|error| crate::Error::runtime_state_source("pooled host tensor", error))?;
         Ok(tensor)
     }

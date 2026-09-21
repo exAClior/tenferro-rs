@@ -51,7 +51,7 @@ half = "2.7"
 num-complex = "0.4"
 num-traits = "0.2"
 thiserror = "2"
-smallvec = "1"
+smallvec = { version = "1", features = ["union"] }
 rayon = "1"
 criterion = "0.5"
 trybuild = "1"

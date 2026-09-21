@@ -1183,8 +1183,8 @@ impl AllocationGroup {
             .prepare_device_read_for_layout(layout)
     }
 
-    pub(crate) fn allocation_index(&self, slot: DescriptorSlot) -> Result<usize, GroupError> {
-        Ok(self.resolve_descriptor(slot)?.1.allocation.index())
+    pub(crate) fn allocation_index(&self, slot: DescriptorSlot) -> Result<AllocationSlot, GroupError> {
+        Ok(self.resolve_descriptor(slot)?.1.allocation)
     }
 
     pub(crate) fn set_host_recycler<T: TensorScalar>(
@@ -1204,10 +1204,10 @@ impl AllocationGroup {
 
     pub(crate) fn host_buffer_at<T: 'static>(
         &self,
-        allocation_index: usize,
+        allocation_index: AllocationSlot,
     ) -> Option<&crate::StorageBuffer<T>> {
         self.allocations
-            .get(allocation_index)?
+            .get(allocation_index.index())?
             .as_ref()?
             .host_buffer::<T>()
     }
@@ -1508,7 +1508,7 @@ impl AllocationGroup {
         Ok(tensor_from_group(
             extracted,
             DescriptorSlot(0),
-            0,
+            AllocationSlot(0),
             dtype,
             layout,
             placement,
@@ -1570,7 +1570,14 @@ impl AllocationGroup {
             Ok(value) => value,
             Err((group, error)) => return Err((group, error)),
         };
-        Ok(tensor_from_group(group, slot, 0, dtype, layout, placement))
+        Ok(tensor_from_group(
+            group,
+            slot,
+            AllocationSlot(0),
+            dtype,
+            layout,
+            placement,
+        ))
     }
 
     // INVARIANT: structural extraction must return the unchanged group on
