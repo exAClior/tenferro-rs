@@ -685,6 +685,29 @@ fn gpu_svd_uses_jax_compatible_default_driver_selection() {
     let svd_values = source_section(&source, "fn svd_values_typed", "fn qr_typed");
     let ffi = read_workspace_source("tenferro-linalg/src/gpu/ffi/cusolver.rs");
     let kernels = read_workspace_source("tenferro-linalg/src/gpu/kernels.rs");
+    let polar = read_workspace_source("tenferro-linalg/src/gpu/linalg/svd_polar.rs");
+    assert!(svd.contains("svd_polar::svd_polar_typed(backend, input, full, true, op)"));
+    assert!(svd_values.contains("svd_polar::svd_polar_typed(backend, input, false, false, OP)"));
+    for needle in [
+        "let jobz = if vectors {\n        CusolverEigMode::Vector\n    } else {\n        CusolverEigMode::NoVector\n    }",
+        "let econ = i32::from(!full)",
+        "handles.cusolver().gesvdp_buffer_size(",
+        "handles.cusolver().gesvdp(",
+        "host_ptr.byte_add(host_offset)",
+        "raw.synchronize()",
+    ] {
+        assert!(polar.contains(needle), "Xgesvdp contract missing {needle}");
+    }
+    for needle in [
+        "cusolverDnXgesvdp_bufferSize\\0",
+        "cusolverDnXgesvdp\\0",
+        "self.lib.vtable.xgesvdp)(",
+    ] {
+        assert!(
+            ffi.contains(needle),
+            "Xgesvdp FFI contract missing {needle}"
+        );
+    }
 
     for needle in [
         "const JAX_COMPATIBLE_GESVDJ_MAX_DIM: usize = 1024",
@@ -692,6 +715,7 @@ fn gpu_svd_uses_jax_compatible_default_driver_selection() {
         "fn select_svd_driver(driver: SvdDriver, m: usize, n: usize) -> CusolverSvdRoutine",
         "SvdDriver::Gesvdj => CusolverSvdRoutine::Gesvdj",
         "SvdDriver::Gesvd => CusolverSvdRoutine::Gesvd",
+        "SvdDriver::Xgesvdp => CusolverSvdRoutine::Xgesvdp",
         "SvdDriver::Auto => {",
         "m <= JAX_COMPATIBLE_GESVDJ_MAX_DIM && n <= JAX_COMPATIBLE_GESVDJ_MAX_DIM",
     ] {
