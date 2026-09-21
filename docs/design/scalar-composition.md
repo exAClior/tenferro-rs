@@ -509,10 +509,11 @@ for the in-tree surface instead of assuming it.
 
 The import forms are measured too. A plain type alias breaks `use Tensor::F64;`
 and variant glob imports, which #1785 predicted, so `Tensor` is a re-export
-(`pub use DefaultScalars as Tensor;`) instead: `Tensor::F64(value)`,
-`use Tensor::F64;`, and `use Tensor::*;` all compile, and
-`crates/tenferro-tensor-core/tests/scalar_set_import_forms.rs` keeps them
-compiling. The promotion lattice is still described rather than generated, and
+(`pub use DefaultScalars as Tensor;`). Downstream sets declared with
+`define_scalar_set!` still expose those variant forms; the default set's payload
+became opaque in #1810 (see below), so for it the supported forms are the
+constructor, the tag, and the typed accessors, which
+`crates/tenferro-tensor-core/tests/scalar_set_import_forms.rs` keeps compiling. The promotion lattice is still described rather than generated, and
 generating it needs a decision, because the preset rule is not a lattice
 property: `i32 + f32` promotes to `f64`, a deliberate widening rather than a
 structural join.
@@ -1454,12 +1455,16 @@ variant reference in the XLA lowering.
 
 **Still open, and not claimed as decided here.**
 
-**Not part of this removal, and now tracked by #1810.** `tenferro_tensor_core::Tensor` (the host-only
-core model, `pub use DefaultScalars as Tensor`, whose variants hold `HostTensor<T>`) is a different
-type in a different crate: it has no external consumers, but it keeps 28 per-variant arms in
-`impl DefaultScalars`, three `Tensor::$variant` sites in `impl_scalar!` and a seven-arm
-`ScalarSet::tag`. Erasing it is a public-contract change in `tenferro-tensor-core` with its own
-semver impact, so it is recorded in #1810 rather than folded into this branch.
+**Resolved by #1810.** `tenferro_tensor_core::Tensor` (the host-only core model,
+`pub use DefaultScalars as Tensor`) keeps its name but its payload became opaque: `DefaultScalars`
+is now a struct over a private inline enum, so the preset variants are no longer public API and
+construction/reads go through `from_vec_col_major`, the tag, and `as_slice` / `as_mut_slice` /
+`into_vec_col_major`. The value stays 104 B, construction stays allocation-free, and `Clone` still
+deep-copies, because the private payload keeps the inline representation the measured decision above
+chose; the erased alternative (`ErasedHostTensor`, 216 B plus one `Arc` allocation per value) was
+rejected on that measurement. The private per-variant matches remain, which is what an inline
+heterogeneous payload costs. See
+`docs/worklogs/issue-1810-opaque-core-tensor.md`.
 
 - `Tensor` also holds `DType::External(ErasedHostTensor)`, so one payload has to carry both the
   preset core and the external shape. The planned shape is a private two-branch payload
