@@ -36,8 +36,16 @@ Classification vocabulary follows
 | #1660 CPU linalg backend strategy | Design Gate | Long-term strategy. |
 | #1695 IR-agnostic AD transform framework | Design Gate | Long-term design. |
 | #1765 CPU FFT lane parallelization | Verify First | #1786 landed part of the surrounding work; the parallel-lane claim still needs measurement. |
+| #1858 concrete session surface, eager FFT in-place errors, session docs | Design Gate | Filed by the maintainer on 2026-09-21 after this ledger's issue snapshot; it extends #1680 Phase 1 to the remaining operation families and to the two eager in-place FFT methods, so it is public-API convention work across `tenferro-runtime`, `tenferro-ad`, and `tenferro-fft`. |
 | #1785, #1787, #1788, #1789, #1790, #1793 scalar composition program | Design Gate | Active program; stage 1 and 2.1 landed in #1800. |
 | #1803 residual eager backward / batched solve overhead | Verify First | Active measurement work on M5; unrelated to the leaf path this batch changes. |
 | #1848 BLAS/LAPACK symbol resolver | Design Gate | Open design questions in the issue. |
 | #1849 `SvdDriver::Xgesvdp` | Verify First | PR #1851 is open. |
 | #1852 `syevjBatched` guard | Verify First | Needs a CUDA measurement before changing the heuristic. |
+
+## Post-batch status (2026-09-21, after the merge)
+
+- #1628 closed: its concrete rows are tracked by narrower issues (#1662, #1663, #1668, #1669, #1671, #1672, #1786, #1765, #1803).
+- #1765 closed as implemented, with a measurement attached to the issue: the lane loop now runs `(0..jobs).into_par_iter()` inside `session.with_linalg_pool` using `context.native_thread_count()`, and 128^3 3-D c2c scales 43.23 ms (1 worker) to 9.79 ms (8 workers, 4.41x) on this host.
+- #1271 narrowed to a phase checklist on the issue: Phase 1 partially landed (marker convention plus categorized baselines), Phase 2 not landed, Phase 3 partial (`api_parity.rs`, `storage_public_api.rs`), Phase 4 not landed (`Cargo.toml` has no `[workspace.lints]`).
+- #1810 is open pending the maintainer's representation decision; the measured options (104 B enum today vs ~240 B inline erasure vs 32 B boxed erasure vs 24 B tag-only) and their consumers are recorded on the issue, with a recommendation to close it as wontfix unless the scalar-composition program wants an in-core host value type.
