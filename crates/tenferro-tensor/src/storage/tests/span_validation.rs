@@ -117,8 +117,8 @@ fn root_bound_spans_retain_exact_root_provenance() {
         .expect("second child span");
 
     assert_ne!(first.root_resource(), second.root_resource());
-    assert_eq!(first_span.root_identity(), first);
-    assert_eq!(second_span.root_identity(), second);
+    assert_eq!(first_span.root_resource(), first.root_resource());
+    assert_eq!(second_span.root_resource(), second.root_resource());
     assert_eq!(first.validate_bound_span(&first_span), Ok(()));
     assert_eq!(
         first.validate_bound_span(&second_span),

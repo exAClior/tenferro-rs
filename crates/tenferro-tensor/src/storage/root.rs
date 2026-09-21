@@ -1037,8 +1037,8 @@ impl OwnedStorage {
         self.pin
     }
 
-    pub(crate) const fn root_identity(&self) -> RootResourceIdentity {
-        self.claim.span.root_identity()
+    pub(crate) fn root_identity(&self) -> RootResourceIdentity {
+        RootResourceIdentity::from_parts(self.claim.span.root_resource(), self.pin.root_extent())
     }
 
     pub(crate) fn provider_kind(&self) -> ProviderKind {
@@ -1104,8 +1104,11 @@ impl OwnedStorage {
 }
 
 impl<'a> StorageRef<'a> {
-    pub(crate) const fn root_identity(&self) -> RootResourceIdentity {
-        self.owner.claim.span.root_identity()
+    pub(crate) fn root_identity(&self) -> RootResourceIdentity {
+        RootResourceIdentity::from_parts(
+            self.owner.claim.span.root_resource(),
+            self.owner.pin.root_extent(),
+        )
     }
 
     pub(crate) const fn span(&self) -> RootBoundSpan {
@@ -1120,7 +1123,7 @@ impl<'a> StorageRef<'a> {
         &self,
         request: DeviceAccessRequest<'_>,
     ) -> Result<Box<dyn PreparedDeviceAccess>, DeviceAccessError> {
-        validate_device_request(self.owner.claim.span.root_identity(), request)?;
+        validate_device_request(self.root_identity(), request)?;
         self.owner.pin.prepare_device_access(request)
     }
 
@@ -1157,8 +1160,11 @@ impl<'a> StorageRef<'a> {
 }
 
 impl<'a> StorageMut<'a> {
-    pub(crate) const fn root_identity(&self) -> RootResourceIdentity {
-        self.owner.claim.span.root_identity()
+    pub(crate) fn root_identity(&self) -> RootResourceIdentity {
+        RootResourceIdentity::from_parts(
+            self.owner.claim.span.root_resource(),
+            self.owner.pin.root_extent(),
+        )
     }
 
     pub(crate) const fn span(&self) -> RootBoundSpan {
@@ -1190,7 +1196,7 @@ impl<'a> StorageMut<'a> {
         &self,
         request: DeviceAccessRequest<'_>,
     ) -> Result<Box<dyn PreparedDeviceAccess>, DeviceAccessError> {
-        validate_device_request(self.owner.claim.span.root_identity(), request)?;
+        validate_device_request(self.root_identity(), request)?;
         self.owner.pin.prepare_device_access(request)
     }
 
