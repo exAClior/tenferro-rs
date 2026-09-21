@@ -221,13 +221,14 @@ fn two_sets_containing_the_same_scalar_share_one_numerical_instantiation() {
     use tenferro_df64_proof::ExtendedSet;
     use tenferro_tensor_core::{DefaultScalars, HostTensor};
 
-    // Extract the same f64 scalar from two different sets.
-    let from_default = match DefaultScalars::F64(
-        HostTensor::from_vec_col_major(vec![2], vec![1.0_f64, 2.0]).unwrap(),
-    ) {
-        DefaultScalars::F64(tensor) => tensor,
-        _ => unreachable!(),
-    };
+    // Extract the same f64 scalar from two different sets. The default set's
+    // payload is opaque, so it is read back through the typed accessor.
+    let (shape, data) = DefaultScalars::from_vec_col_major(vec![2], vec![1.0_f64, 2.0])
+        .unwrap()
+        .into_vec_col_major::<f64>()
+        .unwrap();
+    let from_default = HostTensor::from_vec_col_major(shape, data).unwrap();
+
     let from_extended = match ExtendedSet::F64(
         HostTensor::from_vec_col_major(vec![2], vec![10.0_f64, 20.0]).unwrap(),
     ) {
