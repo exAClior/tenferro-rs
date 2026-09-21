@@ -308,6 +308,31 @@ fn svd_driver_is_part_of_op_identity_and_survives_pruning() {
     let auto = make(SvdDriver::Auto);
     let gesvd = make(SvdDriver::Gesvd);
     let gesvdj = make(SvdDriver::Gesvdj);
+    let xgesvdp = make(SvdDriver::Xgesvdp);
+    for other in [&auto, &gesvd, &gesvdj] {
+        assert!(!xgesvdp.payload_eq(other));
+        assert_ne!(payload_hash(&xgesvdp), payload_hash(other));
+    }
+    let polar_values = xgesvdp.prune_outputs(&[false, true, false]).unwrap();
+    let polar_values = polar_values
+        .as_any()
+        .downcast_ref::<LinalgExtensionOp>()
+        .unwrap();
+    assert_eq!(
+        polar_values.op(),
+        LinalgOp::SvdVals {
+            derivative_eps: 1.0e-12,
+            driver: SvdDriver::Xgesvdp,
+        }
+    );
+    for driver in [SvdDriver::Auto, SvdDriver::Gesvd, SvdDriver::Gesvdj] {
+        let other = LinalgExtensionOp::new(LinalgOp::SvdVals {
+            derivative_eps: 1.0e-12,
+            driver,
+        });
+        assert!(!polar_values.payload_eq(&other));
+        assert_ne!(payload_hash(polar_values), payload_hash(&other));
+    }
 
     // Drivers are part of the traced op identity: a forced-driver SVD must not
     // be deduplicated against the default policy op.

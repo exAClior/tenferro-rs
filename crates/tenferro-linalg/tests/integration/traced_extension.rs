@@ -170,6 +170,12 @@ fn traced_decomposition_options_execute_through_registered_runtime() {
 
 #[test]
 fn cpu_ignores_explicit_svd_driver_on_concrete_and_traced_paths() {
+    for driver in [SvdDriver::Gesvd, SvdDriver::Gesvdj, SvdDriver::Xgesvdp] {
+        check_cpu_ignores_svd_driver(driver);
+    }
+}
+
+fn check_cpu_ignores_svd_driver(driver: SvdDriver) {
     // `SvdDriver` selects a cuSOLVER routine; CPU providers have one SVD
     // kernel, so a forced driver must execute and match the default policy
     // bit-for-bit on the same host.
@@ -181,12 +187,10 @@ fn cpu_ignores_explicit_svd_driver_on_concrete_and_traced_paths() {
         support::with_cpu_linalg(&mut backend, |backend| {
             let default_outputs = backend.svd_with_options(&a, SvdOptions::default()).unwrap();
             let forced_outputs = backend
-                .svd_with_options(&a, SvdOptions::default().driver(SvdDriver::Gesvd))
+                .svd_with_options(&a, SvdOptions::default().driver(driver))
                 .unwrap();
             let default_values = backend.svd_values(&a).unwrap();
-            let forced_values = backend
-                .svd_values_with_driver(&a, SvdDriver::Gesvdj)
-                .unwrap();
+            let forced_values = backend.svd_values_with_driver(&a, driver).unwrap();
             (
                 default_outputs,
                 forced_outputs,
@@ -219,12 +223,12 @@ fn cpu_ignores_explicit_svd_driver_on_concrete_and_traced_paths() {
     )
     .unwrap();
     let (u, s, vt) = traced
-        .svd_with_options(SvdOptions::default().driver(SvdDriver::Gesvd))
+        .svd_with_options(SvdOptions::default().driver(driver))
         .unwrap();
     // Only `S` is live here, so the op prunes to a values-only op that keeps
     // the forced driver; the CPU runtime must still execute it.
     let (_, s_only, _) = traced
-        .svd_with_options(SvdOptions::default().driver(SvdDriver::Gesvdj))
+        .svd_with_options(SvdOptions::default().driver(driver).derivative_eps(2.0e-12))
         .unwrap();
 
     let mut compiler = GraphCompiler::new();
