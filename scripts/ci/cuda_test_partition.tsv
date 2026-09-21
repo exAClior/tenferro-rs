@@ -944,6 +944,8 @@ host	tenferro-linalg	cpu::tests::single_entry::triangular_solve_read_two_noncomp
 host	tenferro-linalg	error::tests::provider_status_keeps_typed_backend_source
 host	tenferro-linalg	extension::cuda_tests::session_support_admits_cuda_full_svd_and_still_rejects_the_missing_kernels
 host	tenferro-linalg	gpu::ffi::tests::cusolver_cuda_data_type_has_c_abi_integer_layout
+host	tenferro-linalg	gpu::linalg::tests::auto_driver_keeps_jax_compatible_threshold
+host	tenferro-linalg	gpu::linalg::tests::explicit_driver_overrides_dimension_policy
 host	tenferro-linalg	traced::tests::p_norm_rejects_zero_and_non_finite_orders
 host	tenferro-linalg::integration	backend_errors::cholesky_rejects_rank_less_than_two_even_when_zero_dim
 host	tenferro-linalg::integration	backend_errors::cpu_linalg_rejects_backend_buffers_without_panicking_or_downloading
@@ -1059,7 +1061,10 @@ gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_lu_f32_handles_rectangu
 gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_lu_f32_reconstructs_pa_equals_lu
 gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_qr_f32_reconstructs_input
 gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_solve_f64_matches_cpu
+gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_svd_auto_driver_matches_default_svd
 gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_svd_c32_reconstructs_input
+gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_svd_forced_gesvd_below_threshold_reconstructs
+gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_svd_forced_gesvdj_above_threshold_reconstructs
 gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_svd_gesvd_tall_f64_retains_direct_route
 gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_svd_gesvd_wide_c64_preserves_adjoint_mapping
 gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_svd_gesvd_wide_f64_reconstructs_and_matches_values
@@ -1155,6 +1160,7 @@ host	tenferro-linalg::integration	traced_correctness::traced_spectral_norm_prese
 host	tenferro-linalg::integration	traced_correctness::traced_tensor_linalg_ext_exposes_svd
 host	tenferro-linalg::integration	traced_extension::complex_svd_runtime_singular_values_match_traced_real_dtype
 host	tenferro-linalg::integration	traced_extension::concrete_decomposition_options_execute_through_backend_defaults
+host	tenferro-linalg::integration	traced_extension::cpu_ignores_explicit_svd_driver_on_concrete_and_traced_paths
 host	tenferro-linalg::integration	traced_extension::full_piv_lu_multi_output_slots_are_preserved
 host	tenferro-linalg::integration	traced_extension::missing_runtime_reports_linalg_family
 host	tenferro-linalg::integration	traced_extension::rank_revealing_qr_traced_fixed_outputs_execute
