@@ -15,7 +15,8 @@ use tenferro_tensor_core::{ShapeVec, StrideVec};
 use tenferro_tensor_core::{SliceSpec as CoreSliceSpec, ValidationError};
 
 use crate::storage::{
-    AllocationGroup, AllocationSlot, BackendAllocation, DescriptorSlot, GroupError, GroupReadView, GroupWriteView,
+    AllocationGroup, AllocationSlot, BackendAllocation, DescriptorSlot, GroupError, GroupReadView,
+    GroupWriteView,
 };
 
 mod accessors;
@@ -3792,8 +3793,10 @@ impl_tensor_scalar!(Complex32, f32, C32, C32);
 /// payload beside the placement it lives in, and is recovered by its own element type
 /// without reinterpreting any bytes.
 // The inline `Native` payload is the point of the representation: it keeps the erased
-// tensor at 1464 B with no per-tensor allocation, so the size gap against `External` is
-// deliberate rather than an accident.
+// tensor at 776 B with no per-tensor allocation, so the size gap against `External` is
+// deliberate rather than an accident. #1823 sliced the metadata duplication that made it
+// 1464 B; `erased_tensor_size_stays_within_the_documented_bound` in `types/tests.rs`
+// holds the current bound.
 // No cast depends on the payload layout: the only pointer casts are
 // `TensorCore` <-> `TypedTensor`, and they cast the `TensorCore` field, not
 // `TensorPayload`. The default repr keeps the tag in a niche and is 8 B smaller.
