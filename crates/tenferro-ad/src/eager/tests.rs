@@ -1,3 +1,4 @@
+mod leaf_session;
 mod multi_input;
 mod residuals;
 
@@ -197,14 +198,17 @@ fn eager_materialization_uses_backend() {
     )
     .unwrap();
 
+    // A host leaf no longer enters the backend at all (#1704), so the compact
+    // host duplication below is the first reader that needs no kernel either.
+    assert_eq!(materializations.load(Ordering::Relaxed), 0);
     let compact = x.to_tensor().unwrap();
     assert_eq!(compact.as_slice::<f64>().unwrap(), &[1.0, 2.0, 3.0, 4.0]);
-    assert_eq!(materializations.load(Ordering::Relaxed), 1);
+    assert_eq!(materializations.load(Ordering::Relaxed), 0);
 
     let view = x.transpose(&[1, 0]).unwrap();
     let compact = view.to_tensor().unwrap();
     assert_eq!(compact.as_slice::<f64>().unwrap(), &[1.0, 3.0, 2.0, 4.0]);
-    assert_eq!(materializations.load(Ordering::Relaxed), 2);
+    assert_eq!(materializations.load(Ordering::Relaxed), 1);
 }
 
 #[test]
