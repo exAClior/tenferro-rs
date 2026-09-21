@@ -177,16 +177,22 @@ fn cpu_ignores_explicit_svd_driver_on_concrete_and_traced_paths() {
     let a = Tensor::from_vec_col_major(vec![3, 2], data.clone()).unwrap();
     let mut backend = CpuBackend::new();
 
-    let (default_outputs, forced_outputs, forced_values) =
+    let (default_outputs, forced_outputs, default_values, forced_values) =
         support::with_cpu_linalg(&mut backend, |backend| {
             let default_outputs = backend.svd_with_options(&a, SvdOptions::default()).unwrap();
             let forced_outputs = backend
                 .svd_with_options(&a, SvdOptions::default().driver(SvdDriver::Gesvd))
                 .unwrap();
+            let default_values = backend.svd_values(&a).unwrap();
             let forced_values = backend
                 .svd_values_with_driver(&a, SvdDriver::Gesvdj)
                 .unwrap();
-            (default_outputs, forced_outputs, forced_values)
+            (
+                default_outputs,
+                forced_outputs,
+                default_values,
+                forced_values,
+            )
         });
     for (default, forced) in default_outputs.iter().zip(&forced_outputs) {
         assert_eq!(
@@ -194,9 +200,18 @@ fn cpu_ignores_explicit_svd_driver_on_concrete_and_traced_paths() {
             forced.as_slice::<f64>().unwrap()
         );
     }
+    // Ignoring the driver is a per-entry-point property, so the bit-for-bit
+    // comparison stays within one entry point. The LAPACK provider reaches
+    // `gesdd` with `jobz = b'S'` for the vectors path and `jobz = b'N'` for
+    // the values-only path; those are different routines and their singular
+    // values differ in the last ULPs, so the cross-path check is a tolerance.
     assert_eq!(
         forced_values.as_slice::<f64>().unwrap(),
-        default_outputs[1].as_slice::<f64>().unwrap()
+        default_values.as_slice::<f64>().unwrap()
+    );
+    assert_singular_values_close(
+        forced_values.as_slice::<f64>().unwrap(),
+        default_outputs[1].as_slice::<f64>().unwrap(),
     );
 
     let traced = TracedTensor::from_tensor_concrete_shape(
@@ -221,10 +236,36 @@ fn cpu_ignores_explicit_svd_driver_on_concrete_and_traced_paths() {
             default.as_slice::<f64>().unwrap()
         );
     }
+    // The pruned values-only op runs the same backend values path as
+    // `svd_values`, so it matches that bit-for-bit; see the note above for why
+    // the full-SVD `S` is only compared within tolerance.
     assert_eq!(
         outputs[3].as_slice::<f64>().unwrap(),
-        default_outputs[1].as_slice::<f64>().unwrap()
+        default_values.as_slice::<f64>().unwrap()
     );
+    assert_singular_values_close(
+        outputs[3].as_slice::<f64>().unwrap(),
+        default_outputs[1].as_slice::<f64>().unwrap(),
+    );
+}
+
+/// Assert two singular-value spectra agree to rounding.
+///
+/// Values-only and vectors LAPACK drivers are distinct routines, so their
+/// results are equal only up to the last ULPs.
+fn assert_singular_values_close(left: &[f64], right: &[f64]) {
+    assert_eq!(left.len(), right.len());
+    let scale = right
+        .iter()
+        .fold(0.0_f64, |acc, value| acc.max(value.abs()))
+        .max(1.0);
+    let tolerance = 1.0e-12 * scale;
+    for (left, right) in left.iter().zip(right) {
+        assert!(
+            (left - right).abs() <= tolerance,
+            "singular values differ beyond rounding: {left} vs {right} (tolerance {tolerance})"
+        );
+    }
 }
 
 #[test]
