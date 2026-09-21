@@ -1075,7 +1075,6 @@ gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_svd_gesvd_tall_f64_reta
 gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_svd_gesvd_wide_c64_preserves_adjoint_mapping
 gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_svd_gesvd_wide_f64_reconstructs_and_matches_values
 gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_svd_values_f64_matches_cpu
-gpu	tenferro-linalg::integration	gpu_linalg::xgesvdp::test_cubecl_svd_xgesvdp_eager
 gpu	tenferro-linalg::integration	gpu_linalg::xgesvdp::test_cubecl_svd_xgesvdp_large_spectrum_agrees_with_gesvd
 gpu	tenferro-linalg::integration	gpu_linalg::xgesvdp::test_cubecl_svd_xgesvdp_rectangular_batched_and_values
 gpu	tenferro-linalg::integration	gpu_linalg::xgesvdp::test_cubecl_svd_xgesvdp_traced_and_pruned
