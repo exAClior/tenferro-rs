@@ -62,6 +62,21 @@ impl RootResourceId {
     pub(crate) const fn get(self) -> NonZeroU64 {
         self.0
     }
+
+    /// Verify that a span was bound to this root resource.
+    pub(crate) fn validate_bound_span(
+        self,
+        span: &RootBoundSpan,
+    ) -> Result<(), SpanValidationError> {
+        let actual = span.root_resource();
+        if actual != self {
+            return Err(SpanValidationError::DifferentRoot {
+                expected: self,
+                actual,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Root provenance paired with its exact checked extent.
@@ -119,13 +134,6 @@ impl RootResourceIdentity {
         self,
         span: &RootBoundSpan,
     ) -> Result<(), SpanValidationError> {
-        let actual = span.root_resource();
-        if actual != self.root_resource {
-            return Err(SpanValidationError::DifferentRoot {
-                expected: self.root_resource,
-                actual,
-            });
-        }
-        Ok(())
+        self.root_resource.validate_bound_span(span)
     }
 }

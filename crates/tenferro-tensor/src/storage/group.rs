@@ -12,6 +12,7 @@ use super::prepared::{
     CheckedRead, CheckedWrite, PreparedRead, PreparedWrite, ProviderReadMapping,
     ProviderWriteMapping, WriteInjectivityProof,
 };
+use super::identity::RootResourceId;
 use super::root::{BackendAllocation, OwnedStorage, ProviderKind};
 use super::span::{ByteRange, RootBoundSpan};
 
@@ -110,14 +111,13 @@ impl<R: TensorRank> DescriptorInput<R> {
 }
 
 /// One validated, non-owning logical descriptor.
+///
+/// The checked descriptor owns every descriptor fact: span, logical layout,
+/// dtype, and element size are served from it rather than repeated here
+/// (#1823 B). Root provenance comes from the span's root resource id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct DescriptorRecord {
     allocation: AllocationSlot,
-    root: super::identity::RootResourceIdentity,
-    span: RootBoundSpan,
-    layout: TensorLayout<DynRank>,
-    dtype: DType,
-    element_size: usize,
     element_count: usize,
     provider: ProviderKind,
     placement: Placement,
@@ -132,15 +132,15 @@ impl DescriptorRecord {
     }
 
     pub(crate) const fn span(&self) -> RootBoundSpan {
-        self.span
+        self.checked.span()
     }
 
     pub(crate) const fn dtype(&self) -> DType {
-        self.dtype
+        self.checked.dtype()
     }
 
     pub(crate) const fn element_size(&self) -> usize {
-        self.element_size
+        self.checked.element_size()
     }
 
     pub(crate) const fn element_count(&self) -> usize {
@@ -148,7 +148,7 @@ impl DescriptorRecord {
     }
 
     pub(crate) fn layout(&self) -> &TensorLayout<DynRank> {
-        &self.layout
+        self.checked.logical_layout()
     }
 
     pub(crate) const fn provider(&self) -> ProviderKind {
@@ -345,7 +345,7 @@ impl<'a, T: TensorScalar, R: TensorRank> GroupReadView<'a, T, R> {
             self.owner
                 .as_ref()
                 .as_ref()
-                .map_read(self.descriptor.span, self.descriptor.dtype)
+                .map_read(self.descriptor.span(), self.descriptor.dtype())
         }
     }
 
@@ -381,7 +381,7 @@ impl<'a, T: TensorScalar, R: TensorRank> GroupReadView<'a, T, R> {
         let checked: CheckedRead<'a, R> = CheckedRead::new::<T>(
             // SAFETY: `owner` is bounded by the group's shared borrow.
             owner,
-            self.descriptor.span,
+            self.descriptor.span(),
             R::shape_from_vec(layout.shape().iter().copied().collect()).map_err(|error| {
                 AccessError::InvalidLayout {
                     message: error.to_string(),
@@ -415,7 +415,7 @@ impl<'a, T: TensorScalar, R: TensorRank> GroupReadView<'a, T, R> {
             self.owner
                 .as_ref()
                 .as_ref()
-                .host_slice(self.descriptor.span, self.descriptor.dtype)
+                .host_slice(self.descriptor.span(), self.descriptor.dtype())
         }
     }
 }
@@ -466,7 +466,7 @@ impl<'a, T: TensorScalar, R: TensorRank> GroupWriteView<'a, T, R> {
             self.owner
                 .as_mut()
                 .as_mut()
-                .map_write(self.descriptor.span, self.descriptor.dtype)
+                .map_write(self.descriptor.span(), self.descriptor.dtype())
         }
     }
 
@@ -491,7 +491,7 @@ impl<'a, T: TensorScalar, R: TensorRank> GroupWriteView<'a, T, R> {
         let checked: CheckedWrite<'a, R> = CheckedWrite::new::<T>(
             // SAFETY: this child carries the group's exclusive borrow.
             owner,
-            self.descriptor.span,
+            self.descriptor.span(),
             R::shape_from_vec(layout.shape().iter().copied().collect()).map_err(|error| {
                 AccessError::InvalidLayout {
                     message: error.to_string(),
@@ -528,7 +528,7 @@ impl<'a, T: TensorScalar, R: TensorRank> GroupWriteView<'a, T, R> {
             self.owner
                 .as_mut()
                 .as_mut()
-                .host_slice_mut(self.descriptor.span, self.descriptor.dtype)
+                .host_slice_mut(self.descriptor.span(), self.descriptor.dtype())
         }
     }
 }
@@ -934,7 +934,7 @@ impl AllocationGroup {
         };
         let envelope = reachable_envelope(&span, &layout, element_size)?;
         let (checked, _) = validate_descriptor::<T, DynRank>(
-            &root,
+            root.root_resource(),
             span,
             layout.shape().iter().copied().collect(),
             layout.strides().iter().copied().collect(),
@@ -946,11 +946,6 @@ impl AllocationGroup {
         })?;
         let record = DescriptorRecord {
             allocation,
-            root,
-            span,
-            layout,
-            dtype: T::dtype(),
-            element_size,
             element_count,
             provider: owner.as_ref().provider_kind(),
             placement: Placement::default(),
@@ -978,7 +973,7 @@ impl AllocationGroup {
         offset: isize,
     ) -> Result<Self, (Self, GroupError)> {
         let dtype = match self.resolve_descriptor(slot) {
-            Ok((_, descriptor)) => descriptor.dtype,
+            Ok((_, descriptor)) => descriptor.dtype(),
             Err(error) => return Err((self, error)),
         };
         if let Some(Some(descriptor)) = self.descriptors.get_mut(slot.index()) {
@@ -1025,11 +1020,11 @@ impl AllocationGroup {
             Ok((index, descriptor)) => (index, descriptor.clone()),
             Err(error) => return Err((self, error)),
         };
-        if descriptor.dtype != T::dtype() {
+        if descriptor.dtype() != T::dtype() {
             return Err((
                 self,
                 GroupError::DTypeMismatch {
-                    expected: descriptor.dtype,
+                    expected: descriptor.dtype(),
                     actual: T::dtype(),
                 },
             ));
@@ -1050,8 +1045,18 @@ impl AllocationGroup {
             ));
         }
 
-        let root = descriptor.root;
-        let span = descriptor.span;
+        let root = match self.allocation_root_resource(allocation) {
+            Some(root) => root,
+            None => {
+                return Err((
+                    self,
+                    GroupError::AllocationSlotOutOfBounds {
+                        slot: allocation.index(),
+                    },
+                ))
+            }
+        };
+        let span = descriptor.span();
         let target_element_size = std::mem::size_of::<U>();
         if target_element_size == 0 || !span.byte_len().is_multiple_of(target_element_size) {
             return Err((
@@ -1087,7 +1092,7 @@ impl AllocationGroup {
             Err(error) => return Err((self, error)),
         };
         let (checked, _) = match validate_descriptor::<U, DynRank>(
-            &root,
+            root,
             span,
             layout.shape().iter().copied().collect(),
             layout.strides().iter().copied().collect(),
@@ -1110,11 +1115,6 @@ impl AllocationGroup {
         };
         self.descriptors[descriptor_index] = Some(DescriptorRecord {
             allocation,
-            root,
-            span,
-            layout,
-            dtype: U::dtype(),
-            element_size: target_element_size,
             element_count,
             provider: descriptor.provider,
             placement: descriptor.placement.clone(),
@@ -1221,7 +1221,7 @@ impl AllocationGroup {
             .allocations
             .get(descriptor.allocation.index())?
             .as_ref()?;
-        if descriptor.span != owner.root_span() {
+        if descriptor.span() != owner.root_span() {
             return None;
         }
         let crate::StorageBuffer::Host(data) = owner.host_buffer::<T>()? else {
@@ -1246,7 +1246,19 @@ impl AllocationGroup {
     pub(crate) fn descriptor_dtype(&self, slot: DescriptorSlot) -> Option<DType> {
         self.resolve_descriptor(slot)
             .ok()
-            .map(|(_, descriptor)| descriptor.dtype)
+            .map(|(_, descriptor)| descriptor.dtype())
+    }
+
+    /// The root-resource id of the allocation owner.
+    ///
+    /// Descriptor validation compares this against the span it is about to
+    /// accept, so it must come from the allocation's own root span rather than
+    /// from the descriptor being validated.
+    fn allocation_root_resource(&self, allocation: AllocationSlot) -> Option<RootResourceId> {
+        self.allocations
+            .get(allocation.index())?
+            .as_ref()
+            .map(|owner| owner.root_span().root_resource())
     }
 
     pub(crate) fn descriptor_len(&self, slot: DescriptorSlot) -> Option<usize> {
@@ -1348,7 +1360,7 @@ impl AllocationGroup {
         check_typed::<T, R>(&descriptor)?;
         if !descriptor.write_injective {
             descriptor
-                .layout
+                .layout()
                 .validate_mutable_no_overlap()
                 .map_err(|error| GroupError::InvalidDescriptor {
                     message: error.to_string(),
@@ -1391,7 +1403,7 @@ impl AllocationGroup {
             check_typed::<T, R>(descriptor)?;
             if !descriptor.write_injective {
                 descriptor
-                    .layout
+                    .layout()
                     .validate_mutable_no_overlap()
                     .map_err(|_| DisjointViewError::NonInjective { slot: slot.index() })?;
             }
@@ -1402,7 +1414,7 @@ impl AllocationGroup {
             for right in (left + 1)..selected.len() {
                 let first = &selected[left].2;
                 let second = &selected[right].2;
-                if first.root.root_resource() != second.root.root_resource() {
+                if first.span().root_resource() != second.span().root_resource() {
                     continue;
                 }
                 match (first.envelope, second.envelope) {
@@ -1492,8 +1504,8 @@ impl AllocationGroup {
     pub fn take_tensor(&mut self, slot: DescriptorSlot) -> Result<crate::Tensor, GroupError> {
         let (_, descriptor) = self.resolve_descriptor(slot)?;
         let descriptor = descriptor.clone();
-        let dtype = descriptor.dtype;
-        let layout = descriptor.layout.clone();
+        let dtype = descriptor.dtype();
+        let layout = descriptor.layout().clone();
         let placement = descriptor.placement.clone();
         let owner = self
             .try_extract(slot)
@@ -1563,8 +1575,8 @@ impl AllocationGroup {
                 },
             ));
         }
-        let dtype = descriptor.dtype;
-        let layout = descriptor.layout.clone();
+        let dtype = descriptor.dtype();
+        let layout = descriptor.layout().clone();
         let placement = descriptor.placement.clone();
         let (group, slot) = match self.into_single_descriptor(slot) {
             Ok(value) => value,
@@ -1668,14 +1680,14 @@ impl AllocationGroup {
 fn check_typed<T: TensorScalar, R: TensorRank>(
     descriptor: &DescriptorRecord,
 ) -> Result<(), GroupError> {
-    if descriptor.dtype != T::dtype() {
+    if descriptor.dtype() != T::dtype() {
         return Err(GroupError::DTypeMismatch {
-            expected: descriptor.dtype,
+            expected: descriptor.dtype(),
             actual: T::dtype(),
         });
     }
     if let Some(expected) = R::RANK {
-        let actual = descriptor.layout.shape().len();
+        let actual = descriptor.layout().shape().len();
         if expected != actual {
             return Err(GroupError::RankMismatch { expected, actual });
         }
