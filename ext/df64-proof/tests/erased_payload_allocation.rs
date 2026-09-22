@@ -77,12 +77,14 @@ fn report_erased_payload_allocation_cost() {
     println!("inline variant payload: {inline_allocs} allocations / {inline_bytes} bytes");
     println!("boxed single payload: {boxed_allocs} allocations / {boxed_bytes} bytes");
     // The exact byte count depends on the feature-unified descriptor layout, so the pinned
-    // property is the one that matters: the single payload adds only the discriminant to
-    // the typed core rather than a pointer and a heap allocation.
-    assert_eq!(
-        std::mem::size_of::<Tensor>(),
-        std::mem::size_of::<tenferro_tensor::TypedTensor<f64>>() + 8,
-        "the single payload adds only the discriminant to the typed core"
+    // property is the one that matters: the single payload adds at most the discriminant to
+    // the typed core rather than a pointer and a heap allocation. Since #1823 the payload tag
+    // lives in a niche, so the erased wrapper is currently the same size as the typed core
+    // instead of 8 bytes larger.
+    assert!(
+        std::mem::size_of::<Tensor>()
+            <= std::mem::size_of::<tenferro_tensor::TypedTensor<f64>>() + 8,
+        "the single payload adds at most the discriminant to the typed core"
     );
     assert_eq!(std::mem::align_of::<Tensor>(), 8);
     assert_eq!(

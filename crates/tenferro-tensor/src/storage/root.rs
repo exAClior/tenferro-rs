@@ -124,8 +124,10 @@ pub unsafe trait BackendAllocation: std::fmt::Debug + Send + Sync + 'static {
 }
 
 /// One non-`Clone` root-bound span authority.
+///
+/// The span already carries the root provenance, so the claim does not repeat
+/// the identity (#1823 C).
 pub(crate) struct OwnedSpanClaim {
-    root: RootResourceIdentity,
     span: RootBoundSpan,
 }
 
@@ -886,10 +888,7 @@ pub(crate) fn import_unique_root(
     let span = identity.root_span();
     Ok(OwnedStorage {
         pin: RootResourcePin::Backend(allocation),
-        claim: OwnedSpanClaim {
-            root: identity,
-            span,
-        },
+        claim: OwnedSpanClaim { span },
     })
 }
 
@@ -1021,10 +1020,7 @@ pub(crate) fn import_host_vec<T: TensorScalar>(
     let span = identity.root_span();
     Ok(OwnedStorage {
         pin: T::into_pin(extent, data),
-        claim: OwnedSpanClaim {
-            root: identity,
-            span,
-        },
+        claim: OwnedSpanClaim { span },
     })
 }
 
@@ -1041,8 +1037,8 @@ impl OwnedStorage {
         self.pin
     }
 
-    pub(crate) const fn root_identity(&self) -> RootResourceIdentity {
-        self.claim.root
+    pub(crate) fn root_identity(&self) -> RootResourceIdentity {
+        RootResourceIdentity::from_parts(self.claim.span.root_resource(), self.pin.root_extent())
     }
 
     pub(crate) fn provider_kind(&self) -> ProviderKind {
@@ -1108,8 +1104,11 @@ impl OwnedStorage {
 }
 
 impl<'a> StorageRef<'a> {
-    pub(crate) const fn root_identity(&self) -> RootResourceIdentity {
-        self.owner.claim.root
+    pub(crate) fn root_identity(&self) -> RootResourceIdentity {
+        RootResourceIdentity::from_parts(
+            self.owner.claim.span.root_resource(),
+            self.owner.pin.root_extent(),
+        )
     }
 
     pub(crate) const fn span(&self) -> RootBoundSpan {
@@ -1124,7 +1123,7 @@ impl<'a> StorageRef<'a> {
         &self,
         request: DeviceAccessRequest<'_>,
     ) -> Result<Box<dyn PreparedDeviceAccess>, DeviceAccessError> {
-        validate_device_request(self.owner.claim.root, request)?;
+        validate_device_request(self.root_identity(), request)?;
         self.owner.pin.prepare_device_access(request)
     }
 
@@ -1161,8 +1160,11 @@ impl<'a> StorageRef<'a> {
 }
 
 impl<'a> StorageMut<'a> {
-    pub(crate) const fn root_identity(&self) -> RootResourceIdentity {
-        self.owner.claim.root
+    pub(crate) fn root_identity(&self) -> RootResourceIdentity {
+        RootResourceIdentity::from_parts(
+            self.owner.claim.span.root_resource(),
+            self.owner.pin.root_extent(),
+        )
     }
 
     pub(crate) const fn span(&self) -> RootBoundSpan {
@@ -1194,7 +1196,7 @@ impl<'a> StorageMut<'a> {
         &self,
         request: DeviceAccessRequest<'_>,
     ) -> Result<Box<dyn PreparedDeviceAccess>, DeviceAccessError> {
-        validate_device_request(self.owner.claim.root, request)?;
+        validate_device_request(self.root_identity(), request)?;
         self.owner.pin.prepare_device_access(request)
     }
 

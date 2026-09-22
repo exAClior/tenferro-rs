@@ -70,7 +70,8 @@ fn counting_allocation(
 
 #[test]
 fn import_builds_one_checked_owner_and_borrow_capabilities() {
-    let (allocation, drops) = counting_allocation(valid_extent(1));
+    let extent = valid_extent(1);
+    let (allocation, drops) = counting_allocation(extent);
     let mut owner = import_unique_root(allocation).expect("unique root import");
 
     {
@@ -78,13 +79,19 @@ fn import_builds_one_checked_owner_and_borrow_capabilities() {
         assert_eq!(read.span().byte_offset(), 0);
         assert_eq!(read.span().byte_len(), 64);
         assert_eq!(read.span().guaranteed_alignment().get(), 8);
-        assert_eq!(read.root_identity(), read.span().root_identity());
+        // The span carries only the root-resource id (#1823 G); the owning pin
+        // supplies the extent, so verify both halves of the rebuilt identity.
+        let identity = read.root_identity();
+        assert_eq!(identity.extent(), extent);
+        assert_eq!(identity.root_resource(), read.span().root_resource());
     }
 
     {
         let write = owner.as_mut();
         assert_eq!(write.span().byte_len(), 64);
-        assert_eq!(write.root_identity(), write.span().root_identity());
+        let identity = write.root_identity();
+        assert_eq!(identity.extent(), extent);
+        assert_eq!(identity.root_resource(), write.span().root_resource());
     }
 
     drop(owner);

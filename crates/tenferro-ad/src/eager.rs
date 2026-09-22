@@ -1869,6 +1869,23 @@ impl EagerRuntime {
         Ok(backend.with_backend_session(f))
     }
 
+    /// Materialize a host-placement read without entering a backend session.
+    ///
+    /// Returns `None` when this runtime's backend has no session-free host
+    /// materialization path, in which case the caller must enter a session.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`tenferro_runtime::Error::RuntimeState`] if the eager backend
+    /// lock is poisoned, or the backend's typed materialization error.
+    pub(crate) fn to_contiguous_host_read(&self, input: &TensorRead<'_>) -> Result<Option<Tensor>> {
+        let backend = self.lock_backend()?;
+        match backend.to_contiguous_host_read(input) {
+            Some(materialized) => Ok(Some(materialized.map_err(Error::from)?)),
+            None => Ok(None),
+        }
+    }
+
     // Lock ordering: the eager backend owner is locked first; the
     // extension-cache lock is acquired only after it and remains held through
     // the borrowed session callback.
@@ -3280,11 +3297,20 @@ impl EagerTensor {
         requires_grad: bool,
     ) -> Result<Self> {
         let key = eager_val_key();
-        let semantic_tensor = ctx
-            .with_execution_session(|session| {
-                session.to_contiguous_read(TensorRead::from_tensor(&tensor))
-            })?
-            .map_err(Error::from)?;
+        // A host-placement tensor needs no backend session: the CPU backend only
+        // copies the host buffer for it, so entering a session would add
+        // admission, provider exclusion, and session construction without doing
+        // any provider work (#1704). Views and backend-family reads keep the
+        // session path, and device runtimes keep it for every read.
+        let read = TensorRead::from_tensor(&tensor);
+        let semantic_tensor = match ctx.to_contiguous_host_read(&read)? {
+            Some(materialized) => materialized,
+            None => ctx
+                .with_execution_session(|session| {
+                    session.to_contiguous_read(TensorRead::from_tensor(&tensor))
+                })?
+                .map_err(Error::from)?,
+        };
         let semantic_value = Arc::new(RetainedValue::from_tensor(semantic_tensor));
         let semantic_trace = TracedTensor::from_shared_tensor_value_symbolic_shape(semantic_value)?;
         // Deferred materialization: the per-op/leaf global-metadata registry

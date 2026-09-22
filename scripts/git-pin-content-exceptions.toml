@@ -1,0 +1,8 @@
+# Reviewed exceptions for scripts/check-git-pin-content.py.
+#
+# The checker fails closed when a git-pinned dependency's pinned revision does
+# not match the crates.io release that `cargo publish` would resolve. An entry
+# here does not silence that finding: the checker still prints it as a warning
+# on every run, and warns again when an entry becomes stale and should be
+# removed. Each entry therefore needs a tracked issue and a concrete reason so
+# that review sees why the deviation is accepted.

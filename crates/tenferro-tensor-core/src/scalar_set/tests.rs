@@ -1,46 +1,63 @@
 use crate::{DType, DefaultScalars, HostTensor, ScalarSet};
 
 #[test]
+fn the_opaque_value_keeps_the_typed_access_paths() {
+    // The preset variants are not public anymore; the constructor plus the typed
+    // accessors are the supported surface, and the payload stays inline.
+    let mut value = DefaultScalars::from_vec_col_major(vec![2], vec![1.0_f64, 2.0]).unwrap();
+    assert_eq!(value.dtype(), DType::F64);
+    assert_eq!(value.shape(), &[2]);
+    assert_eq!(value.rank(), 1);
+    assert!(!value.is_empty());
+    assert_eq!(value.as_slice::<f64>().unwrap(), &[1.0, 2.0]);
+    assert!(value.as_slice::<f32>().is_err());
+    value.as_mut_slice::<f64>().unwrap()[0] = 3.0;
+    assert_eq!(value.as_view().shape(), &[2]);
+    let (shape, data) = value.into_vec_col_major::<f64>().unwrap();
+    assert_eq!(shape.as_slice(), &[2]);
+    assert_eq!(data, vec![3.0, 2.0]);
+    assert_eq!(core::mem::size_of::<DefaultScalars>(), 104);
+}
+
+#[test]
 fn the_default_set_reports_every_member() {
+    // The preset variants are private, so the members are built through the
+    // public constructor and read back through the tag.
     let values = [
         (
-            DefaultScalars::F32(HostTensor::from_vec_col_major(vec![1], vec![1.0_f32]).unwrap()),
+            DefaultScalars::from_vec_col_major(vec![1], vec![1.0_f32]).unwrap(),
             DType::F32,
         ),
         (
-            DefaultScalars::F64(HostTensor::from_vec_col_major(vec![1], vec![1.0_f64]).unwrap()),
+            DefaultScalars::from_vec_col_major(vec![1], vec![1.0_f64]).unwrap(),
             DType::F64,
         ),
         (
-            DefaultScalars::I32(HostTensor::from_vec_col_major(vec![1], vec![1_i32]).unwrap()),
+            DefaultScalars::from_vec_col_major(vec![1], vec![1_i32]).unwrap(),
             DType::I32,
         ),
         (
-            DefaultScalars::I64(HostTensor::from_vec_col_major(vec![1], vec![1_i64]).unwrap()),
+            DefaultScalars::from_vec_col_major(vec![1], vec![1_i64]).unwrap(),
             DType::I64,
         ),
         (
-            DefaultScalars::Bool(HostTensor::from_vec_col_major(vec![1], vec![true]).unwrap()),
+            DefaultScalars::from_vec_col_major(vec![1], vec![true]).unwrap(),
             DType::Bool,
         ),
         (
-            DefaultScalars::C32(
-                HostTensor::from_vec_col_major(
-                    vec![1],
-                    vec![num_complex::Complex32::new(1.0, 0.0)],
-                )
-                .unwrap(),
-            ),
+            DefaultScalars::from_vec_col_major(
+                vec![1],
+                vec![num_complex::Complex32::new(1.0, 0.0)],
+            )
+            .unwrap(),
             DType::C32,
         ),
         (
-            DefaultScalars::C64(
-                HostTensor::from_vec_col_major(
-                    vec![1],
-                    vec![num_complex::Complex64::new(1.0, 0.0)],
-                )
-                .unwrap(),
-            ),
+            DefaultScalars::from_vec_col_major(
+                vec![1],
+                vec![num_complex::Complex64::new(1.0, 0.0)],
+            )
+            .unwrap(),
             DType::C64,
         ),
     ];

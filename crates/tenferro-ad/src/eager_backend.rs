@@ -14,14 +14,37 @@ use tenferro_runtime::{
 use tenferro_tensor::backend::ElementwiseFusionPlan;
 use tenferro_tensor::{
     BackendCachedDot, BackendRuntimeCache, BackendSession, BackendSessionHost, CompareDir, DType,
-    DotGeneralConfig, ElementwiseReadOp, GatherConfig, PadConfig, Result as TensorResult,
-    ScatterConfig, SliceConfig, Tensor, TensorAnalytic, TensorBackend, TensorBuffer,
-    TensorDeviceTransfer, TensorDot, TensorElementwise, TensorFusion, TensorIndexing, TensorRead,
-    TensorReduction, TensorStructural, TensorValue, TensorWrite,
+    DotGeneralConfig, ElementwiseReadOp, GatherConfig, MemoryKind, PadConfig,
+    Result as TensorResult, ScatterConfig, SliceConfig, Tensor, TensorAnalytic, TensorBackend,
+    TensorBuffer, TensorDeviceTransfer, TensorDot, TensorElementwise, TensorFusion, TensorIndexing,
+    TensorRead, TensorReduction, TensorStructural, TensorValue, TensorWrite,
 };
 
 #[doc(hidden)]
 struct EagerBackendSessionMarker;
+
+/// Copy an owned host read into a fresh compact host tensor, or `None` when the
+/// CPU backend's host clone would refuse it.
+///
+/// This mirrors `tenferro-cpu`'s `clone_host_tensor_read` acceptance: host
+/// placement and a preset scalar. Everything else — a view read, a
+/// backend-family buffer, a device or managed placement, a caller-owned external
+/// scalar — keeps the session path, where that backend reports its own typed
+/// error. `host_leaf_materialization_matches_the_cpu_backend` pins the two
+/// against each other, including the decline cases.
+fn cpu_host_owned_read(input: &TensorRead<'_>) -> Option<TensorResult<Tensor>> {
+    if !matches!(input, TensorRead::Tensor(_))
+        || input.backend_family().is_some()
+        || !matches!(
+            input.placement().memory_kind,
+            MemoryKind::PinnedHost | MemoryKind::UnpinnedHost
+        )
+        || matches!(input.dtype(), DType::External(_))
+    {
+        return None;
+    }
+    Some(input.clone().tensor_view().duplicate())
+}
 
 pub(crate) enum EagerBackend {
     Cpu(CpuBackend),
@@ -77,8 +100,50 @@ impl EagerBackend {
     pub(crate) fn recording_cpu(materializations: Arc<AtomicUsize>) -> Self {
         Self::Recording(RecordingBackend {
             materializations,
+            sessions: Arc::new(AtomicUsize::new(0)),
             inner: CpuBackend::new(),
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn recording_cpu_counting_sessions(
+        materializations: Arc<AtomicUsize>,
+        sessions: Arc<AtomicUsize>,
+    ) -> Self {
+        Self::Recording(RecordingBackend {
+            materializations,
+            sessions,
+            inner: CpuBackend::new(),
+        })
+    }
+
+    /// Materialize a host-placement read without entering a backend session.
+    ///
+    /// The CPU backend performs no provider work for an owned host tensor: its
+    /// `to_contiguous_read` only copies the host buffer, so a session would add
+    /// admission, provider exclusion, and session construction for nothing
+    /// (#1704). This helper states the CPU acceptance rule in the eager layer —
+    /// a host placement and a preset scalar — and copies through the tensor
+    /// layer's own view copy, so the bytes come from the same code path the CPU
+    /// backend uses. The recording backend shares it because it wraps a CPU
+    /// backend.
+    ///
+    /// The device backends return `None` on purpose: their placement errors and
+    /// no-implicit-transfer policy stay unchanged, so a host tensor handed to a
+    /// device runtime is still rejected inside that backend's session.
+    pub(crate) fn to_contiguous_host_read(
+        &self,
+        input: &TensorRead<'_>,
+    ) -> Option<TensorResult<Tensor>> {
+        match self {
+            Self::Cpu(_) => cpu_host_owned_read(input),
+            #[cfg(test)]
+            Self::Recording(_) => cpu_host_owned_read(input),
+            #[cfg(feature = "cuda")]
+            Self::Cuda(_) => None,
+            #[cfg(feature = "webgpu")]
+            Self::WebGpu(_) => None,
+        }
     }
 
     #[cfg(test)]
@@ -206,6 +271,9 @@ struct RecordingBackendSessionMarker;
 #[derive(Debug)]
 pub struct RecordingBackend {
     materializations: Arc<AtomicUsize>,
+    /// Backend-session entries, so a test can prove an operation stayed
+    /// session-free rather than inferring it from timing.
+    sessions: Arc<AtomicUsize>,
     inner: CpuBackend,
 }
 
@@ -363,6 +431,7 @@ impl BackendSessionHost for RecordingBackend {
         &mut self,
         f: impl FnOnce(&mut dyn BackendSession) -> R + Send,
     ) -> R {
+        self.sessions.fetch_add(1, Ordering::Relaxed);
         f(self)
     }
 }
