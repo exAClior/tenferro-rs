@@ -162,6 +162,7 @@ const JAX_COMPATIBLE_GESVDJ_MAX_DIM: usize = 1024;
 enum CusolverSvdRoutine {
     Gesvdj,
     Gesvd,
+    Xgesvdp,
 }
 
 /// `Auto` follows the JAX-compatible size policy; an explicit driver wins.
@@ -169,6 +170,7 @@ fn select_svd_driver(driver: SvdDriver, m: usize, n: usize) -> CusolverSvdRoutin
     match driver {
         SvdDriver::Gesvdj => CusolverSvdRoutine::Gesvdj,
         SvdDriver::Gesvd => CusolverSvdRoutine::Gesvd,
+        SvdDriver::Xgesvdp => CusolverSvdRoutine::Xgesvdp,
         SvdDriver::Auto => {
             if m <= JAX_COMPATIBLE_GESVDJ_MAX_DIM && n <= JAX_COMPATIBLE_GESVDJ_MAX_DIM {
                 CusolverSvdRoutine::Gesvdj
@@ -2096,6 +2098,11 @@ where
     let s_stride = k;
 
     match select_svd_driver(driver, m, n) {
+        CusolverSvdRoutine::Xgesvdp => {
+            let (u, s, v) = svd_polar::svd_polar_typed(backend, input, full, true, op)?;
+            let vt = T::copy_matrix_adjoint(backend, &v, &vt_shape, op)?;
+            Ok((u, s, vt))
+        }
         CusolverSvdRoutine::Gesvdj => {
             let mut v_shape = vec![n, vt_rows];
             v_shape.extend_from_slice(batch_shape);
@@ -2557,6 +2564,10 @@ where
     let s_stride = k;
 
     match select_svd_driver(driver, m, n) {
+        CusolverSvdRoutine::Xgesvdp => {
+            let (_, s, _) = svd_polar::svd_polar_typed(backend, input, false, false, OP)?;
+            Ok(s)
+        }
         CusolverSvdRoutine::Gesvdj => {
             let mut u_shape = vec![m, k];
             u_shape.extend_from_slice(batch_shape);
@@ -2871,6 +2882,7 @@ where
 
 mod householder_qr;
 mod rank_revealing_qr;
+mod svd_polar;
 #[cfg(test)]
 mod tests;
 use householder_qr::*;

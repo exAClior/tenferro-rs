@@ -13,6 +13,9 @@ use tenferro_linalg::{
 };
 use tenferro_tensor::{BackendSessionHost, DType, Error, Tensor, TensorRead, TypedTensor};
 
+#[path = "gpu_linalg/xgesvdp.rs"]
+mod xgesvdp;
+
 fn cpu_backend() -> CpuBackend {
     CpuBackend::new()
 }

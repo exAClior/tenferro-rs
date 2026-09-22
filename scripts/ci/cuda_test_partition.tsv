@@ -950,6 +950,7 @@ host	tenferro-linalg	gpu::linalg::tests::auto_driver_keeps_jax_compatible_thresh
 host	tenferro-linalg	gpu::linalg::tests::eigh_auto_driver_keeps_the_pre_driver_routine
 host	tenferro-linalg	gpu::linalg::tests::eigh_jacobi_driver_takes_the_batched_entry_point_only_where_cusolver_allows_it
 host	tenferro-linalg	gpu::linalg::tests::explicit_driver_overrides_dimension_policy
+gpu	tenferro-linalg	gpu::linalg::tests::xgesvdp::test_cubecl_svd_xgesvdp_full_and_economy
 host	tenferro-linalg	traced::tests::p_norm_rejects_zero_and_non_finite_orders
 host	tenferro-linalg::integration	backend_errors::cholesky_rejects_rank_less_than_two_even_when_zero_dim
 host	tenferro-linalg::integration	backend_errors::cpu_linalg_rejects_backend_buffers_without_panicking_or_downloading
@@ -1076,6 +1077,9 @@ gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_svd_gesvd_tall_f64_reta
 gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_svd_gesvd_wide_c64_preserves_adjoint_mapping
 gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_svd_gesvd_wide_f64_reconstructs_and_matches_values
 gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_svd_values_f64_matches_cpu
+gpu	tenferro-linalg::integration	gpu_linalg::xgesvdp::test_cubecl_svd_xgesvdp_large_spectrum_agrees_with_gesvd
+gpu	tenferro-linalg::integration	gpu_linalg::xgesvdp::test_cubecl_svd_xgesvdp_rectangular_batched_and_values
+gpu	tenferro-linalg::integration	gpu_linalg::xgesvdp::test_cubecl_svd_xgesvdp_traced_and_pruned
 gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_triangular_solve_batched_f64_matches_cpu
 gpu	tenferro-linalg::integration	gpu_linalg::test_cubecl_triangular_solve_c32_reconstructs_rhs
 gpu	tenferro-linalg::integration	gpu_linalg::test_cuda_compact_householder_qr_append_and_from_factors_f64

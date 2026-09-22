@@ -573,6 +573,18 @@ materializes the public `vt` output by copying V to V^H on the device. The
 singular-values-only path still passes scratch U/V buffers to `gesvdj` because
 cuSOLVER rejects null U/V pointers on that path.
 
+`SvdDriver::Xgesvdp` is an explicit-only polar-decomposition alternative; it
+does not change `Auto`. Its 64-bit cuSOLVER call uses matching real singular
+values and separate device/host byte workspaces. Both matrix orientations are
+supported directly. Like `gesvdj`, it returns V and needs an on-device adjoint
+for the public Vᴴ result. Values-only execution selects `NoVector`, not a full
+decomposition. Host workspace and `h_err_sigma` storage remain live through a
+completion barrier, including vendor-error paths. The perturbation diagnostic
+is discarded: near-singular inputs may have shifted small singular values, as
+documented on the public variant. The existing `svd_full` API has no driver
+option and continues to use `Auto`; full Xgesvdp factors are covered internally
+without extending that public API.
+
 CUDA eigh takes the same driver shape, with a different default rule.
 `EighOptions::driver` at `EighDriver::Auto` uses cuSOLVER divide-and-conquer
 `syevd`/`heevd` at every size and batch count, which is the behavior that

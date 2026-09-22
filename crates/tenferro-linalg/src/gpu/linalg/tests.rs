@@ -4,6 +4,8 @@ use super::{
 };
 use crate::extension::{EighDriver, SvdDriver};
 
+mod xgesvdp;
+
 #[test]
 fn auto_driver_keeps_jax_compatible_threshold() {
     let max = JAX_COMPATIBLE_GESVDJ_MAX_DIM;
@@ -26,6 +28,16 @@ fn auto_driver_keeps_jax_compatible_threshold() {
 #[test]
 fn explicit_driver_overrides_dimension_policy() {
     let max = JAX_COMPATIBLE_GESVDJ_MAX_DIM;
+    for (m, n) in [(64, 64), (max, max), (max + 1, 4), (4, max + 1)] {
+        assert_eq!(
+            select_svd_driver(SvdDriver::Xgesvdp, m, n),
+            CusolverSvdRoutine::Xgesvdp
+        );
+        assert_ne!(
+            select_svd_driver(SvdDriver::Auto, m, n),
+            CusolverSvdRoutine::Xgesvdp
+        );
+    }
     // Below the threshold Auto would pick gesvdj; Gesvd must still win.
     assert_eq!(
         select_svd_driver(SvdDriver::Gesvd, 64, 64),
