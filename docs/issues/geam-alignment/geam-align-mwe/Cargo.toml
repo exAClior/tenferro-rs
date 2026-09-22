@@ -1,0 +1,11 @@
+[package]
+name = "geam-align-mwe"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cudarc = { version = "0.19", default-features = false, features = ["driver", "cublas", "dynamic-loading", "cuda-12080"] }
+num-complex = "0.4"
+
+[profile.release]
+debug = 1
