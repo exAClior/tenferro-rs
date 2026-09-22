@@ -1,6 +1,15 @@
-use super::super::*;
-use tenferro_gpu::cuda::{upload_tensor, with_cuda_exec_session, CudaBackend, CudaDeviceId};
-use tenferro_tensor::BackendSessionHost;
+// Import the parent's items by name rather than with a glob. The glob would
+// also pull in `cubecl::prelude::ComplexCore`, whose default `conj(self)`
+// body is `unexpanded!()`; because it takes the receiver by value it wins
+// method resolution over `num_complex`'s inherent `conj(&self)`, and the
+// host-side checks below then panic with "Unexpanded Cube functions should
+// not be called" instead of computing a conjugate.
+use super::super::{svd_typed, SvdDriver};
+use num_complex::Complex64;
+use tenferro_gpu::cuda::{
+    download_tensor, upload_tensor, with_cuda_exec_session, CudaBackend, CudaDeviceId,
+};
+use tenferro_tensor::{BackendSessionHost, Tensor};
 
 #[test]
 #[ignore = "requires CUDA; full factors have no public driver option"]
