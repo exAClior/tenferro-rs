@@ -278,18 +278,27 @@ allocator arena usage.
 
 CUDA `dot_general` stores cuTENSOR contraction descriptors, plans, and lazy
 per-physical-stream device workspaces inside this backend-owned extension
-cache. A workspace is locked through enqueue, and eviction retires its owning
-stream before releasing the workspace, plan, or descriptors. The cuTENSOR plan key is
+cache. All contraction plans share one workspace per physical stream slot.
+The cache mutex serializes host enqueues; stream ordering prevents overlapping
+use of a slot's scratch allocation. Plan eviction retains shared scratch;
+growth and cache teardown use event-based workspace retirement from
+[the retirement design](gpu-workspace-retirement.md). The cuTENSOR plan key is
 structural: dtype, extents, strides, modes, conjugation flags, descriptor
 alignment requirements, and workspace preference. It must not include
 allocation addresses or actual pointer-specific alignment. Whole-allocation
 operands keep the CUDA allocation alignment requirement; borrowed views use a
 conservative dtype-size descriptor alignment requirement so the cached plan
 remains valid across different view offsets without using pointer-specific
-alignment. Lazily allocated device workspace bytes are included in the logical
-retained-byte estimate and are released by normal extension-cache eviction or
-`CudaBackend::clear_cuda_extension_cache`. The overall extension cache stats
-report the retained typed cache entry. Use
+alignment. Shared scratch bytes are excluded from the plan and extension-cache
+byte budgets: counting a single large scratch allocation there would evict the
+entire plan cache. These stats therefore do not bound total device memory.
+Nonzero requests round up to a power of two with a 1 MiB floor; zero requests
+allocate nothing. Each active slot retains its high-water capacity until
+normal extension-cache eviction, `CudaBackend::clear_cuda_extension_cache`,
+or backend teardown. Deferred old allocations may temporarily overlap a grown
+allocation. There is no separate scratch cap or public scratch-byte statistic
+in this prototype; those remain a policy decision before upstream adoption.
+The overall extension cache stats report the retained typed cache entry. Use
 `CudaBackend::cutensor_plan_cache_stats`,
 `CudaBackend::cutensor_plan_cache_max_entries`, and
 `CudaBackend::set_cutensor_plan_cache_max_entries` for cuTENSOR plan-entry

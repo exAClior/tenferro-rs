@@ -34,7 +34,37 @@ const OP: &str = "dot_general";
 const CUDA_ALLOCATION_ALIGNMENT: u32 = 256;
 const DEFAULT_CUTENSOR_PLAN_CACHE_MAX_ENTRIES: usize = 64;
 type CutensorContractionPlanCache = LruPlanCache<CutensorContractionKey, CachedCutensorContraction>;
-type CutensorPlanCacheState = Arc<Mutex<CutensorContractionPlanCache>>;
+type CutensorPlanCacheState = Arc<Mutex<CutensorContractionCacheState>>;
+
+/// Ported from rydbergsim-benchmark's
+/// `tenferro-a096f280-shared-cutensor-workspace.diff`.
+/// Plans share one lazily grown workspace per physical stream slot.
+struct CutensorContractionCacheState {
+    // INVARIANT: retire workspace handles before destroying plans at teardown.
+    // Individual plan eviction does not release the shared device allocation.
+    workspaces: Box<[Mutex<Option<Workspace>>]>,
+    plans: CutensorContractionPlanCache,
+}
+
+impl CutensorContractionCacheState {
+    fn new(max_entries: NonZeroUsize, stream_slots: usize) -> Self {
+        Self {
+            plans: CutensorContractionPlanCache::new(max_entries),
+            workspaces: (0..stream_slots).map(|_| Mutex::new(None)).collect(),
+        }
+    }
+
+    /// Bytes of the shared workspaces currently allocated (all stream slots).
+    #[cfg(test)]
+    fn workspace_bytes(&self) -> crate::Result<u64> {
+        self.workspaces.iter().try_fold(0_u64, |total, slot| {
+            let workspace = slot
+                .lock()
+                .map_err(|_| Error::runtime_state(OP, "cuTENSOR workspace lock poisoned"))?;
+            Ok(total.saturating_add(workspace.as_ref().map_or(0, |workspace| workspace.size)))
+        })
+    }
+}
 
 trait CutensorScalar: CubeElement + TensorScalar + CubePrimitive + Clone + One + Zero {
     const DATA_TYPE: CudaDataType;
@@ -355,11 +385,8 @@ struct CutensorContractionSpec<'a> {
 }
 
 struct CachedCutensorContraction {
-    // INVARIANT: Rust drops fields in declaration order. Workspaces retire
-    // their owning streams before the plan and descriptors used by queued
-    // contractions are destroyed. Each slot has one workspace and one lock,
-    // so teardown cannot synchronize the same allocation twice.
-    workspaces: Box<[Mutex<Option<Workspace>>]>,
+    // Workspaces are shared per stream slot in `CutensorContractionCacheState`
+    // (rydbergsim-benchmark); a cached plan only records how much it needs.
     workspace_size: u64,
     // Drop the cuTENSOR plan before the descriptor objects it was built from.
     plan: Plan,
@@ -376,11 +403,7 @@ struct CachedCutensorContraction {
 unsafe impl Send for CachedCutensorContraction {}
 
 impl CachedCutensorContraction {
-    fn new<T>(
-        rt: &CudaRuntime,
-        cutensor: &CutensorHandle,
-        spec: &CutensorContractionSpec<'_>,
-    ) -> crate::Result<Self>
+    fn new<T>(cutensor: &CutensorHandle, spec: &CutensorContractionSpec<'_>) -> crate::Result<Self>
     where
         T: CutensorScalar,
     {
@@ -428,9 +451,6 @@ impl CachedCutensorContraction {
             cutensor.estimate_workspace_size(&op_desc, &pref, spec.workspace_preference, OP)?;
         let plan = Plan::new(cutensor, &op_desc, &pref, workspace_size, OP)?;
         Ok(Self {
-            workspaces: (0..rt.stream_slot_count())
-                .map(|_| Mutex::new(None))
-                .collect(),
             workspace_size,
             plan,
             _plan_preference: pref,
@@ -442,21 +462,7 @@ impl CachedCutensorContraction {
     }
 
     fn retained_bytes(&self) -> usize {
-        std::mem::size_of::<Self>().saturating_add(
-            self.workspaces
-                .len()
-                .saturating_mul(std::mem::size_of::<Mutex<Option<Workspace>>>()),
-        )
-    }
-
-    #[cfg(test)]
-    fn workspace_bytes(&self) -> crate::Result<u64> {
-        self.workspaces.iter().try_fold(0_u64, |total, slot| {
-            let workspace = slot
-                .lock()
-                .map_err(|_| Error::runtime_state(OP, "cuTENSOR workspace lock poisoned"))?;
-            Ok(total.saturating_add(workspace.as_ref().map_or(0, |workspace| workspace.size)))
-        })
+        std::mem::size_of::<Self>()
     }
 }
 
@@ -1160,8 +1166,14 @@ fn default_cutensor_plan_cache_max_entries() -> NonZeroUsize {
     NonZeroUsize::new(DEFAULT_CUTENSOR_PLAN_CACHE_MAX_ENTRIES).unwrap_or(NonZeroUsize::MIN)
 }
 
-fn new_cutensor_plan_cache_state(max_entries: NonZeroUsize) -> CutensorPlanCacheState {
-    Arc::new(Mutex::new(CutensorContractionPlanCache::new(max_entries)))
+fn new_cutensor_plan_cache_state(
+    max_entries: NonZeroUsize,
+    stream_slots: usize,
+) -> CutensorPlanCacheState {
+    Arc::new(Mutex::new(CutensorContractionCacheState::new(
+        max_entries,
+        stream_slots,
+    )))
 }
 
 fn get_or_init_cutensor_plan_cache(backend: &CudaBackend) -> crate::Result<CutensorPlanCacheState> {
@@ -1170,6 +1182,7 @@ fn get_or_init_cutensor_plan_cache(backend: &CudaBackend) -> crate::Result<Cuten
         .get_or_try_init::<CutensorPlanCacheState>(|| {
             Ok(new_cutensor_plan_cache_state(
                 default_cutensor_plan_cache_max_entries(),
+                backend.runtime().stream_slot_count(),
             ))
         })?;
     Ok(Arc::clone(&guard))
@@ -1177,7 +1190,7 @@ fn get_or_init_cutensor_plan_cache(backend: &CudaBackend) -> crate::Result<Cuten
 
 fn lock_cutensor_plan_cache(
     cache: &CutensorPlanCacheState,
-) -> crate::Result<std::sync::MutexGuard<'_, CutensorContractionPlanCache>> {
+) -> crate::Result<std::sync::MutexGuard<'_, CutensorContractionCacheState>> {
     cache
         .lock()
         .map_err(|_| Error::runtime_state("cutensor_plan_cache", "plan cache lock poisoned"))
@@ -1191,7 +1204,7 @@ pub(super) fn cutensor_plan_cache_stats(backend: &CudaBackend) -> crate::Result<
         return Ok(CacheStats::empty());
     };
     let plan_cache = lock_cutensor_plan_cache(&plan_cache)?;
-    Ok(plan_cache.stats())
+    Ok(plan_cache.plans.stats())
 }
 
 #[cfg(test)]
@@ -1203,11 +1216,7 @@ pub(super) fn cutensor_plan_cache_workspace_bytes(backend: &CudaBackend) -> crat
         return Ok(0);
     };
     let plan_cache = lock_cutensor_plan_cache(&plan_cache)?;
-    let mut total = 0_u64;
-    for cached in plan_cache.values() {
-        total = total.saturating_add(cached.workspace_bytes()?);
-    }
-    Ok(total)
+    plan_cache.workspace_bytes()
 }
 
 /// Deferred workspace retirement counters for tests and diagnostics.
@@ -1237,7 +1246,7 @@ pub(super) fn cutensor_plan_cache_max_entries(
         return Ok(default_cutensor_plan_cache_max_entries());
     };
     let plan_cache = lock_cutensor_plan_cache(&plan_cache)?;
-    Ok(plan_cache.max_entries())
+    Ok(plan_cache.plans.max_entries())
 }
 
 pub(super) fn set_cutensor_plan_cache_max_entries(
@@ -1246,8 +1255,8 @@ pub(super) fn set_cutensor_plan_cache_max_entries(
 ) -> crate::Result<()> {
     let plan_cache = get_or_init_cutensor_plan_cache(backend)?;
     let mut plan_cache = lock_cutensor_plan_cache(&plan_cache)?;
-    plan_cache.set_max_entries(max_entries);
-    let retained_bytes = plan_cache.retained_bytes();
+    plan_cache.plans.set_max_entries(max_entries);
+    let retained_bytes = plan_cache.plans.retained_bytes();
     backend
         .cuda_extension_cache()
         .update_retained_bytes::<CutensorPlanCacheState>(retained_bytes)
@@ -1266,11 +1275,11 @@ where
     let hash = spec_hash::<T>(spec);
     let plan_cache = get_or_init_cutensor_plan_cache(backend)?;
     let mut plan_cache = lock_cutensor_plan_cache(&plan_cache)?;
-    let entries_changed = plan_cache.ensure(
+    let entries_changed = plan_cache.plans.ensure(
         hash,
         |key| key_matches_spec::<T>(key, spec),
         || {
-            let cached = CachedCutensorContraction::new::<T>(backend.runtime(), cutensor, spec)?;
+            let cached = CachedCutensorContraction::new::<T>(cutensor, spec)?;
             let key = CutensorContractionKey::from_spec::<T>(spec);
             let retained_bytes = key.retained_bytes().saturating_add(cached.retained_bytes());
             Ok((key, cached, retained_bytes))
@@ -1278,57 +1287,67 @@ where
     )?;
     if entries_changed {
         // Retained bytes only move on insert/evict, so cache hits skip the
-        // extension-cache accounting write entirely.
-        let retained_bytes = plan_cache.retained_bytes();
+        // extension-cache accounting write entirely. The shared workspaces
+        // are deliberately outside this budget: they are one buffer per
+        // stream slot, grown geometrically to fit the largest request, and
+        // counting them here would re-create the whole-cache eviction that
+        // this build exists to avoid.
+        let retained_bytes = plan_cache.plans.retained_bytes();
         backend
             .cuda_extension_cache()
             .update_retained_bytes::<CutensorPlanCacheState>(retained_bytes)?;
     }
-    let (result, added_workspace_bytes) = {
-        let cached = plan_cache
-            .get(hash, |key| key_matches_spec::<T>(key, spec))
-            .ok_or_else(|| {
-                Error::runtime_state(
-                    "cutensor_plan_cache",
-                    "cached cuTENSOR contraction was evicted before use",
-                )
-            })?;
-        let mut workspace = cached.workspaces[backend.runtime().stream_slot()]
-            .lock()
-            .map_err(|_| Error::runtime_state(OP, "cuTENSOR workspace lock poisoned"))?;
-        let added_workspace_bytes = if workspace.is_none() {
-            *workspace = Some(alloc_workspace(backend.runtime(), cached.workspace_size)?);
-            usize::try_from(cached.workspace_size).unwrap_or(usize::MAX)
-        } else {
-            0
-        };
-        let workspace = workspace
-            .as_ref()
-            .ok_or_else(|| Error::runtime_state(OP, "cuTENSOR workspace is unavailable"))?;
-        let execute_result = execute(cutensor, &cached.plan, workspace);
-        let result =
-            backend
-                .runtime()
-                .finish_vendor_enqueue(OP, cross_stream_handles, execute_result);
-        (result, added_workspace_bytes)
-    };
-    if added_workspace_bytes != 0 {
-        if !plan_cache.add_retained_bytes(
-            hash,
-            |key| key_matches_spec::<T>(key, spec),
-            added_workspace_bytes,
-        ) {
-            return Err(Error::runtime_state(
+    let state = &mut *plan_cache;
+    let cached = state
+        .plans
+        .get(hash, |key| key_matches_spec::<T>(key, spec))
+        .ok_or_else(|| {
+            Error::runtime_state(
                 "cutensor_plan_cache",
-                "cached cuTENSOR contraction disappeared during accounting",
-            ));
-        }
-        backend
-            .cuda_extension_cache()
-            .update_retained_bytes::<CutensorPlanCacheState>(plan_cache.retained_bytes())?;
+                "cached cuTENSOR contraction was evicted before use",
+            )
+        })?;
+    let mut workspace = state.workspaces[backend.runtime().stream_slot()]
+        .lock()
+        .map_err(|_| Error::runtime_state(OP, "cuTENSOR workspace lock poisoned"))?;
+    if workspace
+        .as_ref()
+        .is_none_or(|workspace| workspace.size < cached.workspace_size)
+    {
+        // Preserve event-based retirement: the old allocation cannot return
+        // to the pool while queued work still uses it. Growth can temporarily
+        // retain both allocations; it does not force a stream barrier.
+        let capacity = shared_workspace_capacity(cached.workspace_size)?;
+        *workspace = None;
+        *workspace = Some(alloc_workspace(backend.runtime(), capacity)?);
     }
-    result
+    let workspace = workspace
+        .as_ref()
+        .ok_or_else(|| Error::runtime_state(OP, "cuTENSOR workspace is unavailable"))?;
+    // INVARIANT: the cache mutex serializes host enqueues, and all uses of a
+    // slot's scratch buffer execute in order on the same physical CUDA stream.
+    let execute_result = execute(cutensor, &cached.plan, workspace);
+    backend
+        .runtime()
+        .finish_vendor_enqueue(OP, cross_stream_handles, execute_result)
 }
+
+/// Zero requests allocate nothing; nonzero requests grow geometrically with
+/// a 1 MiB floor. Reject overflow before replacing an existing allocation.
+fn shared_workspace_capacity(requested: u64) -> crate::Result<u64> {
+    const MIN_CAPACITY: u64 = 1 << 20;
+    if requested == 0 {
+        return Ok(0);
+    }
+    requested
+        .max(MIN_CAPACITY)
+        .checked_next_power_of_two()
+        .ok_or_else(|| workspace_size_overflow(OP, requested))
+}
+
+#[cfg(test)]
+#[path = "tests/shared_workspace_tests.rs"]
+mod shared_workspace_tests;
 
 fn validate_descriptor_alignment(
     actual_alignment: u32,

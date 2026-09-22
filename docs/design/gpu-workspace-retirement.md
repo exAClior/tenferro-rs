@@ -3,6 +3,13 @@
 Status: implemented on `perf/cutensor-workspace-retirement`
 (`WorkspaceRetirementQueue` in `crates/tenferro-gpu/src/cubecl/workspace_retirement.rs`).
 
+The shared-workspace prototype keeps this retirement mechanism but changes
+its trigger: individual contraction-plan eviction no longer drops scratch.
+Scratch growth, whole-cache eviction, clear, and teardown still retire the
+allocation. The historical measurements below describe the pre-sharing design,
+not measurements of the prototype. Shared scratch is excluded from cache byte
+accounting; see [current ownership and tradeoffs](gpu-backend-design.md).
+
 ## Problem
 
 `gpu/tensornetwork` trace-mode execution spends 54% of each call with the

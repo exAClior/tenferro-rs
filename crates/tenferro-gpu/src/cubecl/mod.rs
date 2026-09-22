@@ -923,7 +923,10 @@ impl CudaBackend {
     ///
     /// The returned entry count is the number of retained cuTENSOR contraction
     /// plans inside the CUDA backend's extension cache entry. Logical retained
-    /// bytes include cached cuTENSOR device workspace estimates.
+    /// bytes cover plan metadata, not the shared per-stream device scratch.
+    /// Scratch grows to a power of two (1 MiB floor for nonzero requests) and
+    /// remains until the extension cache entry is evicted or cleared. Thus the
+    /// cache byte limit is not a total device-memory limit.
     /// # Errors
     ///
     /// Returns [`crate::Error::RuntimeState`] if the cache mutex is poisoned.

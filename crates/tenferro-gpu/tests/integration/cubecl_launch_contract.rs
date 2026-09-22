@@ -1621,7 +1621,7 @@ fn cutensor_contractions_use_structural_plan_cache_without_pointer_alignment_key
     );
     assert!(
         source.contains("update_retained_bytes::<"),
-        "cached cuTENSOR workspace bytes should be reported through the runtime-owned cache"
+        "cuTENSOR plan metadata bytes should be reported through the runtime-owned cache"
     );
     assert!(
         source.contains("pub(super) fn cutensor_plan_cache_stats")
@@ -1629,8 +1629,10 @@ fn cutensor_contractions_use_structural_plan_cache_without_pointer_alignment_key
         "cuTENSOR plan cache should expose owner-routed stats and bound configuration"
     );
     assert!(
-        source.contains("workspace.size"),
-        "cuTENSOR retained-byte accounting should include cached device workspace bytes"
+        source.contains("struct CutensorContractionCacheState")
+            && source.contains("state.workspaces[backend.runtime().stream_slot()]")
+            && !source.contains("cached.workspaces"),
+        "cuTENSOR scratch should be shared per physical stream slot, not owned by each plan"
     );
 }
 

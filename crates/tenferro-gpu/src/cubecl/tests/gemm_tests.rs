@@ -63,11 +63,56 @@ fn cuda_cutensor_cache_eviction_keeps_inflight_workspace_valid() {
         "second contraction must evict the first plan"
     );
 
-    // Eviction retires the workspace's owning stream before releasing its
-    // CubeCL allocation handle, so the first queued launch remains valid.
+    // Eviction keeps shared scratch alive; same-stream execution orders reuse
+    // after the first launch without requiring a barrier at each eviction.
     gpu.runtime().synchronize().unwrap();
     assert_tensor_close(&download(&gpu, &actual_a), &expected_a, 1e-4);
     assert_tensor_close(&download(&gpu, &actual_b), &expected_b, 1e-4);
+}
+
+#[test]
+#[ignore = "requires CUDA 12.8+ GPU"]
+fn cuda_cutensor_shared_workspace_does_not_evict_plan_cache_by_bytes() {
+    let mut cpu = cpu_backend();
+    let mut gpu = gpu_backend();
+    gpu.set_cutensor_plan_cache_max_entries(NonZeroUsize::new(2).unwrap())
+        .unwrap();
+    // Enough for two plans, but less than the 1 MiB shared-workspace floor.
+    gpu.set_cuda_extension_cache_max_retained_bytes(NonZeroUsize::new(64 * 1024).unwrap())
+        .unwrap();
+    let mut results = Vec::new();
+    for rows in [64, 65, 64] {
+        let lhs = tensor_f64(
+            vec![rows, 64],
+            (0..rows * 64)
+                .map(|i| (i % 13) as f64 * 0.1 - 0.7)
+                .collect(),
+        );
+        let rhs = tensor_f64(
+            vec![64, 63],
+            (0..64 * 63).map(|i| (i % 7) as f64 * 0.2 - 0.3).collect(),
+        );
+        let expected = cpu.dot_general(&lhs, &rhs, &matmul_config()).unwrap();
+        let lhs_gpu = upload(&gpu, &lhs);
+        let rhs_gpu = upload(&gpu, &rhs);
+        let actual = gpu
+            .dot_general(&lhs_gpu, &rhs_gpu, &matmul_config())
+            .unwrap();
+        results.push((actual, expected));
+    }
+    let stats = gpu.cutensor_plan_cache_stats().unwrap();
+    assert_eq!(
+        (stats.entries, stats.misses, stats.hits, stats.evictions),
+        (2, 2, 1, 0)
+    );
+    assert_eq!(gpu.cutensor_plan_cache_max_entries().unwrap().get(), 2);
+    assert!(cutensor_plan_cache_workspace_bytes(&gpu).unwrap() >= 1 << 20);
+    assert!(gpu.cuda_extension_cache_stats().unwrap().retained_bytes < 64 * 1024);
+    gpu.clear_cuda_extension_cache().unwrap();
+    assert_eq!(cutensor_plan_cache_workspace_bytes(&gpu).unwrap(), 0);
+    for (actual, expected) in results {
+        assert_tensor_close(&download(&gpu, &actual), &expected, 1e-9);
+    }
 }
 
 fn matmul_config() -> DotGeneralConfig {
